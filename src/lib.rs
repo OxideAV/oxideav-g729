@@ -29,6 +29,8 @@
     clippy::doc_overindented_list_items
 )]
 
+pub mod annex_b_cng;
+pub mod annex_b_vad;
 pub mod bitreader;
 pub mod codec;
 pub mod decoder;
@@ -40,6 +42,19 @@ pub mod synthesis;
 use oxideav_codec::CodecRegistry;
 
 pub const CODEC_ID_STR: &str = "g729";
+
+/// Extradata flag byte that enables Annex B (VAD/DTX/CNG) on the
+/// encoder. Place this byte in [`oxideav_core::CodecParameters::extradata`]
+/// to opt in to silence compression. Default is off.
+///
+/// Example:
+/// ```ignore
+/// use oxideav_core::{CodecId, CodecParameters};
+/// use oxideav_g729::{CODEC_ID_STR, ANNEX_B_ENABLE_EXTRADATA};
+/// let mut p = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+/// p.extradata = vec![ANNEX_B_ENABLE_EXTRADATA];
+/// ```
+pub const ANNEX_B_ENABLE_EXTRADATA: u8 = 0xB1;
 
 /// Number of samples per G.729 frame (10 ms @ 8 kHz).
 pub const FRAME_SAMPLES: usize = 80;

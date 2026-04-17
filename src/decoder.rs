@@ -27,6 +27,8 @@ use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat, TimeBase,
 };
 
+use crate::annex_b_cng::CngState;
+use crate::annex_b_vad::{EncodedSid, SID_FRAME_BYTES};
 use crate::bitreader::{parse_frame_params, FrameParams};
 use crate::lpc::{decode_lsp, interpolate_lsp, lsp_to_lpc, LpcPredictorState};
 use crate::synthesis::{
@@ -73,6 +75,14 @@ struct G729Decoder {
     codec_id: CodecId,
     lpc_state: LpcPredictorState,
     syn: SynthesisState,
+    /// Annex B comfort-noise generator. Always allocated; only driven when
+    /// an SID frame arrives. Idle state is indistinguishable from a fresh
+    /// uniform-LSP generator with zero target energy.
+    cng: CngState,
+    /// True between SID reception and the next VOICE frame — while true,
+    /// NODATA (0-byte) packets trigger CNG output instead of being
+    /// rejected as invalid.
+    in_cng_mode: bool,
     pending: Option<Packet>,
     eof: bool,
     time_base: TimeBase,
@@ -84,6 +94,8 @@ impl G729Decoder {
             codec_id: CodecId::new(CODEC_ID_STR),
             lpc_state: LpcPredictorState::new(),
             syn: SynthesisState::new(),
+            cng: CngState::new(),
+            in_cng_mode: false,
             pending: None,
             eof: false,
             time_base: TimeBase::new(1, SAMPLE_RATE as i64),
@@ -229,7 +241,43 @@ impl Decoder for G729Decoder {
             };
         };
         let mut samples = [0.0f32; FRAME_SAMPLES];
-        self.decode_frame_into(&pkt.data, &mut samples)?;
+        // Dispatch on packet length:
+        //   10 bytes (FRAME_BYTES)     -> normal CS-ACELP speech frame
+        //   2 bytes  (SID_FRAME_BYTES) -> Annex B SID, feed CNG + emit noise
+        //   0 bytes                    -> Annex B NODATA: keep generating CNG
+        //   any other                  -> error (short packet / malformed)
+        match pkt.data.len() {
+            FRAME_BYTES => {
+                self.in_cng_mode = false;
+                self.decode_frame_into(&pkt.data, &mut samples)?;
+            }
+            SID_FRAME_BYTES => {
+                let sid = EncodedSid::unpack(&pkt.data).ok_or_else(|| {
+                    Error::invalid("G.729 Annex B: malformed SID frame (unpack failed)")
+                })?;
+                self.cng.update_from_sid(&sid, &self.lpc_state.lsp_prev);
+                self.in_cng_mode = true;
+                self.cng.generate(&mut samples);
+            }
+            0 => {
+                // NODATA: only valid while we're in CNG mode (i.e. after
+                // at least one SID). Without it we'd be emitting silent
+                // samples for random zero-length packets.
+                if !self.in_cng_mode {
+                    return Err(Error::invalid(
+                        "G.729 decoder: empty packet but not in Annex B CNG mode",
+                    ));
+                }
+                self.cng.generate(&mut samples);
+            }
+            other => {
+                return Err(Error::invalid(format!(
+                    "G.729 frame: unexpected packet length {other} (want {FRAME_BYTES}, \
+                     {SID_FRAME_BYTES}, or 0)"
+                )));
+            }
+        }
+
         // Convert f32 -> S16 LE.
         let mut bytes = Vec::with_capacity(FRAME_SAMPLES * 2);
         for &s in samples.iter() {
@@ -258,8 +306,11 @@ impl Decoder for G729Decoder {
         // short-term + pitch + tilt memory, AGC gain, gain-log history).
         // These all carry over between frames and would glitch the first
         // ~1-2 frames after a seek if left.
+        // Also reset Annex B CNG state + mode flag.
         self.lpc_state = LpcPredictorState::new();
         self.syn = SynthesisState::new();
+        self.cng = CngState::new();
+        self.in_cng_mode = false;
         self.pending = None;
         self.eof = false;
         Ok(())

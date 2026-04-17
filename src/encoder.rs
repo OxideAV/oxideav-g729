@@ -40,6 +40,7 @@ use oxideav_core::{
     CodecId, CodecParameters, Error, Frame, MediaType, Packet, Result, SampleFormat, TimeBase,
 };
 
+use crate::annex_b_vad::{VadDecision, VadState};
 use crate::bitreader::pitch_parity;
 use crate::lpc::{interpolate_lsp, lsp_to_lpc, LpcPredictorState, MA_HISTORY};
 use crate::lsp_tables::{FG_Q15, FG_SUM_Q15, LSPCB1_Q13, LSPCB2_Q13, MA_NP, M_HALF, NC0, NC1};
@@ -47,8 +48,8 @@ use crate::synthesis::{
     adaptive_codebook_excitation, fixed_codebook_excitation, SynthesisState, EXC_HIST, GBK1, GBK2,
 };
 use crate::{
-    CODEC_ID_STR, FRAME_BYTES, FRAME_SAMPLES, LPC_ORDER, SAMPLE_RATE, SUBFRAMES_PER_FRAME,
-    SUBFRAME_SAMPLES,
+    ANNEX_B_ENABLE_EXTRADATA, CODEC_ID_STR, FRAME_BYTES, FRAME_SAMPLES, LPC_ORDER, SAMPLE_RATE,
+    SUBFRAMES_PER_FRAME, SUBFRAME_SAMPLES,
 };
 
 /// Build a G.729 encoder. Accepts 8 kHz mono S16 input.
@@ -78,6 +79,12 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
         )));
     }
 
+    let annex_b = params
+        .extradata
+        .first()
+        .map(|&b| b == ANNEX_B_ENABLE_EXTRADATA)
+        .unwrap_or(false);
+
     let mut output = params.clone();
     output.media_type = MediaType::Audio;
     output.sample_format = Some(SampleFormat::S16);
@@ -85,7 +92,7 @@ pub fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>> {
     output.sample_rate = Some(SAMPLE_RATE);
     output.bit_rate = Some(8_000);
 
-    Ok(Box::new(G729Encoder::new(output)))
+    Ok(Box::new(G729Encoder::new(output, annex_b)))
 }
 
 struct G729Encoder {
@@ -96,10 +103,15 @@ struct G729Encoder {
     pending: VecDeque<Packet>,
     frame_index: u64,
     eof: bool,
+    /// If true, the encoder applies Annex B VAD/DTX and may emit SID
+    /// (2-byte) or NODATA (0-byte) packets in lieu of a normal 10-byte
+    /// speech frame.
+    annex_b: bool,
+    vad: VadState,
 }
 
 impl G729Encoder {
-    fn new(output_params: CodecParameters) -> Self {
+    fn new(output_params: CodecParameters, annex_b: bool) -> Self {
         Self {
             output_params,
             time_base: TimeBase::new(1, SAMPLE_RATE as i64),
@@ -108,6 +120,8 @@ impl G729Encoder {
             pending: VecDeque::new(),
             frame_index: 0,
             eof: false,
+            annex_b,
+            vad: VadState::new(),
         }
     }
 
@@ -131,8 +145,45 @@ impl G729Encoder {
     fn emit_frame(&mut self, pcm: &[i16; FRAME_SAMPLES]) {
         let idx = self.frame_index;
         self.frame_index += 1;
+
+        // Annex B VAD/DTX path: classify first, then either emit a normal
+        // speech frame, an SID, or nothing. We still run the main-body
+        // analyser in all cases so the encoder's internal LPC / excitation
+        // state stays consistent — keeps the first post-silence frame from
+        // glitching.
         let params = self.state.analyse(pcm);
-        let bytes = pack_frame(&params);
+
+        if self.annex_b {
+            // Use the quantised LSP as the VAD's spectrum input — it's a
+            // stable, compact representation of the frame's shape that the
+            // analyser already produced.
+            let lsp = self.state.lpc.lsp_prev;
+            let (decision, sid) = self.vad.classify(pcm, &lsp);
+            match decision {
+                VadDecision::Voice => {
+                    let bytes = pack_frame(&params);
+                    self.push_packet(idx, bytes);
+                }
+                VadDecision::Noise => {
+                    let sid = sid.expect("VAD::Noise must carry SID payload");
+                    let bytes = sid.pack().to_vec();
+                    self.push_packet(idx, bytes);
+                }
+                VadDecision::Silence => {
+                    // DTX: emit a zero-length packet so downstream
+                    // containers / demuxers see the frame boundary but
+                    // carry no payload. Consumers that require every
+                    // packet to be decodable can filter on len() == 0.
+                    self.push_packet(idx, Vec::new());
+                }
+            }
+        } else {
+            let bytes = pack_frame(&params);
+            self.push_packet(idx, bytes);
+        }
+    }
+
+    fn push_packet(&mut self, idx: u64, bytes: Vec<u8>) {
         let mut pkt = Packet::new(0, self.time_base, bytes);
         pkt.pts = Some(idx as i64 * FRAME_SAMPLES as i64);
         pkt.dts = pkt.pts;
