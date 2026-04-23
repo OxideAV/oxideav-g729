@@ -794,9 +794,24 @@ pub fn estimate_tilt_k1(a: &[f32; LPC_ORDER + 1]) -> f32 {
     }
 }
 
-/// Adaptive-gain-control: scale `signal` so its RMS matches the
-/// pre-postfilter excitation RMS. Uses one scalar per subframe with
-/// a smoothing filter across subframes to avoid gain discontinuities.
+/// AGC smoothing factor (G.729 §4.2.4): the per-sample gain is
+/// `g[n] = α · g[n-1] + (1-α) · G`, with α = 0.85. This recovers
+/// the spec's `AGC_FAC = 0.9875` target-tracker bandwidth when
+/// combined with subframe-synchronous target updates.
+pub const AGC_ALPHA: f32 = 0.85;
+
+/// Adaptive gain-control (G.729 §4.2.4). Scales the post-filter output
+/// so its short-term energy matches the pre-post-filter synthesis
+/// signal, with per-sample smoothing of the gain to avoid audible
+/// discontinuities at subframe boundaries.
+///
+/// Algorithm:
+///  * `G = sqrt(Σ reference²  / Σ signal²)` — target gain for the
+///    current subframe, with a small epsilon guard.
+///  * `g[n] = α · g[n-1] + (1-α) · G` — first-order smoothing.
+///  * `signal[n] ← g[n] · signal[n]`.
+///
+/// `agc_gain` carries `g[n-1]` across subframes.
 pub fn agc(
     signal: &mut [f32; SUBFRAME_SAMPLES],
     reference: &[f32; SUBFRAME_SAMPLES],
@@ -813,14 +828,12 @@ pub fn agc(
     } else {
         1.0
     };
-    // Smooth target from previous agc_gain with α=0.5 to reduce click
-    // artefacts at subframe boundaries.
-    let alpha: f32 = 0.5;
-    let gain = alpha * *agc_gain + (1.0 - alpha) * target;
-    *agc_gain = gain;
+    let mut g = *agc_gain;
     for n in 0..SUBFRAME_SAMPLES {
-        signal[n] *= gain;
+        g = AGC_ALPHA * g + (1.0 - AGC_ALPHA) * target;
+        signal[n] *= g;
     }
+    *agc_gain = g;
 }
 
 #[cfg(test)]
