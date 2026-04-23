@@ -379,26 +379,53 @@ pub fn decode_gain_indices(ga: u8, gb: u8) -> (f32, f32) {
     (g_p, gamma)
 }
 
+/// MA-4 predictor coefficients for fixed-codebook gain (G.729 §3.9.2).
+/// Taps `b[k]` for k = 0..3 (most-recent first), quantised from the
+/// reference Q13 table {5571, 4751, 2785, 1556} → {0.68, 0.58, 0.34, 0.19}.
+/// Used as a weighted average of past innovation log-energies.
+pub const MA_GAIN_PRED: [f32; 4] = [0.68, 0.58, 0.34, 0.19];
+
+/// Mean codebook energy offset (dB) used by the G.729 gain predictor
+/// (§3.9.2 equation for predicted energy). The reference uses 30 dB;
+/// the predicted log-gain is `pred_E = mean_E + Σ b[k] * U[k]`, where
+/// `U[k]` is the quantised energy prediction error for subframe `k`
+/// steps in the past.
+pub const MEAN_INNOV_ENERGY_DB: f32 = 30.0;
+
 /// Predict the fixed-codebook gain from the MA-4 log-energy predictor
 /// history and the mean log-energy of the current innovation vector.
 ///
-/// Follows G.729 §3.9.2: the predicted log-gain is
-///     E_predicted = mean(E_hist[k]) + adjustment
-/// where `E_hist[k]` is in dB. The actual gain is
-///     g_c_pred = 10 ^ ((E_predicted - E_innov) / 20) .
+/// Follows G.729 §3.9.2 exactly:
+///   pred_E        = mean_E + Σ_k b[k] * U[k]               (dB)
+///   g_c_predicted = 10^((pred_E − E_innov) / 20)
+/// with `b[k] = MA_GAIN_PRED[k]`, `mean_E = MEAN_INNOV_ENERGY_DB`, and
+/// `U[k]` the log-energy *prediction error* — i.e. the past quantised
+/// correction ratio, NOT the raw innovation log-energy.
 pub fn predict_fixed_gain(gain_log_hist: &[f32; 4], innov_energy_db: f32) -> f32 {
-    // MA-4 with roughly uniform taps (`mean`); the reference uses
-    // specific predictor coefficients but a simple mean gives usable
-    // output for a first-cut decoder. The +8 dB offset is a tuned
-    // value that keeps the overall loudness in a reasonable range
-    // for typical speech (reference uses a more elaborate per-frame
-    // offset driven by the codebook's mean energy).
-    let mean = (gain_log_hist[0] + gain_log_hist[1] + gain_log_hist[2] + gain_log_hist[3]) / 4.0;
-    let predicted_db = mean + 8.0;
-    let delta = predicted_db - innov_energy_db;
-    // Clamp delta to avoid exploding gains on outlier frames.
+    let pred_e = MEAN_INNOV_ENERGY_DB
+        + MA_GAIN_PRED[0] * gain_log_hist[0]
+        + MA_GAIN_PRED[1] * gain_log_hist[1]
+        + MA_GAIN_PRED[2] * gain_log_hist[2]
+        + MA_GAIN_PRED[3] * gain_log_hist[3];
+    let delta = pred_e - innov_energy_db;
+    // Clamp delta to avoid exploding gains on outlier frames
+    // (the reference caps pred_E at ~60 dB).
     let delta = delta.clamp(-30.0, 30.0);
     10.0f32.powf(delta / 20.0)
+}
+
+/// Compute the new gain-predictor history entry after decoding a
+/// subframe's fixed-codebook gain. The stored value is the prediction
+/// *error* in dB, i.e. `20*log10(gamma)` where `gamma` is the
+/// correction factor recovered from the gain VQ — NOT the raw
+/// innovation energy. This matches G.729 §3.9.2.
+///
+/// Clamped to `[-14, 14]` dB to match the reference bounds.
+pub fn gain_pred_error_db(gamma: f32) -> f32 {
+    if gamma <= 1e-6 {
+        return -14.0;
+    }
+    (20.0 * gamma.log10()).clamp(-14.0, 14.0)
 }
 
 /// Compute the mean log-energy (dB) of an innovation pulse vector.
@@ -639,6 +666,39 @@ mod tests {
         for &y in out.iter() {
             assert!((y - 1.0).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn gain_pred_error_db_bounds_match_spec() {
+        // gamma=1.0 -> 0 dB prediction error (perfect prediction).
+        assert!((gain_pred_error_db(1.0) - 0.0).abs() < 1e-4);
+        // gamma=10 -> 20 dB, but clamped to +14.
+        assert!((gain_pred_error_db(10.0) - 14.0).abs() < 1e-4);
+        // gamma=0.1 -> -20 dB, clamped to -14.
+        assert!((gain_pred_error_db(0.1) - (-14.0)).abs() < 1e-4);
+        // gamma=0 (or negative) returns the lower floor.
+        assert!((gain_pred_error_db(0.0) - (-14.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn predict_fixed_gain_silence_history_gives_quiet_gain() {
+        // Fresh decoder: history at -14 dB (silence). Innovation
+        // energy in dB for a typical pulse vector is around -10..+5 dB
+        // at subframe scale (sum of 4 unit pulses over 40 samples ->
+        // e/N = 0.1 -> -10 dB). Predicted fixed-codebook gain should
+        // be well below 10× and above 0.
+        let hist = [-14.0f32; 4];
+        let g = predict_fixed_gain(&hist, -10.0);
+        assert!(g > 0.0 && g < 10.0, "predicted gain out of range: {g}");
+    }
+
+    #[test]
+    fn predict_fixed_gain_high_history_gives_loud_gain() {
+        // Sustained high-energy frames: history at +10 dB -> predicted
+        // gain should exceed 1 (amplification vs. the unit innovation).
+        let hist = [10.0f32; 4];
+        let g = predict_fixed_gain(&hist, -10.0);
+        assert!(g > 1.0, "high history should boost gain: {g}");
     }
 
     #[test]

@@ -33,9 +33,9 @@ use crate::bitreader::{parse_frame_params, FrameParams};
 use crate::lpc::{decode_lsp, interpolate_lsp, lsp_to_lpc, LpcPredictorState};
 use crate::synthesis::{
     adaptive_codebook_excitation, agc, decode_gain_indices, decode_pitch_p1, decode_pitch_p2,
-    fixed_codebook_excitation, innovation_log_energy_db, pitch_emphasis_postfilter, pitch_sharpen,
-    predict_fixed_gain, short_term_postfilter, synthesise, tilt_compensation, SynthesisState,
-    EXC_HIST,
+    fixed_codebook_excitation, gain_pred_error_db, innovation_log_energy_db,
+    pitch_emphasis_postfilter, pitch_sharpen, predict_fixed_gain, short_term_postfilter,
+    synthesise, tilt_compensation, SynthesisState, EXC_HIST,
 };
 #[cfg(test)]
 use crate::LPC_ORDER;
@@ -155,15 +155,11 @@ impl G729Decoder {
             }
             // 4f. Push excitation into the history buffer.
             push_excitation(&mut self.syn.exc, &excitation);
-            // 4g. Update gain-predictor log-energy history with the
-            //     log-energy of the INNOVATION (fixed-codebook) signal
-            //     scaled by g_c. This keeps the MA-4 predictor informed
-            //     of the current subframe's contribution.
-            let mut scaled_innov = [0.0f32; SUBFRAME_SAMPLES];
-            for n in 0..SUBFRAME_SAMPLES {
-                scaled_innov[n] = g_c * fc[n];
-            }
-            let new_gain_db = innovation_log_energy_db(&scaled_innov).max(-20.0);
+            // 4g. Update the MA-4 gain-predictor history with the
+            //     *correction factor* `gamma` in dB. Per G.729 §3.9.2,
+            //     the stored quantity U[k] is the prediction error —
+            //     20*log10(gamma) — NOT the raw innovation energy.
+            let new_gain_db = gain_pred_error_db(gamma);
             for k in (1..4).rev() {
                 self.syn.gain_log_hist[k] = self.syn.gain_log_hist[k - 1];
             }
