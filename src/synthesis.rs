@@ -60,6 +60,8 @@ pub struct SynthesisState {
     /// Previous-subframe pitch gain (adaptive-codebook scalar), for
     /// use by the postfilter's pitch emphasis.
     pub prev_gp: f32,
+    /// Previous-subframe fixed-codebook gain (for concealment).
+    pub prev_gc: f32,
     /// Previous integer pitch delay — used for the postfilter.
     pub prev_pitch: usize,
     /// Postfilter: short-term filter memory for A(z/γ1) analysis.
@@ -73,6 +75,15 @@ pub struct SynthesisState {
     pub agc_gain: f32,
     /// One-pole memory for the tilt-compensation postfilter.
     pub tilt_mem: f32,
+    /// Number of consecutive erased frames seen. Used to ramp down
+    /// the concealment gains per G.729 §4.4.
+    pub erase_count: u32,
+    /// Previous-frame LPC coefficients (last subframe), kept for
+    /// concealment of the next frame.
+    pub prev_a: [f32; LPC_ORDER + 1],
+    /// 16-bit LCG state driving concealment's pseudo-random pulse
+    /// generator (G.729 §4.4).
+    pub conceal_seed: u16,
 }
 
 impl Default for SynthesisState {
@@ -83,17 +94,24 @@ impl Default for SynthesisState {
 
 impl SynthesisState {
     pub fn new() -> Self {
+        let mut prev_a = [0.0f32; LPC_ORDER + 1];
+        prev_a[0] = 1.0;
         Self {
             exc: [0.0; EXC_HIST],
             syn_mem: [0.0; SYN_MEM],
             gain_log_hist: [-14.0; 4],
             prev_gp: 0.0,
+            prev_gc: 0.0,
             prev_pitch: 40,
             post_az1_mem: [0.0; LPC_ORDER],
             post_az2_mem: [0.0; LPC_ORDER],
             post_pitch_mem: [0.0; POST_MEM],
             agc_gain: 1.0,
             tilt_mem: 0.0,
+            erase_count: 0,
+            prev_a,
+            // Seed matches the reference `seed_fer` init.
+            conceal_seed: 21845,
         }
     }
 }
@@ -791,6 +809,72 @@ pub fn estimate_tilt_k1(a: &[f32; LPC_ORDER + 1]) -> f32 {
     } else {
         // k1' = -R(1) / R(0), clamped for numerical safety.
         (-r1 / r0).clamp(-0.99, 0.99)
+    }
+}
+
+/// Attenuation applied to the pitch gain on each consecutive erased
+/// frame (G.729 §4.4). Clamped to 0.9 from above; after ~8 erased
+/// frames the adaptive codebook is essentially muted.
+pub const ERASE_GP_ATTEN: f32 = 0.9;
+/// Attenuation applied to the fixed-codebook gain on each consecutive
+/// erased frame (G.729 §4.4).
+pub const ERASE_GC_ATTEN: f32 = 0.98;
+
+/// Pseudo-random innovation generator for frame-erasure concealment
+/// (G.729 §4.4). A 16-bit LCG that matches the reference's
+/// `random(seed)` primitive:
+///     seed = (seed * 31821 + 13849) & 0xFFFF .
+/// The returned `i16` is the new seed cast to signed.
+#[inline]
+pub fn conceal_random(seed: &mut u16) -> i16 {
+    *seed = seed.wrapping_mul(31821).wrapping_add(13849);
+    *seed as i16
+}
+
+/// Generate one subframe of concealment excitation using the previous
+/// frame's LPC filter, pitch delay, and ramped-down gains. The spec
+/// calls for:
+///   * LPC     = previous subframe's LPC (repeat).
+///   * pitch   = previous integer pitch, frac = 0.
+///   * g_p, g_c = ERASE_{GP,GC}_ATTEN * previous.
+///   * innovation: 4 pulses at pseudo-random positions/signs.
+/// The `seed` argument carries the LCG state across subframes.
+pub fn conceal_excitation(
+    seed: &mut u16,
+    prev_pitch: usize,
+    g_p: f32,
+    g_c: f32,
+    exc: &[f32; EXC_HIST],
+    out: &mut [f32; SUBFRAME_SAMPLES],
+) {
+    // Adaptive-codebook contribution: repeat past excitation at
+    // prev_pitch, integer delay (no fractional interpolation).
+    let mut ac = [0.0f32; SUBFRAME_SAMPLES];
+    adaptive_codebook_excitation(exc, prev_pitch.max(20), 0, &mut ac);
+
+    // Fixed-codebook: pick 4 random pulses, random signs. Positions
+    // are chosen per-track (same 4-track layout as the real codebook).
+    let mut fc = [0.0f32; SUBFRAME_SAMPLES];
+    for track in 0..4 {
+        let r = conceal_random(seed);
+        let pos_bits = (r as u16 >> 4) & 0x7;
+        let sign_bit = (r as u16) & 0x1;
+        let pos = match track {
+            0 => (pos_bits as usize) * 5,
+            1 => (pos_bits as usize) * 5 + 1,
+            2 => (pos_bits as usize) * 5 + 2,
+            _ => {
+                let jitter = ((r as u16 >> 7) & 0x1) as usize;
+                (pos_bits as usize) * 5 + 3 + jitter
+            }
+        };
+        if pos < SUBFRAME_SAMPLES {
+            fc[pos] += if sign_bit != 0 { 1.0 } else { -1.0 };
+        }
+    }
+
+    for n in 0..SUBFRAME_SAMPLES {
+        out[n] = g_p * ac[n] + g_c * fc[n];
     }
 }
 

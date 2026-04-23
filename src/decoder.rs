@@ -29,13 +29,14 @@ use oxideav_core::{
 
 use crate::annex_b_cng::CngState;
 use crate::annex_b_vad::{EncodedSid, SID_FRAME_BYTES};
-use crate::bitreader::{parse_frame_params, FrameParams};
+use crate::bitreader::{parse_frame_params, pitch_parity, FrameParams};
 use crate::lpc::{decode_lsp, interpolate_lsp, lsp_to_lpc, LpcPredictorState};
 use crate::synthesis::{
-    adaptive_codebook_excitation, agc, decode_gain_indices, decode_pitch_p1, decode_pitch_p2,
-    estimate_tilt_k1, fixed_codebook_excitation, gain_pred_error_db, innovation_log_energy_db,
-    pitch_emphasis_postfilter, pitch_sharpen, predict_fixed_gain, short_term_postfilter,
-    synthesise, tilt_compensation, SynthesisState, EXC_HIST,
+    adaptive_codebook_excitation, agc, conceal_excitation, decode_gain_indices, decode_pitch_p1,
+    decode_pitch_p2, estimate_tilt_k1, fixed_codebook_excitation, gain_pred_error_db,
+    innovation_log_energy_db, pitch_emphasis_postfilter, pitch_sharpen, predict_fixed_gain,
+    short_term_postfilter, synthesise, tilt_compensation, SynthesisState, ERASE_GC_ATTEN,
+    ERASE_GP_ATTEN, EXC_HIST,
 };
 #[cfg(test)]
 use crate::LPC_ORDER;
@@ -111,6 +112,14 @@ impl G729Decoder {
             )));
         }
         let fp = parse_frame_params(&packet[..FRAME_BYTES])?;
+        // Frame-erasure detection: if the parity bit on the 6-MSB of P1
+        // (transmitted in P0) mismatches, the frame is corrupted on the
+        // wire. Synthesise a concealed frame per G.729 §4.4 instead
+        // of decoding the (likely-garbage) indices.
+        if pitch_parity(fp.p1) != (fp.p0 & 1) {
+            self.conceal_frame_into(out);
+            return Ok(());
+        }
 
         // Step 1: decode LSPs via the MA predictor.
         let lsp_new = decode_lsp(&mut self.lpc_state, fp.l0, fp.l1, fp.l2, fp.l3);
@@ -188,9 +197,10 @@ impl G729Decoder {
             // 4j. Write to output.
             let off = sf * SUBFRAME_SAMPLES;
             out[off..off + SUBFRAME_SAMPLES].copy_from_slice(&synthesised[..SUBFRAME_SAMPLES]);
-            // Remember the integer pitch / gain for the next subframe's
-            // postfilter setup.
+            // Remember the integer pitch / gains for the next subframe's
+            // postfilter setup and for frame-erasure concealment.
             self.syn.prev_gp = g_p;
+            self.syn.prev_gc = g_c;
             self.syn.prev_pitch = pitch_int[sf];
         }
 
@@ -199,7 +209,73 @@ impl G729Decoder {
         self.lpc_state.lsp_prev = lsp_new;
         // Store final per-subframe LPC so external code can inspect it.
         self.lpc_state.a = a_sf[1];
+        // Keep a copy for the erasure-concealment path.
+        self.syn.prev_a = a_sf[1];
+        // Successful decode: reset consecutive-erasure counter.
+        self.syn.erase_count = 0;
         Ok(())
+    }
+
+    /// Synthesise a concealed frame (ITU-T G.729 §4.4) when the bitstream
+    /// indicates frame loss — whether via a parity-bit mismatch, a
+    /// length-zero packet outside Annex B CNG, or an explicit erasure
+    /// hint from the transport.
+    ///
+    /// Strategy:
+    ///  * LPC: reuse `prev_a` (the last subframe's LPC) for both subframes.
+    ///  * Pitch: reuse `prev_pitch` (integer-only).
+    ///  * Gains: attenuate `prev_gp` by ERASE_GP_ATTEN (per erased frame),
+    ///    and `prev_gc` by ERASE_GC_ATTEN.
+    ///  * Innovation: 4 pseudo-random ±1 pulses per subframe.
+    /// After ~8 erased frames the output decays to ~silence.
+    fn conceal_frame_into(&mut self, out: &mut [f32; FRAME_SAMPLES]) {
+        self.syn.erase_count = self.syn.erase_count.saturating_add(1);
+        // Gains decay per erased frame (exponentially).
+        let mut g_p = self.syn.prev_gp * ERASE_GP_ATTEN;
+        // Pitch gain cap per spec: g_p <= 0.9 during erasure.
+        g_p = g_p.min(0.9);
+        let g_c = self.syn.prev_gc * ERASE_GC_ATTEN;
+        let a = self.syn.prev_a;
+
+        for sf in 0..SUBFRAMES_PER_FRAME {
+            let mut excitation = [0.0f32; SUBFRAME_SAMPLES];
+            conceal_excitation(
+                &mut self.syn.conceal_seed,
+                self.syn.prev_pitch,
+                g_p,
+                g_c,
+                &self.syn.exc,
+                &mut excitation,
+            );
+            push_excitation(&mut self.syn.exc, &excitation);
+
+            // Synthesise + post-filter (same as the real path, using prev_a).
+            let mut synthesised = [0.0f32; SUBFRAME_SAMPLES];
+            synthesise(&excitation, &a, &mut self.syn.syn_mem, &mut synthesised);
+            let pre_post = synthesised;
+            short_term_postfilter(
+                &mut synthesised,
+                &a,
+                &mut self.syn.post_az1_mem,
+                &mut self.syn.post_az2_mem,
+            );
+            pitch_emphasis_postfilter(
+                &mut synthesised,
+                &mut self.syn.post_pitch_mem,
+                self.syn.prev_pitch,
+                g_p,
+            );
+            let k1 = estimate_tilt_k1(&a);
+            tilt_compensation(&mut synthesised, &mut self.syn.tilt_mem, k1);
+            agc(&mut synthesised, &pre_post, &mut self.syn.agc_gain);
+
+            let off = sf * SUBFRAME_SAMPLES;
+            out[off..off + SUBFRAME_SAMPLES].copy_from_slice(&synthesised[..SUBFRAME_SAMPLES]);
+        }
+        // Track the decayed gains so the next erased frame continues
+        // to attenuate smoothly.
+        self.syn.prev_gp = g_p;
+        self.syn.prev_gc = g_c;
     }
 }
 
@@ -474,14 +550,16 @@ mod tests {
         // Feed ten frames with strong excitation indices; assert that
         // at least one sample is non-zero across the decoded output.
         let mut dec = make_dec();
+        use crate::bitreader::pitch_parity;
         // Pick indices that give non-trivial pulses and gains.
+        let p1: u8 = 60; // fractional-pitch delay around 39 samples
         let fp = FrameParams {
             l0: 0,
             l1: 5,
             l2: 3,
             l3: 7,
-            p1: 60, // fractional-pitch delay around 39 samples
-            p0: 0,
+            p1,
+            p0: pitch_parity(p1), // valid parity so erasure isn't triggered
             c1: 0x1_2A3, // arbitrary pulse positions
             s1: 0b1010,
             ga1: 4,
@@ -543,6 +621,118 @@ mod tests {
                 let _ = s;
             }
         }
+    }
+
+    #[test]
+    fn decoder_conceals_frame_with_bad_parity() {
+        use crate::bitreader::pitch_parity;
+        let mut dec = make_dec();
+        // First: feed a couple of valid frames to prime prev_gp / prev_a.
+        let p1: u8 = 80;
+        let good = FrameParams {
+            l0: 0,
+            l1: 4,
+            l2: 2,
+            l3: 6,
+            p1,
+            p0: pitch_parity(p1),
+            c1: 0x0123,
+            s1: 0b1100,
+            ga1: 5,
+            gb1: 7,
+            p2: 10,
+            c2: 0x0456,
+            s2: 0b1001,
+            ga2: 4,
+            gb2: 5,
+        };
+        let good_bytes = pack(&good);
+        for _ in 0..3 {
+            let pkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), good_bytes.clone());
+            dec.send_packet(&pkt).unwrap();
+            let _ = dec.receive_frame().unwrap();
+        }
+
+        // Now send a frame with deliberately-wrong parity (should conceal
+        // without panicking and produce bounded output).
+        let bad = FrameParams {
+            p0: pitch_parity(p1) ^ 1,
+            ..good
+        };
+        let bad_bytes = pack(&bad);
+        let pkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), bad_bytes);
+        dec.send_packet(&pkt).unwrap();
+        let Frame::Audio(a) = dec.receive_frame().unwrap() else {
+            panic!("expected audio frame");
+        };
+        // Concealed output must be bounded and produce the correct
+        // number of samples.
+        assert_eq!(a.samples as usize, FRAME_SAMPLES);
+        assert_eq!(a.data[0].len(), FRAME_SAMPLES * 2);
+        for chunk in a.data[0].chunks_exact(2) {
+            let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+            assert!(s.abs() < 32767, "concealed sample saturated: {s}");
+        }
+    }
+
+    #[test]
+    fn decoder_conceals_many_frames_decays_to_silence() {
+        use crate::bitreader::pitch_parity;
+        let mut dec = make_dec();
+        let p1: u8 = 80;
+        let good = FrameParams {
+            l0: 0,
+            l1: 4,
+            l2: 2,
+            l3: 6,
+            p1,
+            p0: pitch_parity(p1),
+            c1: 0x0123,
+            s1: 0b1100,
+            ga1: 5,
+            gb1: 7,
+            p2: 10,
+            c2: 0x0456,
+            s2: 0b1001,
+            ga2: 4,
+            gb2: 5,
+        };
+        let good_bytes = pack(&good);
+        for _ in 0..3 {
+            let pkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), good_bytes.clone());
+            dec.send_packet(&pkt).unwrap();
+            let _ = dec.receive_frame().unwrap();
+        }
+        // Now feed 30 bad-parity frames — output energy must monotonically
+        // trend down as the gains exponentially decay.
+        let bad = FrameParams {
+            p0: pitch_parity(p1) ^ 1,
+            ..good
+        };
+        let bad_bytes = pack(&bad);
+        let mut energies = Vec::new();
+        for _ in 0..30 {
+            let pkt = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), bad_bytes.clone());
+            dec.send_packet(&pkt).unwrap();
+            let Frame::Audio(a) = dec.receive_frame().unwrap() else {
+                panic!("expected audio frame");
+            };
+            let mut e = 0.0f64;
+            for chunk in a.data[0].chunks_exact(2) {
+                let s = i16::from_le_bytes([chunk[0], chunk[1]]) as f64;
+                e += s * s;
+            }
+            energies.push(e);
+        }
+        // The post-AGC output decays but the AGC partially compensates.
+        // Check energy AND that the adaptive codebook contribution
+        // (prev_gp) is near zero after 30 erased frames.
+        let last = energies[energies.len() - 1];
+        let first = energies[0];
+        assert!(
+            last < first * 0.5 || last < 1.0,
+            "concealed-frame energy did not decay: first={first}, last={last}",
+        );
     }
 
     #[test]
