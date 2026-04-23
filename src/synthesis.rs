@@ -703,16 +703,94 @@ pub fn pitch_emphasis_postfilter(
     }
 }
 
-/// Simple first-order tilt-compensation filter:
-///   out[n] = s[n] - μ * tilt_mem; tilt_mem = s[n].
-/// With `μ ≈ 0.15` this undoes most of the low-pass spectral tilt the
-/// short-term postfilter introduces.
-pub fn tilt_compensation(signal: &mut [f32; SUBFRAME_SAMPLES], tilt_mem: &mut f32) {
-    let mu: f32 = 0.15;
+/// Adaptive spectral-tilt compensation filter (G.729 §4.2.3).
+///
+/// The short-term post-filter introduces a low-pass tilt that is
+/// cancelled by a 1st-order FIR
+///     H_t(z) = 1 + μ · z^-1
+/// where μ is derived from the first reflection coefficient `k1'` of
+/// the short-term post-filter's impulse response. The spec defines
+///     μ = γ_t · k1'                    (eq. 85)
+///     γ_t = 0.9   if k1' < 0           (voiced — emphasise high-freq)
+///     γ_t = 0.2   if k1' >= 0          (unvoiced — mild lowpass keep)
+///
+/// Callers supply `k1`: an estimate of the reflection coefficient (see
+/// [`estimate_tilt_k1`]). A one-sample memory `tilt_mem` holds the
+/// previous input sample.
+pub fn tilt_compensation(signal: &mut [f32; SUBFRAME_SAMPLES], tilt_mem: &mut f32, k1: f32) {
+    let gamma_t = if k1 < 0.0 { 0.9 } else { 0.2 };
+    let mu = (gamma_t * k1).clamp(-0.99, 0.99);
     for n in 0..SUBFRAME_SAMPLES {
         let s = signal[n];
-        signal[n] = s - mu * *tilt_mem;
+        signal[n] = s + mu * *tilt_mem;
         *tilt_mem = s;
+    }
+}
+
+/// Estimate the first reflection coefficient `k1' = -R(1)/R(0)` of the
+/// short-term post-filter's truncated impulse response (G.729 §4.2.3).
+///
+/// The impulse response `h(n)` of `A(z/γ_n) / A(z/γ_d)` is truncated
+/// to `L` samples; the autocorrelations at lag 0 and 1 give k1.
+///
+/// This is computed per subframe from the current LPC vector.
+pub fn estimate_tilt_k1(a: &[f32; LPC_ORDER + 1]) -> f32 {
+    // Impulse response length: the reference uses L = 22.
+    const L: usize = 22;
+    // Build weighted numerator / denominator coefficients.
+    let mut a_num = [0.0f32; LPC_ORDER + 1];
+    let mut a_den = [0.0f32; LPC_ORDER + 1];
+    a_num[0] = 1.0;
+    a_den[0] = 1.0;
+    let mut pn = GAMMA_N;
+    let mut pd = GAMMA_D;
+    for k in 1..=LPC_ORDER {
+        a_num[k] = a[k] * pn;
+        a_den[k] = a[k] * pd;
+        pn *= GAMMA_N;
+        pd *= GAMMA_D;
+    }
+    // Compute h(n) by running a unit impulse through A(z/γ_n) / A(z/γ_d).
+    // Here: x[0] = 1, x[n>0] = 0; h[n] = FIR of a_num on x[n..n-10] minus
+    // IIR of a_den on past h outputs.
+    let mut h = [0.0f32; L];
+    let mut x_hist = [0.0f32; LPC_ORDER];
+    let mut y_hist = [0.0f32; LPC_ORDER];
+    for n in 0..L {
+        let xn = if n == 0 { 1.0 } else { 0.0 };
+        let mut acc = xn;
+        for k in 1..=LPC_ORDER {
+            acc += a_num[k] * x_hist[k - 1];
+        }
+        for k in 1..=LPC_ORDER {
+            acc -= a_den[k] * y_hist[k - 1];
+        }
+        h[n] = acc;
+        // Slide x_hist (newest at index 0).
+        for k in (1..LPC_ORDER).rev() {
+            x_hist[k] = x_hist[k - 1];
+        }
+        x_hist[0] = xn;
+        // Slide y_hist.
+        for k in (1..LPC_ORDER).rev() {
+            y_hist[k] = y_hist[k - 1];
+        }
+        y_hist[0] = acc;
+    }
+    // Autocorrelations R(0), R(1).
+    let mut r0 = 0.0f32;
+    let mut r1 = 0.0f32;
+    for n in 0..L {
+        r0 += h[n] * h[n];
+    }
+    for n in 0..L - 1 {
+        r1 += h[n] * h[n + 1];
+    }
+    if r0 < 1e-9 {
+        0.0
+    } else {
+        // k1' = -R(1) / R(0), clamped for numerical safety.
+        (-r1 / r0).clamp(-0.99, 0.99)
     }
 }
 
@@ -806,6 +884,40 @@ mod tests {
         let hist = [-14.0f32; 4];
         let g = predict_fixed_gain(&hist, -10.0);
         assert!(g > 0.0 && g < 10.0, "predicted gain out of range: {g}");
+    }
+
+    #[test]
+    fn estimate_tilt_k1_is_zero_for_flat_filter() {
+        // A(z) = 1 (trivial), so the weighted numerator/denominator
+        // cancel and the impulse response is a single unit spike —
+        // R(1) = 0, R(0) > 0, k1 = 0.
+        let mut a = [0.0f32; LPC_ORDER + 1];
+        a[0] = 1.0;
+        let k1 = estimate_tilt_k1(&a);
+        assert!((k1 - 0.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn estimate_tilt_k1_lowpass_gives_negative_k1() {
+        // Pick a[1] = -0.9 (near-unit-pole at z = 0.9, a low-pass).
+        // The weighted A(z/γ_n)/A(z/γ_d) is still roughly low-pass,
+        // so R(1)/R(0) is positive and k1' is negative (spec's
+        // voiced-frame regime).
+        let mut a = [0.0f32; LPC_ORDER + 1];
+        a[0] = 1.0;
+        a[1] = -0.9;
+        let k1 = estimate_tilt_k1(&a);
+        assert!(k1 < 0.0, "low-pass filter should give k1 < 0: {k1}");
+    }
+
+    #[test]
+    fn tilt_compensation_is_pass_through_when_k1_is_zero() {
+        let mut sig = [1.0f32; SUBFRAME_SAMPLES];
+        let mut mem = 0.0f32;
+        tilt_compensation(&mut sig, &mut mem, 0.0);
+        for &v in sig.iter() {
+            assert_eq!(v, 1.0);
+        }
     }
 
     #[test]
