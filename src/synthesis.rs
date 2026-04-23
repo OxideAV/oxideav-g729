@@ -474,14 +474,26 @@ pub fn synthesise(
 // Postfilter: short-term (γ1 / γ2) + pitch emphasis + tilt + AGC
 // ---------------------------------------------------------------------------
 
-/// Postfilter weighting factor for the numerator (A(z/γ1)).
-pub const GAMMA1: f32 = 0.7;
-/// Postfilter weighting factor for the denominator (1/A(z/γ2)).
-pub const GAMMA2: f32 = 0.55;
+/// Postfilter weighting factor for the numerator `A(z/γ_n)` (G.729
+/// §4.2.2). The spec uses γ_n = 0.55 — smaller than γ_d so the
+/// composite filter enhances formant peaks.
+pub const GAMMA_N: f32 = 0.55;
+/// Postfilter weighting factor for the denominator `1/A(z/γ_d)`.
+pub const GAMMA_D: f32 = 0.7;
 
-/// Apply the short-term postfilter H(z) = A(z/γ1) / A(z/γ2) to one
-/// subframe in-place. Updates the postfilter's two 10-tap memories
-/// with the most-recent input and output samples respectively.
+/// Legacy names preserved for downstream crates that imported the
+/// short-term post-filter constants directly.
+#[deprecated(note = "use GAMMA_N (numerator) and GAMMA_D (denominator) to match the spec naming")]
+pub const GAMMA1: f32 = GAMMA_N;
+#[deprecated(note = "use GAMMA_N (numerator) and GAMMA_D (denominator) to match the spec naming")]
+pub const GAMMA2: f32 = GAMMA_D;
+
+/// Apply the short-term post-filter `H_f(z) = A(z/γ_n) / A(z/γ_d)` to
+/// one subframe in place. The numerator FIR is computed first using a
+/// snapshot of the input; the denominator IIR then operates on the
+/// residual, updating the two 10-tap memories in the process.
+///
+/// Reference: ITU-T G.729 §4.2.2.
 pub fn short_term_postfilter(
     signal: &mut [f32; SUBFRAME_SAMPLES],
     a: &[f32; LPC_ORDER + 1],
@@ -489,24 +501,24 @@ pub fn short_term_postfilter(
     az2_mem: &mut [f32; LPC_ORDER],
 ) {
     // Scaled predictor coefficients (γ^k * a[k]).
-    let mut a_g1 = [0.0f32; LPC_ORDER + 1];
-    let mut a_g2 = [0.0f32; LPC_ORDER + 1];
-    a_g1[0] = 1.0;
-    a_g2[0] = 1.0;
-    let mut p1 = GAMMA1;
-    let mut p2 = GAMMA2;
+    let mut a_num = [0.0f32; LPC_ORDER + 1];
+    let mut a_den = [0.0f32; LPC_ORDER + 1];
+    a_num[0] = 1.0;
+    a_den[0] = 1.0;
+    let mut pn = GAMMA_N;
+    let mut pd = GAMMA_D;
     for k in 1..=LPC_ORDER {
-        a_g1[k] = a[k] * p1;
-        a_g2[k] = a[k] * p2;
-        p1 *= GAMMA1;
-        p2 *= GAMMA2;
+        a_num[k] = a[k] * pn;
+        a_den[k] = a[k] * pd;
+        pn *= GAMMA_N;
+        pd *= GAMMA_D;
     }
 
     // Snapshot of the unmodified input, so the FIR in step 1 sees
     // consistent `x[n-k]` values (and az1 memory can update cleanly).
     let input = *signal;
 
-    // Step 1: A(z/γ1) as an FIR. r[n] = x[n] + Σ a_g1[k]*x[n-k].
+    // Step 1: A(z/γ_n) as an FIR. r[n] = x[n] + Σ a_num[k]*x[n-k].
     let mut resid = [0.0f32; SUBFRAME_SAMPLES];
     for n in 0..SUBFRAME_SAMPLES {
         let mut acc = input[n];
@@ -517,7 +529,7 @@ pub fn short_term_postfilter(
                 // az1_mem[0] is the most-recent history sample (x[-1]).
                 az1_mem[k - n - 1]
             };
-            acc += a_g1[k] * hist;
+            acc += a_num[k] * hist;
         }
         resid[n] = acc;
     }
@@ -526,7 +538,7 @@ pub fn short_term_postfilter(
         az1_mem[k] = input[SUBFRAME_SAMPLES - 1 - k];
     }
 
-    // Step 2: 1/A(z/γ2) as IIR. y[n] = r[n] - Σ a_g2[k]*y[n-k].
+    // Step 2: 1/A(z/γ_d) as IIR. y[n] = r[n] - Σ a_den[k]*y[n-k].
     for n in 0..SUBFRAME_SAMPLES {
         let mut acc = resid[n];
         for k in 1..=LPC_ORDER {
@@ -535,7 +547,7 @@ pub fn short_term_postfilter(
             } else {
                 az2_mem[k - n - 1]
             };
-            acc -= a_g2[k] * hist;
+            acc -= a_den[k] * hist;
         }
         signal[n] = acc;
     }
