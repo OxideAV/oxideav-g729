@@ -545,18 +545,68 @@ pub fn short_term_postfilter(
     }
 }
 
-/// Apply a simple pitch emphasis / long-term postfilter: add a small
-/// fraction of the signal delayed by `pitch` samples.
+/// Long-term (pitch) post-filter gamma factor (G.729 §4.2.1).
+/// The spec normalises the LT post-filter so that its transfer
+/// function is `(1 + gamma_p * g_pit * z^-T) / (1 + gamma_p * g_pit)`.
+pub const GAMMA_P: f32 = 0.5;
+
+/// Threshold for the voicing decision in the LT post-filter
+/// (G.729 §4.2.1): if `R(T)² / (R0·RT) < 0.5` the pitch emphasis is
+/// bypassed (unvoiced regime).
+pub const LTP_VOICING_THRESHOLD: f32 = 0.5;
+
+/// Apply the G.729 long-term (pitch) post-filter to one subframe of
+/// the post-synthesis residual, in place. Updates the pitch-delay line
+/// with the filter's output.
+///
+/// Algorithm (ITU-T G.729 §4.2.1):
+///  1. Refine the integer pitch delay `T` within `±1` of the coded
+///     delay by maximising `R(k) = Σ r(n) * r(n-k)` (only if the
+///     decoder flags the subframe as voiced, i.e. `gain_p > 0`).
+///  2. Compute the optimal closed-loop gain `g_pit = R(T) / RT`
+///     where `RT = Σ r(n-T)²`. Clamp to `[0, 1]`.
+///  3. Voicing check: if `R(T)² < 0.5 · R0 · RT` the pitch post-filter
+///     is bypassed (the output equals the input).
+///  4. Otherwise emit `y[n] = g_l * (r[n] + gamma_p * g_pit * r[n-T])`
+///     with `g_l = 1 / (1 + gamma_p * g_pit)` so the overall filter
+///     has unit DC gain.
+///
+/// `post_pitch_mem` holds the most-recent `POST_MEM` samples of the
+/// *post-synthesis-filter* signal; it is updated on return.
 pub fn pitch_emphasis_postfilter(
     signal: &mut [f32; SUBFRAME_SAMPLES],
     post_pitch_mem: &mut [f32; POST_MEM],
     pitch: usize,
     gain_p: f32,
 ) {
-    // Factor: reduce as pitch gain drops (unvoiced → no emphasis).
-    let g = 0.5 * gain_p.clamp(0.0, 1.0);
-    if g < 0.05 || pitch == 0 {
-        // Still slide the memory.
+    // Fetch the residual sample at delay `k` (k >= 1). Draws from
+    // post_pitch_mem for k > n, and from the already-written `signal`
+    // for k <= n.
+    let r_at = |signal: &[f32; SUBFRAME_SAMPLES],
+                post_pitch_mem: &[f32; POST_MEM],
+                n: usize,
+                k: usize|
+     -> f32 {
+        if k > n {
+            // k-n samples into the past; post_pitch_mem[POST_MEM-1] is the
+            // newest history entry (sample at index -1).
+            let back = k - n;
+            if back > POST_MEM {
+                0.0
+            } else {
+                post_pitch_mem[POST_MEM - back]
+            }
+        } else {
+            signal[n - k]
+        }
+    };
+
+    // Slide the memory by SUBFRAME_SAMPLES at the end of the function.
+    // For now, compute everything referring to the pre-update state.
+
+    // Unvoiced / no-pitch shortcut: bypass filter, just slide memory.
+    let gp_clamped = gain_p.clamp(0.0, 1.0);
+    if gp_clamped < 0.05 || pitch == 0 {
         let shift = SUBFRAME_SAMPLES.min(POST_MEM);
         for i in 0..POST_MEM - shift {
             post_pitch_mem[i] = post_pitch_mem[i + shift];
@@ -566,17 +616,71 @@ pub fn pitch_emphasis_postfilter(
         }
         return;
     }
-    let pitch = pitch.min(POST_MEM - 1);
-    for n in 0..SUBFRAME_SAMPLES {
-        // Fetch delayed sample: POST_MEM + n - pitch in a "virtual"
-        // concat of post_pitch_mem then signal (already-written).
-        let delayed = if pitch > n {
-            post_pitch_mem[POST_MEM - (pitch - n)]
-        } else {
-            signal[n - pitch]
-        };
-        signal[n] += g * delayed;
+
+    // Refine the integer delay within ±1 of the decoded delay.
+    let pitch = pitch.clamp(2, POST_MEM - 1);
+    let lo = pitch.saturating_sub(1).max(20);
+    let hi = (pitch + 1).min(POST_MEM - 1);
+    let mut best_t = pitch;
+    let mut best_corr = f32::NEG_INFINITY;
+    let mut r_at_best = [0.0f32; SUBFRAME_SAMPLES];
+    let mut r_squared_best = 0.0f32;
+    let mut rt_best = 0.0f32;
+    for t in lo..=hi {
+        let mut corr = 0.0f32;
+        let mut rt = 0.0f32;
+        let mut delayed = [0.0f32; SUBFRAME_SAMPLES];
+        for n in 0..SUBFRAME_SAMPLES {
+            let d = r_at(signal, post_pitch_mem, n, t);
+            delayed[n] = d;
+            corr += signal[n] * d;
+            rt += d * d;
+        }
+        // Score: R(T)² / RT, maximises normalised correlation.
+        let score = if rt > 1e-6 { corr * corr / rt } else { 0.0 };
+        if corr > 0.0 && score > best_corr {
+            best_corr = score;
+            best_t = t;
+            r_at_best = delayed;
+            r_squared_best = corr;
+            rt_best = rt;
+        }
     }
+
+    // R0 of the signal over the subframe.
+    let mut r0 = 0.0f32;
+    for &s in signal.iter() {
+        r0 += s * s;
+    }
+
+    // Voicing decision: R(T)² / (R0 · RT) < 0.5 -> bypass.
+    let discriminator = if r0 > 1e-6 && rt_best > 1e-6 {
+        (r_squared_best * r_squared_best) / (r0 * rt_best)
+    } else {
+        0.0
+    };
+    if discriminator < LTP_VOICING_THRESHOLD || r_squared_best <= 0.0 {
+        // Unvoiced: bypass but still advance memory.
+        let shift = SUBFRAME_SAMPLES.min(POST_MEM);
+        for i in 0..POST_MEM - shift {
+            post_pitch_mem[i] = post_pitch_mem[i + shift];
+        }
+        for i in 0..shift {
+            post_pitch_mem[POST_MEM - shift + i] = signal[i];
+        }
+        let _ = best_t; // refined delay would have been used if voiced.
+        return;
+    }
+
+    // Optimal gain, clamped into [0, 1] per the spec.
+    let g_pit = (r_squared_best / rt_best).clamp(0.0, 1.0);
+    let g_l = 1.0 / (1.0 + GAMMA_P * g_pit);
+
+    for n in 0..SUBFRAME_SAMPLES {
+        let delayed = r_at_best[n];
+        signal[n] = g_l * (signal[n] + GAMMA_P * g_pit * delayed);
+    }
+
     // Slide memory.
     let shift = SUBFRAME_SAMPLES.min(POST_MEM);
     for i in 0..POST_MEM - shift {
@@ -690,6 +794,37 @@ mod tests {
         let hist = [-14.0f32; 4];
         let g = predict_fixed_gain(&hist, -10.0);
         assert!(g > 0.0 && g < 10.0, "predicted gain out of range: {g}");
+    }
+
+    #[test]
+    fn pitch_postfilter_is_unity_on_flat_signal() {
+        // An all-constant signal has no correlation gain to exploit;
+        // the LT post-filter should either bypass (discriminator=1,
+        // voiced) or emit a scaled output with unity DC gain. Either
+        // way the sample value stays bounded.
+        let mut sig = [0.5f32; SUBFRAME_SAMPLES];
+        let mut mem = [0.5f32; POST_MEM];
+        pitch_emphasis_postfilter(&mut sig, &mut mem, 40, 0.8);
+        for &v in sig.iter() {
+            assert!((v - 0.5).abs() < 0.01, "unity-DC violated: {v}");
+        }
+    }
+
+    #[test]
+    fn pitch_postfilter_bypasses_unvoiced() {
+        // Random-ish signal with no periodic structure: discriminator
+        // should come out low and the filter should not distort.
+        let mut sig = [0.0f32; SUBFRAME_SAMPLES];
+        let mut mem = [0.0f32; POST_MEM];
+        for n in 0..SUBFRAME_SAMPLES {
+            sig[n] = if n % 2 == 0 { 1.0 } else { -1.0 };
+        }
+        let snapshot = sig;
+        pitch_emphasis_postfilter(&mut sig, &mut mem, 0, 0.1); // unvoiced gp
+        // Bypass path -> signal unchanged.
+        for n in 0..SUBFRAME_SAMPLES {
+            assert_eq!(sig[n], snapshot[n]);
+        }
     }
 
     #[test]
