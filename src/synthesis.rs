@@ -1042,7 +1042,7 @@ mod tests {
         }
         let snapshot = sig;
         pitch_emphasis_postfilter(&mut sig, &mut mem, 0, 0.1); // unvoiced gp
-        // Bypass path -> signal unchanged.
+                                                               // Bypass path -> signal unchanged.
         for n in 0..SUBFRAME_SAMPLES {
             assert_eq!(sig[n], snapshot[n]);
         }

@@ -35,7 +35,7 @@
 
 use std::collections::VecDeque;
 
-use oxideav_codec::Encoder;
+use oxideav_core::Encoder;
 use oxideav_core::{
     CodecId, CodecParameters, Error, Frame, MediaType, Packet, Result, SampleFormat, TimeBase,
 };

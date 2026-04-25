@@ -15,7 +15,7 @@
 //!   10th-order all-pole synthesis filter, short-term + long-term
 //!   postfilter with tilt compensation and AGC.
 //! - `decoder`: orchestrates the pipeline per packet and exposes it via
-//!   the `oxideav_codec::Decoder` trait.
+//!   the `oxideav_core::Decoder` trait.
 //!
 //! Reference: ITU-T Recommendation G.729 (January 2007 edition) +
 //! Annex A (`G.729a` simplified-complexity variant).
@@ -39,7 +39,7 @@ pub mod lpc;
 pub mod lsp_tables;
 pub mod synthesis;
 
-use oxideav_codec::CodecRegistry;
+use oxideav_core::CodecRegistry;
 
 pub const CODEC_ID_STR: &str = "g729";
 

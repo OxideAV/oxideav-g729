@@ -4,7 +4,7 @@
 //! with Annex B enabled on the encoder, feed silence and tone through the
 //! encode/decode pipeline and assert the expected emission pattern.
 
-use oxideav_codec::Encoder;
+use oxideav_core::Encoder;
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, Frame, SampleFormat};
 use oxideav_g729::{ANNEX_B_ENABLE_EXTRADATA, CODEC_ID_STR, FRAME_SAMPLES, SAMPLE_RATE};
 

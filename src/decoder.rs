@@ -22,7 +22,7 @@
 //! - The MA-4 gain-prediction coefficients are approximated by a
 //!   uniform-tap mean.
 
-use oxideav_codec::Decoder;
+use oxideav_core::Decoder;
 use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat, TimeBase,
 };
@@ -560,7 +560,7 @@ mod tests {
             l3: 7,
             p1,
             p0: pitch_parity(p1), // valid parity so erasure isn't triggered
-            c1: 0x1_2A3, // arbitrary pulse positions
+            c1: 0x1_2A3,          // arbitrary pulse positions
             s1: 0b1010,
             ga1: 4,
             gb1: 8,
