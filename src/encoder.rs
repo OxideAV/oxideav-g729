@@ -207,14 +207,6 @@ impl Encoder for G729Encoder {
             Frame::Audio(a) => a,
             _ => return Err(Error::invalid("G.729 encoder: audio frames only")),
         };
-        if af.channels != 1 || af.sample_rate != SAMPLE_RATE {
-            return Err(Error::invalid("G.729 encoder: input must be mono, 8000 Hz"));
-        }
-        if af.format != SampleFormat::S16 {
-            return Err(Error::invalid(
-                "G.729 encoder: input sample format must be S16",
-            ));
-        }
         let bytes = af
             .data
             .first()

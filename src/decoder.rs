@@ -23,9 +23,7 @@
 //!   uniform-tap mean.
 
 use oxideav_core::Decoder;
-use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat, TimeBase,
-};
+use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};
 
 use crate::annex_b_cng::CngState;
 use crate::annex_b_vad::{EncodedSid, SID_FRAME_BYTES};
@@ -86,7 +84,6 @@ struct G729Decoder {
     in_cng_mode: bool,
     pending: Option<Packet>,
     eof: bool,
-    time_base: TimeBase,
 }
 
 impl G729Decoder {
@@ -99,7 +96,6 @@ impl G729Decoder {
             in_cng_mode: false,
             pending: None,
             eof: false,
-            time_base: TimeBase::new(1, SAMPLE_RATE as i64),
         }
     }
 
@@ -358,12 +354,8 @@ impl Decoder for G729Decoder {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         Ok(Frame::Audio(AudioFrame {
-            format: SampleFormat::S16,
-            channels: 1,
-            sample_rate: SAMPLE_RATE,
             samples: FRAME_SAMPLES as u32,
             pts: pkt.pts,
-            time_base: self.time_base,
             data: vec![bytes],
         }))
     }
@@ -393,6 +385,7 @@ impl Decoder for G729Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxideav_core::TimeBase;
 
     fn make_dec() -> Box<dyn Decoder> {
         let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
@@ -581,8 +574,6 @@ mod tests {
                 panic!("expected audio frame");
             };
             assert_eq!(a.samples as usize, FRAME_SAMPLES);
-            assert_eq!(a.channels, 1);
-            assert_eq!(a.sample_rate, SAMPLE_RATE);
             assert_eq!(a.data.len(), 1);
             assert_eq!(a.data[0].len(), FRAME_SAMPLES * 2);
             for chunk in a.data[0].chunks_exact(2) {
