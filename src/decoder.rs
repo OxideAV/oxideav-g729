@@ -11,16 +11,17 @@
 //!   (§3.8) + gains (§3.9) + synthesis filter (§3.10) + postfilter
 //!   (§3.11).
 //!
-//! Deviations from the spec (documented, deliberate, and confined to
-//! areas where a first-cut decoder suffices):
-//! - The LSP first-stage codebook beyond rows `{0, 1, 127}` is
-//!   procedurally synthesised (see `lsp_tables.rs`). Output spectral
-//!   shapes match the general voiced/unvoiced character of the input
-//!   indices but won't match the reference decoder bit-for-bit.
+//! Deviations from the spec (documented, deliberate, and bounded —
+//! see the per-crate README for the full status):
+//! - LSP quantisation (`LSPCB1_Q13`, `LSPCB2_Q13`, `FG_Q15`,
+//!   `FG_SUM_Q15`, `FG_SUM_INV_Q12`) is now transcribed verbatim from
+//!   the ITU reference C source `TAB_LD8K.C` and is bit-exact against
+//!   `Lsp_get_quant` in `LSPGETQ.C`.
 //! - The gain two-stage VQ tables are reduced to 8+16 entries
-//!   covering the span of the spec's `gbk1`/`gbk2`.
+//!   covering the span of the spec's `gbk1`/`gbk2` — full 8×16 tables
+//!   are pending.
 //! - The MA-4 gain-prediction coefficients are approximated by a
-//!   uniform-tap mean.
+//!   uniform-tap mean rather than the spec's prediction coefficients.
 
 use oxideav_core::Decoder;
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};

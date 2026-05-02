@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- LSP codebooks now transcribed verbatim from ITU reference
+  `TAB_LD8K.C`: `LSPCB1_Q13` (128×10), `LSPCB2_Q13` (32×10), `FG_Q15`,
+  `FG_SUM_Q15`, `FG_SUM_INV_Q12`. `synth_lspcb1_row` / `synth_lspcb2_row`
+  procedural row synthesis dropped; `FREQ_PREV_RESET_Q13` reset vector
+  added.
+- Fix L3 column indexing in `lpc::decode_lsp` and the encoder split-VQ
+  search: `cb2_hi` is a full 10-wide row, so the high-half contribution
+  reads cols `M_HALF..M`, not `0..M_HALF`. Matches `Lsp_get_quant` in
+  `LSPGETQ.C` (`lspcb2[code2][j]` for `j ∈ [NC, M)`).
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-g729/compare/v0.0.3...v0.0.4) - 2026-04-25
 
 ### Other

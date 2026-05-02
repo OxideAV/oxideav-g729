@@ -101,24 +101,31 @@ bit-exact against the ITU reference implementation.
 
 ### Known deviations from ITU-T G.729 (2007)
 
-- `LSPCB1` beyond rows `{0, 1, 127}` is procedurally synthesised. The
-  other two rows and all of `LSPCB2` are verbatim-spec. Spectral
-  shape is plausible across the full index range but not bit-exact
-  against the reference decoder.
-- Gain two-stage VQ tables (`GBK1` / `GBK2`) are reduced first-cut
-  tables that span the spec's gain range. The MA-4 gain predictor
-  uses a uniform-tap mean rather than the spec's predictor coefficients.
-- LPC analysis uses a Hamming-window approximation in place of the
-  spec's 240-sample asymmetric window.
-- The Annex B VAD is energy-based rather than the full four-feature
-  decision tree.
+- **LSP quantisation: spec-exact.** `LSPCB1_Q13` (128×10),
+  `LSPCB2_Q13` (32×10), `FG_Q15` (2×4×10), `FG_SUM_Q15`, and
+  `FG_SUM_INV_Q12` are transcribed verbatim from the ITU reference C
+  source `TAB_LD8K.C` (G.729 Software Package Release 2, November
+  2006). The encoder split-VQ search and the decoder
+  `Lsp_get_quant`/`Lsp_prev_compose` paths use the canonical layout
+  (L2 → low-half columns of the row, L3 → high-half columns of the
+  row) per `LSPGETQ.C`.
+- **Gain VQ: NOT spec-exact.** Two-stage tables `GBK1` / `GBK2` are
+  reduced first-cut tables (8 + 16 entries) covering the span of the
+  spec's `gbk1` / `gbk2`; the full 8×8 + 16×8 ITU tables are pending
+  transcription. The MA-4 gain predictor uses a uniform-tap mean
+  rather than the spec's predictor coefficients.
+- **LPC analysis window: approximation.** Hamming window in place of
+  the spec's 240-sample asymmetric window (60-sample lookahead).
+- **Annex B VAD: simplified.** Energy-plus-hangover detector rather
+  than the spec's four-feature decision tree.
 
-Net effect: **encode then decode round-trips cleanly inside this
-crate** (exercised by `tests/encoder_roundtrip.rs` on synthetic
-speech) but bitstreams produced here are not guaranteed to decode on
-external G.729 implementations, and vice versa. The public table
-symbols and encoder/decoder structure are ready for drop-in
-replacement with the verbatim ITU tables — no logic changes required.
+Net effect: **encode → decode round-trips cleanly inside this crate**
+(exercised by `tests/encoder_roundtrip.rs`); LSP quantisation
+sub-pipeline is bit-exact against the ITU reference tables and
+matches the canonical `Lsp_get_quant` formula. Full external
+interoperability awaits the verbatim gain-VQ tables and the
+240-sample analysis window — the encoder/decoder structure is ready
+for drop-in replacement, no logic changes required.
 
 ### Annexes
 

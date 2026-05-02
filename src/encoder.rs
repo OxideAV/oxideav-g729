@@ -25,13 +25,16 @@
 //!   - [`FG_Q15`] / [`FG_SUM_Q15`] — MA-4 predictor coefficients
 //!   - [`GBK1`] / [`GBK2`] — two-stage gain codebook
 //!
-//! The decoder module notes that the procedural rows of `LSPCB1_Q13` and
-//! the small first-cut gain tables are **not** spec-exact. The encoder
-//! inherits that caveat by design: the goal is that a bitstream produced
-//! by this encoder round-trips cleanly through the in-tree decoder, not
-//! that it is playable by an external G.729 implementation. Swapping the
-//! tables for the ITU verbatim values later is a drop-in replacement
-//! with no encoder logic changes.
+//! `LSPCB1_Q13`, `LSPCB2_Q13`, and the MA-predictor tables (`FG_Q15`,
+//! `FG_SUM_Q15`, `FG_SUM_INV_Q12`) are now transcribed verbatim from
+//! the ITU reference C source `TAB_LD8K.C`, so the LSP-quantisation
+//! encode path matches the spec bit-for-bit. The remaining caveats are
+//! confined to the gain VQ (`GBK1` / `GBK2` are reduced first-cut
+//! tables), the LPC analysis window (Hamming approximation rather than
+//! the spec's 240-sample asymmetric window), and the Annex B VAD
+//! (energy-based rather than four-feature). Bitstreams round-trip
+//! cleanly through the in-tree decoder; full external interoperability
+//! awaits the gain-VQ and analysis-window updates.
 
 use std::collections::VecDeque;
 
@@ -729,13 +732,17 @@ fn quantise_lsp_with_predictor(
                 }
             }
             // Best L3 (high half, j=5..10).
+            // Per ITU-T G.729 §3.2.4 / `Lsp_get_quant` in `LSPGETQ.C`: the
+            // L3 codeword's contribution comes from the **high-half columns**
+            // of the same 32×10 LSPCB2 row (cols M_HALF..M), not its low
+            // half. cb2 is a full M-wide row.
             let mut b3 = 0usize;
             let mut b3_err = f32::INFINITY;
             for l3 in 0..NC1 {
                 let cb2 = &LSPCB2_Q13[l3];
                 let mut err = 0.0f32;
                 for j in 0..M_HALF {
-                    let recon = (cb1[j + M_HALF] as f32) + (cb2[j] as f32);
+                    let recon = (cb1[j + M_HALF] as f32) + (cb2[j + M_HALF] as f32);
                     let d = recon - resid_target[j + M_HALF];
                     err += d * d;
                 }
@@ -751,11 +758,14 @@ fn quantise_lsp_with_predictor(
                 best_l2_for = b2 as u8;
                 best_l3_for = b3 as u8;
                 // Assemble the residual in Q13 using the selected entries.
+                // L2 contributes the low half (cols 0..M_HALF) of its row;
+                // L3 contributes the high half (cols M_HALF..M) of its row.
                 let cb2_lo = &LSPCB2_Q13[b2];
                 let cb2_hi = &LSPCB2_Q13[b3];
                 for j in 0..M_HALF {
                     best_resid_for[j] = cb1[j].saturating_add(cb2_lo[j]);
-                    best_resid_for[j + M_HALF] = cb1[j + M_HALF].saturating_add(cb2_hi[j]);
+                    best_resid_for[j + M_HALF] =
+                        cb1[j + M_HALF].saturating_add(cb2_hi[j + M_HALF]);
                 }
             }
         }

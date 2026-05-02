@@ -14,9 +14,7 @@
 //!   3. PTS values on the produced packets rise monotonically.
 
 use oxideav_core::CodecRegistry;
-use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, SampleFormat,
-};
+use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, SampleFormat};
 use oxideav_core::{Decoder, Encoder};
 use oxideav_g729::{CODEC_ID_STR, FRAME_SAMPLES, SAMPLE_RATE};
 

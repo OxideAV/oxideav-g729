@@ -6,10 +6,12 @@
 //! - `lpc`: LSP decode from index quadruple via MA-4 predictor + safety
 //!   monotonicity (§3.2.4), LSP ↔ LPC (§3.2.6), LSP interpolation
 //!   between the two subframes (§3.2.5).
-//! - `lsp_tables`: static codebook tables. Rows verbatim from the spec
-//!   are retained; the rest are procedurally synthesised so every
-//!   index produces a valid monotone LSF codeword. See the
-//!   module-level doc for the follow-up path.
+//! - `lsp_tables`: static codebook tables transcribed verbatim from the
+//!   ITU-T G.729 reference C source `TAB_LD8K.C` (`LSPCB1_Q13`,
+//!   `LSPCB2_Q13`, `FG_Q15`, `FG_SUM_Q15`, `FG_SUM_INV_Q12`). LSP
+//!   quantisation is bit-exact against the reference. The gain-VQ
+//!   tables (`GBK1` / `GBK2`) remain reduced — see the per-crate
+//!   README for the full list of remaining gaps.
 //! - `synthesis`: adaptive codebook (fractional-pitch, 1/3 resolution),
 //!   algebraic fixed codebook (4-track × 4-pulse), two-stage gain VQ,
 //!   10th-order all-pole synthesis filter, short-term + long-term

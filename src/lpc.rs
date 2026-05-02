@@ -121,10 +121,17 @@ pub fn decode_lsp(
     let cb2_lo = &LSPCB2_Q13[l2];
     let cb2_hi = &LSPCB2_Q13[l3];
 
+    // Per ITU-T G.729 §3.2.4 / `Lsp_get_quant` in `LSPGETQ.C`: both halves
+    // index into the *same* 32×10 LSPCB2 row, but the L2 entry contributes
+    // its low-half columns (0..M_HALF) to the result's low half, and the
+    // L3 entry contributes its **high-half columns** (M_HALF..M) to the
+    // result's high half. The earlier "32×5" interpretation conflated the
+    // half-vector layout with column slicing — `cb2_hi` is a full M-wide
+    // row, so we must read its high columns explicitly.
     let mut residual = [0i16; LPC_ORDER];
     for k in 0..M_HALF {
         residual[k] = cb1[k].saturating_add(cb2_lo[k]);
-        residual[k + M_HALF] = cb1[k + M_HALF].saturating_add(cb2_hi[k]);
+        residual[k + M_HALF] = cb1[k + M_HALF].saturating_add(cb2_hi[k + M_HALF]);
     }
 
     // 2) Reconstruct the quantised LSF vector via the MA predictor.
