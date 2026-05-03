@@ -764,8 +764,7 @@ fn quantise_lsp_with_predictor(
                 let cb2_hi = &LSPCB2_Q13[b3];
                 for j in 0..M_HALF {
                     best_resid_for[j] = cb1[j].saturating_add(cb2_lo[j]);
-                    best_resid_for[j + M_HALF] =
-                        cb1[j + M_HALF].saturating_add(cb2_hi[j + M_HALF]);
+                    best_resid_for[j + M_HALF] = cb1[j + M_HALF].saturating_add(cb2_hi[j + M_HALF]);
                 }
             }
         }
