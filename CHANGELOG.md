@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-g729/compare/v0.0.4...v0.0.5) - 2026-05-03
+
+### Other
+
+- replace never-match regex with semver_check = false
+- cargo fmt: fix rustfmt --check CI gate
+- migrate to centralized OxideAV/.github reusable workflows
+- transcribe LSP codebooks verbatim from ITU TAB_LD8K.C, fix L3 high-half indexing
+- adopt slim VideoFrame/AudioFrame shape
+- pin release-plz to patch-only bumps
+
 ### Other
 
 - LSP codebooks now transcribed verbatim from ITU reference
