@@ -11,7 +11,7 @@ use oxideav_core::{CodecInfo, CodecRegistry, Decoder, Encoder};
 use crate::{CODEC_ID_STR, SAMPLE_RATE};
 
 /// Register the G.729 codec (decoder + encoder).
-pub fn register(reg: &mut CodecRegistry) {
+pub fn register_codecs(reg: &mut CodecRegistry) {
     let caps = CodecCapabilities::audio("g729_sw")
         .with_lossy(true)
         .with_intra_only(false)
