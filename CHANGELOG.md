@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-g729/compare/v0.0.6...v0.0.7) - 2026-05-18
+
+### Other
+
+- align encoder gain-VQ with spec — γ correction factor + MA-4 predictor
+
 ### Other
 
 - Encoder gain-VQ now quantises the spec's correction factor
