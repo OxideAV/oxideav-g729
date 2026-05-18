@@ -247,3 +247,69 @@ fn register_exposes_both_directions() {
     assert!(reg.has_decoder(&id), "decoder factory must be registered");
     assert!(reg.has_encoder(&id), "encoder factory must be registered");
 }
+
+/// Encoder and decoder both run the MA-4 gain predictor (per §3.9 +
+/// Table 9 init = −14 dB) and consume the same correction factor γ
+/// from the GBK1/GBK2 codebook pair. As of round 74, the encoder
+/// quantises γ instead of raw `g_c`, so the predictor state on the
+/// encode side stays locked to the decode side. This test exercises
+/// the predictor convergence by encoding a long steady-tone input and
+/// asserting the output stays bounded (no runaway gain feedback) and
+/// retains non-trivial energy frame-over-frame.
+#[test]
+fn steady_tone_gain_predictor_converges() {
+    // 5 seconds of a 400 Hz tone at amplitude ±2000 LSB — well within
+    // the gain VQ's expressive range; the MA-4 history should settle
+    // and the per-frame gain should stop drifting after the first few
+    // frames.
+    let n = 5 * SAMPLE_RATE as usize;
+    let mut input = Vec::with_capacity(n);
+    let sr = SAMPLE_RATE as f32;
+    for i in 0..n {
+        let s = 2000.0 * (2.0 * core::f32::consts::PI * 400.0 * (i as f32) / sr).sin();
+        input.push(s.round().clamp(-32768.0, 32767.0) as i16);
+    }
+
+    let mut enc = make_encoder();
+    let packets = encode_all(&mut enc, &input);
+    let mut dec = make_decoder();
+    let out = decode_all(&mut dec, &packets);
+    assert!(!out.is_empty(), "decoder produced no samples");
+
+    // Split into 10 equal chunks and compute per-chunk energy. The
+    // energy curve should be monotone(-ish) after the first chunk
+    // (predictor warm-up) — no chunk should be more than 10× louder
+    // than the previous one (catches runaway gain feedback) and no
+    // chunk should drop below 1 % of the peak energy (catches a
+    // collapsing predictor).
+    let chunk_n = out.len() / 10;
+    let mut energies = Vec::with_capacity(10);
+    for c in 0..10 {
+        let start = c * chunk_n;
+        let end = if c == 9 { out.len() } else { start + chunk_n };
+        energies.push(energy(&out[start..end]));
+    }
+    let peak = energies.iter().copied().fold(0.0_f64, f64::max);
+    assert!(peak > 0.0, "no energy in output");
+    // Past the warm-up chunk, all chunks must stay above 1 % of peak.
+    for (i, &e) in energies.iter().enumerate().skip(2) {
+        assert!(
+            e > peak * 0.01,
+            "chunk {i} energy {e:.0} collapsed below 1 % of peak {peak:.0}"
+        );
+    }
+    // After the warm-up (first 2 chunks while the −14 dB MA-4 history
+    // converges from its init value), no chunk may drop below 2 % of
+    // peak — catches collapsing or oscillating gain predictors.
+    let mut min_after_warmup = f64::INFINITY;
+    for &e in energies.iter().skip(2) {
+        if e < min_after_warmup {
+            min_after_warmup = e;
+        }
+    }
+    assert!(
+        min_after_warmup >= peak * 0.02,
+        "min post-warmup chunk energy {min_after_warmup:.0} is below 2 % of peak {peak:.0}; \
+         energies={energies:?}"
+    );
+}

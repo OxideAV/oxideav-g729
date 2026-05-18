@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- Encoder gain-VQ now quantises the spec's correction factor
+  `γ = g_c / g'_c` (eq 72) instead of raw `g_c`, mirroring the
+  decoder's `g_c = γ̂ · g'_c` reconstruction (eq 74).
+- Encoder maintains a 4-deep MA-4 gain-prediction history `Û^(k)`
+  initialised to `-14 dB` per ITU-T G.729 Table 9; history is rolled
+  on each subframe with `Û^(m) = 20·log10(γ_q)` per eq (70) in
+  lockstep with the decoder.
+- Excitation history written back to the encoder's adaptive-codebook
+  buffer now uses the quantised `γ_q · g'_c`, matching what the
+  decoder reconstructs on the receive side.
+- New integration test `steady_tone_gain_predictor_converges`
+  validates that the gain-predictor state stays stable across
+  5 seconds of input without runaway feedback or collapse.
+- README: correct the gain-VQ table dimensions (spec says `gbk1` is
+  8×2 and `gbk2` is 16×2 per §5.2 Table 12, not 8×8 + 16×8); call out
+  the MA-4 gain predictor as spec-exact going forward.
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-g729/compare/v0.0.5...v0.0.6) - 2026-05-06
 
 ### Other

@@ -14,14 +14,16 @@
 //! Deviations from the spec (documented, deliberate, and bounded —
 //! see the per-crate README for the full status):
 //! - LSP quantisation (`LSPCB1_Q13`, `LSPCB2_Q13`, `FG_Q15`,
-//!   `FG_SUM_Q15`, `FG_SUM_INV_Q12`) is now transcribed verbatim from
+//!   `FG_SUM_Q15`, `FG_SUM_INV_Q12`) is transcribed verbatim from
 //!   the ITU reference C source `TAB_LD8K.C` and is bit-exact against
 //!   `Lsp_get_quant` in `LSPGETQ.C`.
-//! - The gain two-stage VQ tables are reduced to 8+16 entries
-//!   covering the span of the spec's `gbk1`/`gbk2` — full 8×16 tables
-//!   are pending.
-//! - The MA-4 gain-prediction coefficients are approximated by a
-//!   uniform-tap mean rather than the spec's prediction coefficients.
+//! - The MA-4 gain predictor coefficients `[0.68, 0.58, 0.34, 0.19]`
+//!   are spec-exact (§3.9.1 eq 69) and `Û^(k)` is initialised to
+//!   `-14 dB` per Table 9.
+//! - The two-stage gain VQ table *dimensions* are spec-correct
+//!   (`GBK1` = 8×2, `GBK2` = 16×2 per §5.2 Table 12) but the numeric
+//!   entries are first-cut approximations; verbatim `gbk1` / `gbk2`
+//!   transcription is pending.
 
 use oxideav_core::Decoder;
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};

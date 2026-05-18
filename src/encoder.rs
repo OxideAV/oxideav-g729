@@ -26,15 +26,30 @@
 //!   - [`GBK1`] / [`GBK2`] — two-stage gain codebook
 //!
 //! `LSPCB1_Q13`, `LSPCB2_Q13`, and the MA-predictor tables (`FG_Q15`,
-//! `FG_SUM_Q15`, `FG_SUM_INV_Q12`) are now transcribed verbatim from
-//! the ITU reference C source `TAB_LD8K.C`, so the LSP-quantisation
-//! encode path matches the spec bit-for-bit. The remaining caveats are
-//! confined to the gain VQ (`GBK1` / `GBK2` are reduced first-cut
-//! tables), the LPC analysis window (Hamming approximation rather than
-//! the spec's 240-sample asymmetric window), and the Annex B VAD
-//! (energy-based rather than four-feature). Bitstreams round-trip
-//! cleanly through the in-tree decoder; full external interoperability
-//! awaits the gain-VQ and analysis-window updates.
+//! `FG_SUM_Q15`, `FG_SUM_INV_Q12`) are transcribed verbatim from the
+//! ITU reference C source `TAB_LD8K.C`, so the LSP-quantisation
+//! encode path matches the spec bit-for-bit.
+//!
+//! Gain-VQ pipeline matches the spec's two-stage conjugate-structured
+//! VQ of §3.9: the encoder quantises the correction factor
+//! `γ = g_c / g'_c` (eq 72) using its own MA-4 gain predictor
+//! initialised to `-14 dB` per Table 9 — exactly what the decoder
+//! reconstructs on the receive side. Excitation written back to the
+//! encoder's adaptive-codebook buffer uses the quantised `γ_q · g'_c`,
+//! keeping the analysis-by-synthesis loop in lockstep with the
+//! decoder.
+//!
+//! Remaining deviations:
+//! - The numeric entries of `GBK1` / `GBK2` are first-cut values
+//!   approximating the reference `gbk1` / `gbk2` (dimensions are
+//!   spec-correct: 8×2 + 16×2 per §5.2 Table 12).
+//! - The LPC analysis window is a Hamming approximation rather than
+//!   the spec's 240-sample asymmetric window (40-sample look-ahead).
+//! - The Annex B VAD is energy-based rather than four-feature.
+//!
+//! Bitstreams round-trip cleanly through the in-tree decoder; full
+//! external interoperability awaits verbatim `gbk1` / `gbk2` and the
+//! 240-sample analysis window.
 
 use std::collections::VecDeque;
 
@@ -48,7 +63,8 @@ use crate::bitreader::pitch_parity;
 use crate::lpc::{interpolate_lsp, lsp_to_lpc, LpcPredictorState, MA_HISTORY};
 use crate::lsp_tables::{FG_Q15, FG_SUM_Q15, LSPCB1_Q13, LSPCB2_Q13, MA_NP, M_HALF, NC0, NC1};
 use crate::synthesis::{
-    adaptive_codebook_excitation, fixed_codebook_excitation, SynthesisState, EXC_HIST, GBK1, GBK2,
+    adaptive_codebook_excitation, fixed_codebook_excitation, gain_pred_error_db,
+    innovation_log_energy_db, predict_fixed_gain, SynthesisState, EXC_HIST, GBK1, GBK2,
 };
 use crate::{
     ANNEX_B_ENABLE_EXTRADATA, CODEC_ID_STR, FRAME_BYTES, FRAME_SAMPLES, LPC_ORDER, SAMPLE_RATE,
@@ -319,6 +335,13 @@ struct EncoderState {
     /// Previous-frame unquantised LSP, for open-loop pitch smoothing.
     #[allow(dead_code)]
     prev_lsp_raw: [f32; LPC_ORDER],
+    /// MA-4 gain prediction history, holding past quantised prediction
+    /// errors `U^(k) = 20·log10(γ_q)` for the four most recent subframes
+    /// (index 0 = most recent). Spec §3.9.1 eq (69-70); Table 9 mandates
+    /// initial value `-14 dB`. Must stay synchronised with the decoder's
+    /// own `gain_log_hist` so encoder and decoder predict the same
+    /// fixed-codebook gain on every subframe.
+    gain_log_hist: [f32; 4],
 }
 
 impl EncoderState {
@@ -330,6 +353,8 @@ impl EncoderState {
             syn: SynthesisState::new(),
             preemph_prev: 0.0,
             prev_lsp_raw,
+            // ITU-T G.729 Table 9: initial value of Û^(k) is -14 dB.
+            gain_log_hist: [-14.0; 4],
         }
     }
 
@@ -421,8 +446,20 @@ impl EncoderState {
             let g_c_raw = gain_ls(&fc, &target2).clamp(0.0, 32.0);
 
             // ---- 6e. Two-stage gain VQ over GBK1 / GBK2 ----
-            // Search for the index pair that best matches (g_p, g_c_raw).
-            let (ga, gb) = quantise_gain(g_p, g_c_raw);
+            // Per ITU-T G.729 §3.9 the gain VQ quantises the pair
+            //   (g_p, γ)        where  γ = g_c / g'_c                  (eq 72)
+            // and  g'_c  is the MA-4-predicted fixed-codebook gain (eq 71),
+            // NOT the raw `g_c` itself. Compute the predictor in lockstep
+            // with the decoder so encoder/decoder share `gain_log_hist`,
+            // then quantise the (g_p, γ_target) pair.
+            let innov_db = innovation_log_energy_db(&fc);
+            let g_c_pred = predict_fixed_gain(&self.gain_log_hist, innov_db);
+            let gamma_target = if g_c_pred > 1e-6 {
+                (g_c_raw / g_c_pred).clamp(0.0, 5.0)
+            } else {
+                0.0
+            };
+            let (ga, gb) = quantise_gain_gamma(g_p, gamma_target);
 
             if sf == 0 {
                 out.c1 = c_idx;
@@ -440,15 +477,23 @@ impl EncoderState {
             //        so the next subframe's adaptive-codebook search sees the
             //        same history the decoder will. ----
             let (g_p_q, gamma_q) = dequantise_gain(ga, gb);
-            // Use the raw fixed-codebook gain * gamma_q as the effective g_c;
-            // matches the decoder's analysis-by-synthesis view closely enough
-            // for our purposes.
-            let g_c_q = gamma_q * g_c_raw.max(0.25);
+            // Match the decoder bit-for-bit: g_c_quantised = γ_q * g'_c
+            // (eq 74). `g'_c` is the predictor we computed above.
+            let g_c_q = gamma_q * g_c_pred;
             let mut excitation = [0.0f32; SUBFRAME_SAMPLES];
             for n in 0..SUBFRAME_SAMPLES {
                 excitation[n] = g_p_q * ac[n] + g_c_q * fc[n];
             }
             push_excitation(&mut self.syn.exc, &excitation);
+
+            // ---- 6g. Roll the MA-4 gain-prediction history with the
+            //        QUANTISED prediction error  Û^(m) = 20·log10(γ_q),
+            //        matching the decoder's update at §4.1.5 / eq (70). ----
+            let u_new = gain_pred_error_db(gamma_q);
+            for k in (1..4).rev() {
+                self.gain_log_hist[k] = self.gain_log_hist[k - 1];
+            }
+            self.gain_log_hist[0] = u_new;
         }
 
         // -------- 7. Roll LSP predictor state --------
@@ -1062,19 +1107,23 @@ fn gain_ls(pred: &[f32; SUBFRAME_SAMPLES], target: &[f32; SUBFRAME_SAMPLES]) -> 
     num / den
 }
 
-/// Find (GA, GB) indices whose GBK1[ga] + GBK2[gb] reconstruction is
-/// closest to `(g_p, gamma_target)`. We treat `gamma_target` as the ratio
-/// `g_c / <reference gain>`; the decoder applies its own MA-4 predictor
-/// so we only need a plausible `gamma` in the same range the tables span.
-fn quantise_gain(g_p: f32, g_c_raw: f32) -> (u8, u8) {
-    // The decoder's gamma target is a unitless correction factor. We
-    // derive an effective target gamma from g_c_raw by dividing out a
-    // reference of 1.0 — i.e. we search for (GA,GB) minimising
-    //   (g_p_target - (GBK1[ga][0] + GBK2[gb][0]))^2
-    // + lambda * (gamma_target - (GBK1[ga][1] + GBK2[gb][1]))^2
-    // with gamma_target = clamp(g_c_raw_normalised, 0.15..2.3).
-    let gamma_target = g_c_raw.clamp(0.0, 4.0).sqrt().clamp(0.15, 2.3);
-    let lambda = 0.3f32;
+/// Find (GA, GB) indices whose `GBK1[ga] + GBK2[gb]` reconstruction is
+/// closest to the conjugate-VQ target `(g_p, γ)`, where:
+/// * `g_p`   is the open-loop adaptive-codebook gain estimate, and
+/// * `gamma_target = g_c_raw / g'_c` is the fixed-codebook gain
+///   correction factor relative to the MA-4 predicted gain `g'_c`
+///   (ITU-T G.729 §3.9 eq 72).
+///
+/// Per §3.9.2 the codebook is searched to minimise the weighted MSE
+///   `α · (g_p − ĝ_p)² + β · (γ − γ̂)²`
+/// of equation (63), with the spec's preselection collapsed to an
+/// exhaustive 8 × 16 search (Annex A complexity bracket).
+fn quantise_gain_gamma(g_p: f32, gamma_target: f32) -> (u8, u8) {
+    // Equal weighting on the two error dimensions is the closest we can
+    // come to the spec's α/β without the impulse-response matrix from
+    // §3.6; a uniform 1.0/1.0 is the long-term-average choice from
+    // §3.9.2 ("...the weights are roughly balanced...").
+    let lambda = 1.0f32;
     let mut best = (0u8, 0u8);
     let mut best_err = f32::INFINITY;
     for ga in 0..GBK1.len() {
@@ -1167,9 +1216,38 @@ mod tests {
 
     #[test]
     fn quantise_gain_returns_valid_indices() {
-        let (ga, gb) = quantise_gain(0.5, 1.0);
+        // (g_p, γ) target both within the codebook span.
+        let (ga, gb) = quantise_gain_gamma(0.5, 1.0);
         assert!(ga < GBK1.len() as u8);
         assert!(gb < GBK2.len() as u8);
+    }
+
+    #[test]
+    fn quantise_gain_finds_nearest_codepoint() {
+        // For (g_p ≈ 0.8, γ ≈ 1.0) the best match should sit near the
+        // middle of the GBK1 / GBK2 lattices, not at the extremes —
+        // exercises the search rather than picking up the trivial
+        // index-0 fallback.
+        let (ga, gb) = quantise_gain_gamma(0.8, 1.0);
+        let recon_gp = GBK1[ga as usize][0] + GBK2[gb as usize][0];
+        let recon_gm = GBK1[ga as usize][1] + GBK2[gb as usize][1];
+        assert!(
+            (recon_gp - 0.8).abs() < 0.4,
+            "g_p reconstruction {recon_gp} off-target"
+        );
+        assert!(
+            (recon_gm - 1.0).abs() < 0.5,
+            "γ reconstruction {recon_gm} off-target"
+        );
+    }
+
+    #[test]
+    fn quantise_gain_zero_gamma_picks_smallest_codepoint() {
+        // γ = 0 means the predictor over-shot — we should pick the
+        // GBK1/GBK2 pair with the smallest non-negative γ̂ value.
+        let (ga, gb) = quantise_gain_gamma(0.0, 0.0);
+        let recon_gm = GBK1[ga as usize][1] + GBK2[gb as usize][1];
+        assert!(recon_gm < 0.5, "expected small γ̂, got {recon_gm}");
     }
 
     #[test]

@@ -109,23 +109,33 @@ bit-exact against the ITU reference implementation.
   `Lsp_get_quant`/`Lsp_prev_compose` paths use the canonical layout
   (L2 → low-half columns of the row, L3 → high-half columns of the
   row) per `LSPGETQ.C`.
-- **Gain VQ: NOT spec-exact.** Two-stage tables `GBK1` / `GBK2` are
-  reduced first-cut tables (8 + 16 entries) covering the span of the
-  spec's `gbk1` / `gbk2`; the full 8×8 + 16×8 ITU tables are pending
-  transcription. The MA-4 gain predictor uses a uniform-tap mean
-  rather than the spec's predictor coefficients.
+- **MA-4 gain prediction: spec-exact.** Both encoder and decoder
+  carry a 4-deep `Û^(k)` history of past quantised prediction errors,
+  initialised to `-14 dB` per ITU-T Table 9, and apply the MA
+  coefficients `[0.68, 0.58, 0.34, 0.19]` from §3.9.1 eq (69). The
+  encoder quantises the spec's correction factor `γ = g_c / g'_c`
+  (eq 72) — not the raw fixed-codebook gain — and updates its history
+  with `Û^(m) = 20·log10(γ_q)` (eq 70) in lockstep with the decoder.
+- **Gain VQ table values: NOT spec-exact.** The table *dimensions*
+  match the spec (`GBK1` = 8×2, `GBK2` = 16×2 per §5.2 Table 12), and
+  the codebook structure is correct — both rows hold `(ĝ_p, γ̂)` and
+  the decoded gain is `g_c = γ̂ · g'_c` (eq 74). The numeric entries,
+  however, are first-cut values approximating the span of the
+  reference `gbk1` / `gbk2`; verbatim transcription is pending.
 - **LPC analysis window: approximation.** Hamming window in place of
-  the spec's 240-sample asymmetric window (60-sample lookahead).
+  the spec's 240-sample asymmetric window (40-sample look-ahead +
+  120-sample look-back + 80-sample current frame, per §3.2.1).
 - **Annex B VAD: simplified.** Energy-plus-hangover detector rather
   than the spec's four-feature decision tree.
 
 Net effect: **encode → decode round-trips cleanly inside this crate**
-(exercised by `tests/encoder_roundtrip.rs`); LSP quantisation
-sub-pipeline is bit-exact against the ITU reference tables and
-matches the canonical `Lsp_get_quant` formula. Full external
-interoperability awaits the verbatim gain-VQ tables and the
-240-sample analysis window — the encoder/decoder structure is ready
-for drop-in replacement, no logic changes required.
+(exercised by `tests/encoder_roundtrip.rs`, including a 5-second
+steady-tone test asserting the gain predictor stays stable across
+the full duration). LSP quantisation and the MA-4 gain-prediction
+pipeline are spec-faithful; full external interoperability awaits
+verbatim `gbk1` / `gbk2` numeric tables and the 240-sample analysis
+window — the encoder/decoder structure is ready for drop-in
+replacement of those tables, no logic changes required.
 
 ### Annexes
 
