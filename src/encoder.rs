@@ -39,17 +39,20 @@
 //! keeping the analysis-by-synthesis loop in lockstep with the
 //! decoder.
 //!
+//! The LP-analysis windowing pipeline matches the spec's §3.2.1
+//! verbatim: a 240-sample asymmetric window (half-Hamming over
+//! n=0..199 plus a quarter-cosine fade over n=200..239, per eq (3))
+//! applied to 120 past + 80 current + 40 look-ahead samples. The
+//! lookahead introduces the spec's 5-ms extra algorithmic delay.
+//!
 //! Remaining deviations:
 //! - The numeric entries of `GBK1` / `GBK2` are first-cut values
 //!   approximating the reference `gbk1` / `gbk2` (dimensions are
 //!   spec-correct: 8×2 + 16×2 per §5.2 Table 12).
-//! - The LPC analysis window is a Hamming approximation rather than
-//!   the spec's 240-sample asymmetric window (40-sample look-ahead).
 //! - The Annex B VAD is energy-based rather than four-feature.
 //!
 //! Bitstreams round-trip cleanly through the in-tree decoder; full
-//! external interoperability awaits verbatim `gbk1` / `gbk2` and the
-//! 240-sample analysis window.
+//! external interoperability awaits verbatim `gbk1` / `gbk2`.
 
 use std::collections::VecDeque;
 
@@ -145,32 +148,61 @@ impl G729Encoder {
     }
 
     fn drain(&mut self, final_flush: bool) {
-        while self.pcm_queue.len() >= FRAME_SAMPLES {
+        // G.729 §3.2.1: the LP-analysis window spans 120 past + 80 current
+        // + 40 future samples (5-ms look-ahead). Per the spec, this "5 ms
+        // extra algorithmic delay" is realised by holding back the last
+        // 40 samples of the PCM queue — we only encode a frame once we
+        // have its 80 samples plus the following 40 samples in hand.
+        let lookahead = LP_LOOKAHEAD_SAMPLES;
+        while self.pcm_queue.len() >= FRAME_SAMPLES + lookahead {
             let mut pcm = [0i16; FRAME_SAMPLES];
             pcm.copy_from_slice(&self.pcm_queue[..FRAME_SAMPLES]);
+            let mut la = [0i16; LP_LOOKAHEAD_SAMPLES];
+            la.copy_from_slice(&self.pcm_queue[FRAME_SAMPLES..FRAME_SAMPLES + lookahead]);
             self.pcm_queue.drain(..FRAME_SAMPLES);
-            self.emit_frame(&pcm);
+            self.encode_and_emit(&pcm, &la);
         }
-        if final_flush && !self.pcm_queue.is_empty() {
-            let mut pcm = [0i16; FRAME_SAMPLES];
-            for (i, &s) in self.pcm_queue.iter().enumerate() {
-                pcm[i] = s;
+        if final_flush {
+            // EOF: pad whatever remains in `pcm_queue` with zeros up to
+            // FRAME_SAMPLES, then encode using zero look-ahead. After
+            // that, the queue is empty and the encoder is fully drained.
+            while !self.pcm_queue.is_empty() {
+                let mut pcm = [0i16; FRAME_SAMPLES];
+                let take = self.pcm_queue.len().min(FRAME_SAMPLES);
+                for (i, &s) in self.pcm_queue.iter().take(take).enumerate() {
+                    pcm[i] = s;
+                }
+                self.pcm_queue.drain(..take);
+                let mut la = [0i16; LP_LOOKAHEAD_SAMPLES];
+                let la_take = self.pcm_queue.len().min(LP_LOOKAHEAD_SAMPLES);
+                for (i, &s) in self.pcm_queue.iter().take(la_take).enumerate() {
+                    la[i] = s;
+                }
+                self.encode_and_emit(&pcm, &la);
+                if self.pcm_queue.is_empty() {
+                    break;
+                }
             }
-            self.pcm_queue.clear();
-            self.emit_frame(&pcm);
         }
     }
 
-    fn emit_frame(&mut self, pcm: &[i16; FRAME_SAMPLES]) {
+    fn encode_and_emit(
+        &mut self,
+        pcm: &[i16; FRAME_SAMPLES],
+        lookahead: &[i16; LP_LOOKAHEAD_SAMPLES],
+    ) {
+        let params = self.state.encode_one(pcm, lookahead);
         let idx = self.frame_index;
         self.frame_index += 1;
+        self.emit_frame(pcm, &params, idx);
+    }
 
+    fn emit_frame(&mut self, pcm: &[i16; FRAME_SAMPLES], params: &EncodedFrame, idx: u64) {
         // Annex B VAD/DTX path: classify first, then either emit a normal
-        // speech frame, an SID, or nothing. We still run the main-body
-        // analyser in all cases so the encoder's internal LPC / excitation
-        // state stays consistent — keeps the first post-silence frame from
-        // glitching.
-        let params = self.state.analyse(pcm);
+        // speech frame, an SID, or nothing. The analyser has already run
+        // (inside `state.advance`, with the spec-mandated 240-sample
+        // window + 5-ms look-ahead); we just need to pack and/or VAD-route
+        // the resulting frame parameters.
 
         if self.annex_b {
             // Use the quantised LSP as the VAD's spectrum input — it's a
@@ -180,7 +212,7 @@ impl G729Encoder {
             let (decision, sid) = self.vad.classify(pcm, &lsp);
             match decision {
                 VadDecision::Voice => {
-                    let bytes = pack_frame(&params);
+                    let bytes = pack_frame(params);
                     self.push_packet(idx, bytes);
                 }
                 VadDecision::Noise => {
@@ -197,7 +229,7 @@ impl G729Encoder {
                 }
             }
         } else {
-            let bytes = pack_frame(&params);
+            let bytes = pack_frame(params);
             self.push_packet(idx, bytes);
         }
     }
@@ -322,6 +354,21 @@ fn pack_frame(fp: &EncodedFrame) -> Vec<u8> {
 // Analysis state
 // =========================================================================
 
+/// Size of the LP-analysis window per ITU-T G.729 §3.2.1 / eq (3):
+/// 120 past samples + 80 current-frame samples + 40 look-ahead samples.
+const LP_WINDOW_SAMPLES: usize = 240;
+
+/// Number of past-frame samples retained as the leading 120-sample
+/// "history" portion of the LP-analysis window. Spec §3.2.1: "the LP
+/// analysis window applies to 120 samples from past speech frames, 80
+/// samples from the present speech frame, and 40 samples from the
+/// future frame."
+const LP_PAST_SAMPLES: usize = 120;
+
+/// Size of the look-ahead slice taken from the next 80-sample frame.
+/// 40 samples = 5 ms at 8 kHz, the spec's `5 ms look-ahead`.
+const LP_LOOKAHEAD_SAMPLES: usize = 40;
+
 struct EncoderState {
     /// LSP predictor state (same type as the decoder's — so we quantise the
     /// LSP residual identically and can feed the same table back).
@@ -342,6 +389,10 @@ struct EncoderState {
     /// own `gain_log_hist` so encoder and decoder predict the same
     /// fixed-codebook gain on every subframe.
     gain_log_hist: [f32; 4],
+    /// Rolling pre-emphasised-PCM history that supplies the past-120
+    /// portion of the 240-sample LP analysis window. Indexed
+    /// `[0..LP_PAST_SAMPLES]` — newest samples at the high end.
+    win_history: [f32; LP_PAST_SAMPLES],
 }
 
 impl EncoderState {
@@ -355,13 +406,24 @@ impl EncoderState {
             prev_lsp_raw,
             // ITU-T G.729 Table 9: initial value of Û^(k) is -14 dB.
             gain_log_hist: [-14.0; 4],
+            win_history: [0.0; LP_PAST_SAMPLES],
         }
     }
 
-    /// Analyse a single 80-sample frame and produce the 15 bit-fields.
-    fn analyse(&mut self, pcm: &[i16; FRAME_SAMPLES]) -> EncodedFrame {
-        // -------- 1. Pre-process (HPF + normalise) --------
+    /// Run a single 80-sample frame through the encoder, using
+    /// `lookahead` (the first 40 samples of the next-in-line frame, or
+    /// trailing zeros at EOF) as the spec's 5-ms look-ahead source.
+    fn encode_one(
+        &mut self,
+        pcm: &[i16; FRAME_SAMPLES],
+        lookahead: &[i16; LP_LOOKAHEAD_SAMPLES],
+    ) -> EncodedFrame {
+        // -------- 1. Pre-process (HPF + normalise) on the current frame
+        //         + the first 40 samples of the look-ahead. The 160-
+        //         sample history slot already holds pre-emphasised
+        //         samples from earlier frames. --------
         let mut sig = [0.0f32; FRAME_SAMPLES];
+        let mut lookahead_pre = [0.0f32; LP_LOOKAHEAD_SAMPLES];
         let mut prev = self.preemph_prev;
         for i in 0..FRAME_SAMPLES {
             let x = pcm[i] as f32;
@@ -369,14 +431,40 @@ impl EncoderState {
             prev = x;
             sig[i] = y;
         }
-        self.preemph_prev = prev;
+        // Pre-emphasis-state at the boundary between current frame and
+        // look-ahead must continue smoothly — don't reset prev.
+        for i in 0..LP_LOOKAHEAD_SAMPLES {
+            let x = lookahead[i] as f32;
+            let y = x - 0.46 * prev;
+            prev = x;
+            lookahead_pre[i] = y;
+        }
+        // Commit pre-emphasis state up through the end of the current
+        // frame only; the look-ahead samples will be re-pre-emphasised
+        // when they become the next call's `pcm`, so we mustn't carry
+        // their `prev` forward.
+        self.preemph_prev = pcm[FRAME_SAMPLES - 1] as f32;
 
-        // -------- 2. LPC analysis on a 240-sample window --------
-        // The spec uses a 240-sample asymmetric window; we approximate
-        // with a Hamming window spanning the current frame plus 80 lookback
-        // and 80 look-ahead (we only have the current frame, so we mirror
-        // the ends — good enough for a first-cut encoder).
-        let a = lpc_analysis(&sig);
+        // -------- 2. Assemble the 240-sample LP-analysis window:
+        //         [past 120 | current 80 | look-ahead 40]
+        //         then apply the asymmetric window from eq (3). --------
+        debug_assert_eq!(
+            LP_PAST_SAMPLES + FRAME_SAMPLES + LP_LOOKAHEAD_SAMPLES,
+            LP_WINDOW_SAMPLES
+        );
+        let mut win = [0.0f32; LP_WINDOW_SAMPLES];
+        win[..LP_PAST_SAMPLES].copy_from_slice(&self.win_history);
+        win[LP_PAST_SAMPLES..LP_PAST_SAMPLES + FRAME_SAMPLES].copy_from_slice(&sig);
+        win[LP_PAST_SAMPLES + FRAME_SAMPLES..].copy_from_slice(&lookahead_pre);
+        let a = lpc_analysis(&win);
+
+        // -------- 2b. Roll `win_history` forward by FRAME_SAMPLES so
+        //         the next call sees this frame in its history slot. --------
+        let mut new_history = [0.0f32; LP_PAST_SAMPLES];
+        new_history[..LP_PAST_SAMPLES - FRAME_SAMPLES]
+            .copy_from_slice(&self.win_history[FRAME_SAMPLES..]);
+        new_history[LP_PAST_SAMPLES - FRAME_SAMPLES..].copy_from_slice(&sig);
+        self.win_history = new_history;
 
         // -------- 3. LPC → LSP (cosine domain) --------
         let lsp_unq = lpc_to_lsp(&a);
@@ -517,26 +605,63 @@ fn push_excitation(exc: &mut [f32; EXC_HIST], sub: &[f32; SUBFRAME_SAMPLES]) {
 // LPC analysis
 // =========================================================================
 
-/// Windowed autocorrelation + Levinson-Durbin recursion → LPC[0..=10].
-fn lpc_analysis(sig: &[f32; FRAME_SAMPLES]) -> [f32; LPC_ORDER + 1] {
-    // Hamming window over 80 samples (cheap replacement for the spec's
-    // 240-sample asymmetric window).
-    let mut w = [0.0f32; FRAME_SAMPLES];
-    let n = FRAME_SAMPLES as f32;
-    for i in 0..FRAME_SAMPLES {
-        let phase = 2.0 * core::f32::consts::PI * (i as f32) / (n - 1.0);
-        w[i] = sig[i] * (0.54 - 0.46 * phase.cos());
+/// Build the spec's asymmetric LP-analysis window per ITU-T G.729 §3.2.1
+/// equation (3):
+///
+/// ```text
+/// w_lp(n) = 0.54 − 0.46·cos(2π·n / 399)        for n =   0 … 199
+/// w_lp(n) = cos(2π·(n − 200) / 159)            for n = 200 … 239
+/// ```
+///
+/// The first piece is the rising half of a Hamming window (peaks at
+/// `n = 199.5` with value 1.0). The second piece is a quarter cosine
+/// cycle that smoothly tapers from 1.0 at `n = 200` down to near zero
+/// at `n = 239`. The two pieces meet at value 1.0, so the composite
+/// window is continuous (peak at the boundary between the current
+/// frame and the 40-sample look-ahead).
+fn build_asymmetric_window() -> [f32; LP_WINDOW_SAMPLES] {
+    let mut w = [0.0f32; LP_WINDOW_SAMPLES];
+    let two_pi = 2.0 * core::f64::consts::PI;
+    for n in 0..200 {
+        let v = 0.54 - 0.46 * (two_pi * (n as f64) / 399.0).cos();
+        w[n] = v as f32;
     }
-    // Autocorrelation r[0..=10].
+    for n in 200..LP_WINDOW_SAMPLES {
+        let v = (two_pi * ((n - 200) as f64) / 159.0).cos();
+        w[n] = v as f32;
+    }
+    w
+}
+
+/// Windowed autocorrelation + Levinson-Durbin recursion → LPC[0..=10].
+///
+/// `sig` is the 240-sample LP-analysis window assembled by the caller:
+/// 160 samples of past pre-emphasised history + 80 samples of the
+/// current frame + 40 samples of look-ahead (per ITU-T G.729 §3.2.1).
+fn lpc_analysis(sig: &[f32; LP_WINDOW_SAMPLES]) -> [f32; LPC_ORDER + 1] {
+    // Asymmetric window from eq (3): half-Hamming over [0..199] + quarter
+    // cosine fade over [200..239].
+    let window = build_asymmetric_window();
+    let mut w = [0.0f32; LP_WINDOW_SAMPLES];
+    for i in 0..LP_WINDOW_SAMPLES {
+        w[i] = sig[i] * window[i];
+    }
+    // Autocorrelation r[0..=10] per eq (5).
     let mut r = [0.0f64; LPC_ORDER + 1];
     for k in 0..=LPC_ORDER {
         let mut acc = 0.0f64;
-        for i in k..FRAME_SAMPLES {
+        for i in k..LP_WINDOW_SAMPLES {
             acc += (w[i] as f64) * (w[i - k] as f64);
         }
         r[k] = acc;
     }
-    // Small white-noise correction + 60 Hz bandwidth lag window.
+    // Spec eq (7): white-noise correction (×1.0001) on r(0), then 60 Hz
+    // bandwidth-expansion lag window on r(k>=1) per eq (6).
+    if r[0] < 1.0 {
+        // Eq (5) note: r(0) has a lower boundary of 1.0 to avoid
+        // arithmetic problems for low-level input signals.
+        r[0] = 1.0;
+    }
     r[0] *= 1.0001;
     for k in 1..=LPC_ORDER {
         let f = 2.0 * core::f64::consts::PI * 60.0 * (k as f64) / (SAMPLE_RATE as f64);
@@ -1264,5 +1389,56 @@ mod tests {
         params.sample_rate = Some(SAMPLE_RATE);
         params.channels = Some(1);
         assert!(make_encoder(&params).is_ok());
+    }
+
+    #[test]
+    fn asymmetric_window_matches_spec_anchor_points() {
+        // ITU-T G.729 §3.2.1 eq (3): two-piece asymmetric LP-analysis
+        // window. Cross-check the spec's known anchor values:
+        //   - w(0)    = 0.54 − 0.46·cos(0)            = 0.08
+        //   - w(199)  ≈ 0.54 − 0.46·cos(2π·199/399)   ≈ 1.0 (junction)
+        //   - w(200)  = cos(0)                         = 1.0 (junction)
+        //   - w(239)  = cos(2π·39/159)                ≈ 0.030
+        let w = build_asymmetric_window();
+        assert_eq!(w.len(), LP_WINDOW_SAMPLES);
+        assert!(
+            (w[0] - 0.08).abs() < 1e-5,
+            "w(0) expected 0.08, got {}",
+            w[0]
+        );
+        assert!(
+            (w[199] - 1.0).abs() < 1e-3,
+            "w(199) expected ≈1.0 (Hamming-peak junction), got {}",
+            w[199]
+        );
+        assert!(
+            (w[200] - 1.0).abs() < 1e-7,
+            "w(200) expected exactly 1.0 (cosine peak), got {}",
+            w[200]
+        );
+        // w(239) = cos(2π·39/159); we just want it small and positive.
+        assert!(
+            w[239] > 0.0 && w[239] < 0.1,
+            "w(239) expected ∈(0, 0.1), got {}",
+            w[239]
+        );
+        // Monotonic tapering on the cosine piece: w[200] > w[210] > w[220] > w[239].
+        assert!(w[200] > w[210]);
+        assert!(w[210] > w[220]);
+        assert!(w[220] > w[239]);
+    }
+
+    #[test]
+    fn encode_one_with_lookahead_runs_and_produces_finite_output() {
+        // Smoke test for `encode_one` against a 240-sample analysis
+        // window assembled from the spec layout (past + current + LA).
+        let mut state = EncoderState::new();
+        let pcm = [100i16; FRAME_SAMPLES];
+        let la = [120i16; LP_LOOKAHEAD_SAMPLES];
+        let frame = state.encode_one(&pcm, &la);
+        // All fields are u8/u16 by type so finiteness is implicit; the
+        // key sanity check is that pack_frame round-trips cleanly.
+        let bytes = pack_frame(&frame);
+        assert_eq!(bytes.len(), FRAME_BYTES);
     }
 }

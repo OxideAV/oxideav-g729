@@ -43,6 +43,14 @@ fn collect_packets(enc: &mut Box<dyn Encoder>) -> Vec<Vec<u8>> {
 /// Test: feed 100 ms of silence followed by a 1-kHz tone; the encoder
 /// must emit at least one non-10-byte frame during the silence section
 /// and switch to 10-byte speech frames once the tone starts.
+///
+/// Note: the encoder now runs with the spec's 5-ms look-ahead (per
+/// ITU-T G.729 §3.2.1: "5 ms extra algorithmic delay"). One frame's
+/// worth of look-ahead PCM must be in the queue before each frame can
+/// be encoded, so the silence section's final frame only emerges
+/// after the tone's first 40 samples are queued. We therefore send
+/// the entire silence+tone stream in one go, then partition packets
+/// by frame index.
 #[test]
 fn vad_classifies_silence_vs_speech() {
     let params = make_params(true);
@@ -51,33 +59,31 @@ fn vad_classifies_silence_vs_speech() {
     let frames_silence = 10; // 100 ms
     let frames_tone = 20; // 200 ms
 
-    // --- Silence ---
-    let silence = vec![0i16; FRAME_SAMPLES * frames_silence];
-    enc.send_frame(&Frame::Audio(pack_audio_frame(&silence)))
-        .expect("send silence");
-    let silence_pkts = collect_packets(&mut enc);
-    assert_eq!(silence_pkts.len(), frames_silence);
+    // Build silence + tone as a single contiguous PCM stream.
+    let sr = SAMPLE_RATE as f32;
+    let mut pcm = vec![0i16; FRAME_SAMPLES * frames_silence];
+    for i in 0..(FRAME_SAMPLES * frames_tone) {
+        let t = i as f32 / sr;
+        let v = 8_000.0 * (2.0 * core::f32::consts::PI * 1000.0 * t).sin();
+        pcm.push(v.round() as i16);
+    }
+    enc.send_frame(&Frame::Audio(pack_audio_frame(&pcm)))
+        .expect("send pcm");
+    enc.flush().expect("flush");
+    let pkts = collect_packets(&mut enc);
+    assert_eq!(pkts.len(), frames_silence + frames_tone);
 
-    // Must see at least one non-speech packet (SID or NODATA).
+    let silence_pkts = &pkts[..frames_silence];
+    let tone_pkts = &pkts[frames_silence..];
+
+    // Must see at least one non-speech packet (SID or NODATA) during
+    // the silence section.
     let non_speech = silence_pkts.iter().filter(|p| p.len() != 10).count();
     assert!(
         non_speech >= 1,
         "expected at least one SID/NODATA during silence, got packet sizes {:?}",
         silence_pkts.iter().map(|p| p.len()).collect::<Vec<_>>()
     );
-
-    // --- 1 kHz tone ---
-    let sr = SAMPLE_RATE as f32;
-    let mut tone = Vec::with_capacity(FRAME_SAMPLES * frames_tone);
-    for i in 0..(FRAME_SAMPLES * frames_tone) {
-        let t = i as f32 / sr;
-        let v = 8_000.0 * (2.0 * core::f32::consts::PI * 1000.0 * t).sin();
-        tone.push(v.round() as i16);
-    }
-    enc.send_frame(&Frame::Audio(pack_audio_frame(&tone)))
-        .expect("send tone");
-    enc.flush().expect("flush");
-    let tone_pkts = collect_packets(&mut enc);
 
     // Expect all post-hang-over frames to be full 10-byte speech frames.
     // Allow up to 3 frames of hang-over bleed-over at the head of the

@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Encoder LP-analysis windowing is now spec-exact per ITU-T G.729
+  §3.2.1 / eq (3): a 240-sample asymmetric window (half-Hamming
+  `0.54 − 0.46·cos(2π·n/399)` for n = 0…199, then quarter-cosine
+  `cos(2π·(n−200)/159)` for n = 200…239) is applied to a buffer of
+  120 past samples + the 80-sample current frame + 40 samples of
+  look-ahead from the following frame. The autocorrelation `r(0)`
+  lower bound (1.0), white-noise correction factor (×1.0001), and
+  60 Hz bandwidth-expansion lag window from eqs (6, 7) are all
+  applied verbatim. Replaces the previous 80-sample symmetric
+  Hamming approximation.
+- Encoder now exposes the spec's 5-ms extra algorithmic delay: 40
+  samples of look-ahead PCM must be queued before a frame can be
+  released. `flush()` drains any held samples by encoding against
+  trailing zeros.
+- `tests/annex_b.rs::vad_classifies_silence_vs_speech` rewritten to
+  send silence + tone as a single contiguous stream (then partition
+  by frame index) so the section boundary respects the encoder's
+  new look-ahead latency.
 - Encoder gain-VQ now quantises the spec's correction factor
   `γ = g_c / g'_c` (eq 72) instead of raw `g_c`, mirroring the
   decoder's `g_c = γ̂ · g'_c` reconstruction (eq 74).

@@ -116,26 +116,32 @@ bit-exact against the ITU reference implementation.
   encoder quantises the spec's correction factor `γ = g_c / g'_c`
   (eq 72) — not the raw fixed-codebook gain — and updates its history
   with `Û^(m) = 20·log10(γ_q)` (eq 70) in lockstep with the decoder.
+- **LPC analysis window: spec-exact.** The encoder runs the spec's
+  §3.2.1 / eq (3) 240-sample asymmetric window — half-Hamming
+  `0.54 − 0.46·cos(2π·n/399)` over n = 0…199 plus a quarter-cosine
+  fade `cos(2π·(n−200)/159)` over n = 200…239 — applied to a buffer
+  of 120 past samples + the 80-sample current frame + 40 samples of
+  look-ahead from the following frame. The autocorrelation
+  `r(0)`-floor (1.0), white-noise correction (×1.0001), and 60 Hz
+  bandwidth lag window from eqs (6, 7) all match the spec. This
+  realises the spec's 5 ms extra algorithmic delay at the encoder.
 - **Gain VQ table values: NOT spec-exact.** The table *dimensions*
   match the spec (`GBK1` = 8×2, `GBK2` = 16×2 per §5.2 Table 12), and
   the codebook structure is correct — both rows hold `(ĝ_p, γ̂)` and
   the decoded gain is `g_c = γ̂ · g'_c` (eq 74). The numeric entries,
   however, are first-cut values approximating the span of the
   reference `gbk1` / `gbk2`; verbatim transcription is pending.
-- **LPC analysis window: approximation.** Hamming window in place of
-  the spec's 240-sample asymmetric window (40-sample look-ahead +
-  120-sample look-back + 80-sample current frame, per §3.2.1).
 - **Annex B VAD: simplified.** Energy-plus-hangover detector rather
   than the spec's four-feature decision tree.
 
 Net effect: **encode → decode round-trips cleanly inside this crate**
 (exercised by `tests/encoder_roundtrip.rs`, including a 5-second
 steady-tone test asserting the gain predictor stays stable across
-the full duration). LSP quantisation and the MA-4 gain-prediction
-pipeline are spec-faithful; full external interoperability awaits
-verbatim `gbk1` / `gbk2` numeric tables and the 240-sample analysis
-window — the encoder/decoder structure is ready for drop-in
-replacement of those tables, no logic changes required.
+the full duration). LSP quantisation, MA-4 gain prediction, and the
+LP-analysis windowing pipeline are spec-faithful; full external
+interoperability awaits verbatim `gbk1` / `gbk2` numeric tables —
+the encoder/decoder structure is ready for drop-in replacement of
+those tables, no logic changes required.
 
 ### Annexes
 
