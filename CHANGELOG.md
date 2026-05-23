@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Decoder now completes the §4.2.5 output post-processing stage: the
+  100 Hz high-pass filter `H_h2(z)` (eq 91, coefficients verbatim from
+  the spec — b0 = b2 = 0.93980581, b1 = −1.8795834, a1 = −1.9330735,
+  a2 = 0.93589199) followed by the ×2 level restore that undoes the
+  encoder's §3.1 ×0.5 preprocessing scale. Applied to both the normal
+  CS-ACELP path and the frame-erasure concealment path with a shared,
+  continuous biquad memory. This was previously missing entirely — the
+  decoder emitted the AGC output directly.
+- Decoder AGC (§4.2.4) corrected to the spec's L1-norm gain ratio
+  `G = Σ|ŝ(n)| / Σ|sf(n)|` (eq 88), replacing the prior RMS/energy
+  ratio. Per-sample smoothing `g(n) = 0.85·g(n-1) + 0.15·G` (eq 90)
+  unchanged.
+- Decoder tilt-compensation filter (§4.2.3) now applies the eq-86
+  leading scale `1/g_t` with `g_t = 1 − |k1'|`, so the product filter
+  `H_f(z)·H_t(z)` has the spec's near-unit gain; the impulse-response
+  truncation length for `k1'` corrected to L = 20 per eq 87 (was 22).
 - Encoder LP-analysis windowing is now spec-exact per ITU-T G.729
   §3.2.1 / eq (3): a 240-sample asymmetric window (half-Hamming
   `0.54 − 0.46·cos(2π·n/399)` for n = 0…199, then quarter-cosine

@@ -91,7 +91,8 @@ bit-exact against the ITU reference implementation.
 
 - Decoder: full CS-ACELP pipeline (LSP decode, LSP interpolation,
   LSP to LPC, adaptive + fixed codebook excitation, gain VQ,
-  synthesis, short-term + pitch + tilt postfilter with AGC).
+  synthesis, short-term + pitch + tilt postfilter with AGC, and the
+  §4.2.5 output stage — 100 Hz high-pass `H_h2(z)` + ×2 level restore).
 - Encoder: Levinson-Durbin LPC analysis, Chebyshev-based LPC to LSP,
   split-VQ LSP quantisation, open-loop + closed-loop fractional-lag
   pitch search, focused 4-pulse ACELP fixed-codebook search, two-stage
@@ -116,6 +117,15 @@ bit-exact against the ITU reference implementation.
   encoder quantises the spec's correction factor `γ = g_c / g'_c`
   (eq 72) — not the raw fixed-codebook gain — and updates its history
   with `Û^(m) = 20·log10(γ_q)` (eq 70) in lockstep with the decoder.
+- **Decoder post-processing: spec-exact.** The §4.2 chain now matches
+  the spec: short-term postfilter `Â(z/γ_n)/Â(z/γ_d)` (γ_n = 0.55,
+  γ_d = 0.7), pitch emphasis, tilt compensation `(1/g_t)(1 + γ_t·k1'·z⁻¹)`
+  with `g_t = 1 − |k1'|` (eq 86) and the L = 20 reflection-coefficient
+  estimate (eq 87), adaptive gain control using the L1-norm gain ratio
+  `G = Σ|ŝ| / Σ|sf|` (eq 88) with `g(n) = 0.85·g(n-1) + 0.15·G` (eq 90),
+  and the final §4.2.5 output stage: the 100 Hz high-pass filter
+  `H_h2(z)` (eq 91, coefficients verbatim) followed by the ×2 level
+  restore that undoes the encoder's §3.1 ×0.5 preprocessing.
 - **LPC analysis window: spec-exact.** The encoder runs the spec's
   §3.2.1 / eq (3) 240-sample asymmetric window — half-Hamming
   `0.54 − 0.46·cos(2π·n/399)` over n = 0…199 plus a quarter-cosine

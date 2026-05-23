@@ -13,12 +13,17 @@
 //! | §3.8  fixed codebook         | 4 tracks × 4 pulses, signs, 13+4 bit decode |
 //! | §3.9  gain codebook          | two-stage VQ; gains via a first-cut table   |
 //! | §3.10 synthesis filter        | time-varying 10th-order all-pole             |
-//! | §3.11 postfilter              | short-term (γ1/γ2) + long-term (pitch)       |
+//! | §4.2.1 long-term postfilter   | pitch emphasis (refined ±1 integer delay)    |
+//! | §4.2.2 short-term postfilter  | `Â(z/γ_n)/Â(z/γ_d)`, γ_n = 0.55, γ_d = 0.7   |
+//! | §4.2.3 tilt compensation      | `(1/g_t)(1 + γ_t·k1'·z⁻¹)`, g_t = 1 − \|k1'\| |
+//! | §4.2.4 adaptive gain control  | L1-norm gain ratio, 0.85/0.15 smoothing      |
+//! | §4.2.5 output post-processing | 100 Hz high-pass `H_h2(z)` + ×2 level restore |
 //!
-//! The gain codebook tables used here are the **spec-exact** values
-//! from G.729 Table 13 (conjugate-structure VQ, two stages). Pitch
-//! gain and fixed-codebook gain are computed via the standard
-//! predictor (MA-4 of past log-energies) and combined as per §3.9.5.
+//! The gain codebook tables used here are first-cut approximations
+//! (verbatim `gbk1`/`gbk2` transcription pending — see the per-crate
+//! README). Pitch gain and fixed-codebook gain are computed via the
+//! standard predictor (MA-4 of past log-energies) and combined as per
+//! §3.9.
 //!
 //! ## Scaling / numerical notes
 //!
@@ -84,6 +89,9 @@ pub struct SynthesisState {
     /// 16-bit LCG state driving concealment's pseudo-random pulse
     /// generator (G.729 §4.4).
     pub conceal_seed: u16,
+    /// Output 100 Hz high-pass filter memory (§4.2.5 eq 91), applied
+    /// after AGC and before the ×2 level restore.
+    pub out_hpf: OutputHpfState,
 }
 
 impl Default for SynthesisState {
@@ -112,6 +120,7 @@ impl SynthesisState {
             prev_a,
             // Seed matches the reference `seed_fer` init.
             conceal_seed: 21845,
+            out_hpf: OutputHpfState::new(),
         }
     }
 }
@@ -721,40 +730,49 @@ pub fn pitch_emphasis_postfilter(
     }
 }
 
-/// Adaptive spectral-tilt compensation filter (G.729 §4.2.3).
+/// Adaptive spectral-tilt compensation filter (G.729 §4.2.3, eq 86).
 ///
-/// The short-term post-filter introduces a low-pass tilt that is
-/// cancelled by a 1st-order FIR
-///     H_t(z) = 1 + μ · z^-1
-/// where μ is derived from the first reflection coefficient `k1'` of
-/// the short-term post-filter's impulse response. The spec defines
-///     μ = γ_t · k1'                    (eq. 85)
+/// The short-term post-filter introduces a spectral tilt that is
+/// cancelled by the first-order filter
+///     H_t(z) = (1 / g_t) · (1 + γ_t · k1' · z^-1)        (eq. 86)
+/// where `k1'` is the first reflection coefficient calculated from the
+/// short-term post-filter's truncated impulse response `h_f(n)`
+/// (eq. 87), and the leading scale `g_t = 1 − |k1'|` compensates for
+/// the decreasing effect of `g_f` in `H_f(z)` so the product filter
+/// `H_f(z)·H_t(z)` has generally no gain. The factor γ_t is:
 ///     γ_t = 0.9   if k1' < 0           (voiced — emphasise high-freq)
 ///     γ_t = 0.2   if k1' >= 0          (unvoiced — mild lowpass keep)
 ///
-/// Callers supply `k1`: an estimate of the reflection coefficient (see
-/// [`estimate_tilt_k1`]). A one-sample memory `tilt_mem` holds the
-/// previous input sample.
+/// Callers supply `k1`: the reflection coefficient from
+/// [`estimate_tilt_k1`]. A one-sample memory `tilt_mem` holds the
+/// previous (unfiltered) input sample.
 pub fn tilt_compensation(signal: &mut [f32; SUBFRAME_SAMPLES], tilt_mem: &mut f32, k1: f32) {
     let gamma_t = if k1 < 0.0 { 0.9 } else { 0.2 };
     let mu = (gamma_t * k1).clamp(-0.99, 0.99);
+    // g_t = 1 − |k1'| (eq 86 leading term); guard against near-zero
+    // division for the degenerate |k1'| → 1 case.
+    let g_t = (1.0 - k1.abs()).max(1e-3);
+    let inv_g_t = 1.0 / g_t;
     for n in 0..SUBFRAME_SAMPLES {
         let s = signal[n];
-        signal[n] = s + mu * *tilt_mem;
+        signal[n] = inv_g_t * (s + mu * *tilt_mem);
         *tilt_mem = s;
     }
 }
 
-/// Estimate the first reflection coefficient `k1' = -R(1)/R(0)` of the
-/// short-term post-filter's truncated impulse response (G.729 §4.2.3).
+/// Estimate the first reflection coefficient `k1' = -r_h(1)/r_h(0)` of
+/// the short-term post-filter's truncated impulse response
+/// (G.729 §4.2.3, eq 87).
 ///
-/// The impulse response `h(n)` of `A(z/γ_n) / A(z/γ_d)` is truncated
-/// to `L` samples; the autocorrelations at lag 0 and 1 give k1.
+/// The impulse response `h_f(n)` of `Â(z/γ_n) / Â(z/γ_d)` is truncated
+/// to `L = 20` samples and the lag-0/lag-1 autocorrelations
+///     r_h(i) = Σ_{j=0..19-i} h_f(j)·h_f(j+i)
+/// give `k1' = −r_h(1)/r_h(0)`.
 ///
 /// This is computed per subframe from the current LPC vector.
 pub fn estimate_tilt_k1(a: &[f32; LPC_ORDER + 1]) -> f32 {
-    // Impulse response length: the reference uses L = 22.
-    const L: usize = 22;
+    // Impulse-response truncation length per eq (87): L = 20.
+    const L: usize = 20;
     // Build weighted numerator / denominator coefficients.
     let mut a_num = [0.0f32; LPC_ORDER + 1];
     let mut a_den = [0.0f32; LPC_ORDER + 1];
@@ -878,46 +896,109 @@ pub fn conceal_excitation(
     }
 }
 
-/// AGC smoothing factor (G.729 §4.2.4): the per-sample gain is
-/// `g[n] = α · g[n-1] + (1-α) · G`, with α = 0.85. This recovers
-/// the spec's `AGC_FAC = 0.9875` target-tracker bandwidth when
-/// combined with subframe-synchronous target updates.
+/// AGC smoothing factor (G.729 §4.2.4 eq 90): the per-sample gain is
+/// `g(n) = 0.85·g(n-1) + 0.15·G`. `AGC_ALPHA` is the 0.85 retention
+/// term; the complement `1 − AGC_ALPHA = 0.15` weights the new target.
 pub const AGC_ALPHA: f32 = 0.85;
 
 /// Adaptive gain-control (G.729 §4.2.4). Scales the post-filter output
-/// so its short-term energy matches the pre-post-filter synthesis
-/// signal, with per-sample smoothing of the gain to avoid audible
-/// discontinuities at subframe boundaries.
+/// `sf(n)` so its level matches the pre-post-filter reconstructed
+/// speech `ŝ(n)`, with per-sample smoothing of the gain to avoid
+/// audible discontinuities at subframe boundaries.
 ///
-/// Algorithm:
-///  * `G = sqrt(Σ reference²  / Σ signal²)` — target gain for the
-///    current subframe, with a small epsilon guard.
-///  * `g[n] = α · g[n-1] + (1-α) · G` — first-order smoothing.
-///  * `signal[n] ← g[n] · signal[n]`.
+/// Algorithm (eqs 88–90):
+///  * `G = Σ|ŝ(n)| / Σ|sf(n)|` — the **L1-norm** (sum of absolute
+///    values) ratio, NOT an RMS/energy ratio (eq 88).
+///  * `g(n) = 0.85·g(n-1) + 0.15·G` — first-order smoothing (eq 90).
+///  * `sf'(n) = g(n)·sf(n)` (eq 89).
 ///
-/// `agc_gain` carries `g[n-1]` across subframes.
+/// `reference` is `ŝ(n)` (synthesis-filter output, pre-postfilter);
+/// `signal` is `sf(n)` (postfilter output) in/out. `agc_gain` carries
+/// `g(-1)` across subframes (initialised to 1.0 per Table 9).
 pub fn agc(
     signal: &mut [f32; SUBFRAME_SAMPLES],
     reference: &[f32; SUBFRAME_SAMPLES],
     agc_gain: &mut f32,
 ) {
-    let mut e_ref = 0.0f32;
-    let mut e_sig = 0.0f32;
+    let mut l1_ref = 0.0f32;
+    let mut l1_sig = 0.0f32;
     for n in 0..SUBFRAME_SAMPLES {
-        e_ref += reference[n] * reference[n];
-        e_sig += signal[n] * signal[n];
+        l1_ref += reference[n].abs();
+        l1_sig += signal[n].abs();
     }
-    let target = if e_sig > 1e-6 {
-        (e_ref / e_sig).sqrt().clamp(0.01, 4.0)
-    } else {
-        1.0
-    };
+    // Target gain G = Σ|ŝ| / Σ|sf| (eq 88). When the postfilter output
+    // is ~silent the ratio is undefined; hold unity gain.
+    let target = if l1_sig > 1e-6 { l1_ref / l1_sig } else { 1.0 };
     let mut g = *agc_gain;
     for n in 0..SUBFRAME_SAMPLES {
         g = AGC_ALPHA * g + (1.0 - AGC_ALPHA) * target;
         signal[n] *= g;
     }
     *agc_gain = g;
+}
+
+// ---------------------------------------------------------------------------
+// Post-processing: 100 Hz high-pass filter + ×2 upscaling (§4.2.5)
+// ---------------------------------------------------------------------------
+
+/// 100 Hz output high-pass filter `H_h2(z)` (G.729 §4.2.5 eq 91),
+/// applied to the AGC-scaled postfilter output before the level is
+/// restored. Direct-form-I biquad:
+///
+///   `H_h2(z) = (b0 + b1·z⁻¹ + b2·z⁻²) / (1 + a1·z⁻¹ + a2·z⁻²)`
+///
+/// with the spec's exact coefficients (eq 91):
+///   b0 = b2 = 0.93980581, b1 = −1.8795834,
+///   a1 = −1.9330735,      a2 =  0.93589199.
+///
+/// The numerator pair `(b0, b2)` is symmetric and `b1 = −2·b0` (a
+/// notch at DC); the denominator places a pole pair just inside the
+/// unit circle, giving the 100 Hz cut-off.
+pub const HPF_B0: f32 = 0.939_805_81;
+pub const HPF_B1: f32 = -1.879_583_4;
+pub const HPF_B2: f32 = 0.939_805_81;
+pub const HPF_A1: f32 = -1.933_073_5;
+pub const HPF_A2: f32 = 0.935_891_99;
+
+/// Output level-restore factor (G.729 §4.2.5): the high-pass-filtered
+/// signal is multiplied by 2 to undo the ×0.5 scaling applied by the
+/// encoder preprocessor (§3.1).
+pub const OUTPUT_UPSCALE: f32 = 2.0;
+
+/// Two-sample direct-form-I state for the output high-pass filter.
+/// `x` holds the last two filter inputs (x[n-1], x[n-2]); `y` holds
+/// the last two outputs (y[n-1], y[n-2]). Both start at zero (§4.3:
+/// all static decoder variables initialise to zero).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OutputHpfState {
+    x: [f32; 2],
+    y: [f32; 2],
+}
+
+impl OutputHpfState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Apply the §4.2.5 post-processing chain to one subframe in place:
+/// the 100 Hz high-pass filter `H_h2(z)` (eq 91) followed by the ×2
+/// upscaling that restores the input signal level. The biquad memory
+/// in `state` carries across subframes/frames.
+pub fn output_postprocess(signal: &mut [f32; SUBFRAME_SAMPLES], state: &mut OutputHpfState) {
+    for n in 0..SUBFRAME_SAMPLES {
+        let xn = signal[n];
+        // y[n] = b0·x[n] + b1·x[n-1] + b2·x[n-2] − a1·y[n-1] − a2·y[n-2].
+        let yn = HPF_B0 * xn + HPF_B1 * state.x[0] + HPF_B2 * state.x[1]
+            - HPF_A1 * state.y[0]
+            - HPF_A2 * state.y[1];
+        // Shift the two-deep histories (index 0 = most recent).
+        state.x[1] = state.x[0];
+        state.x[0] = xn;
+        state.y[1] = state.y[0];
+        state.y[0] = yn;
+        signal[n] = yn * OUTPUT_UPSCALE;
+    }
 }
 
 #[cfg(test)]
@@ -1055,6 +1136,99 @@ mod tests {
         let hist = [10.0f32; 4];
         let g = predict_fixed_gain(&hist, -10.0);
         assert!(g > 1.0, "high history should boost gain: {g}");
+    }
+
+    #[test]
+    fn output_hpf_blocks_dc() {
+        // The §4.2.5 high-pass numerator has a notch at z = 1:
+        //   b0 + b1 + b2 = 0.93980581 − 1.8795834 + 0.93980581 ≈ 0.
+        let nb = HPF_B0 + HPF_B1 + HPF_B2;
+        assert!(nb.abs() < 1e-4, "numerator DC sum should be ~0: {nb}");
+        // The steady-state DC gain is (Σb)/(Σa) with the ×2 restore on
+        // top; the pole pair sits just inside the unit circle so the
+        // transient decays slowly. Drive enough samples to settle, then
+        // assert a strong (≳ 30 dB) DC attenuation vs. the input level.
+        const DC_IN: f32 = 1000.0;
+        let mut state = OutputHpfState::new();
+        let mut last = f32::INFINITY;
+        for _ in 0..40 {
+            let mut sig = [DC_IN; SUBFRAME_SAMPLES];
+            output_postprocess(&mut sig, &mut state);
+            last = sig[SUBFRAME_SAMPLES - 1];
+        }
+        // |out| / |in| should be ~0.02 (×2·~0.01) — at least 30 dB down.
+        let atten = last.abs() / DC_IN;
+        assert!(atten < 0.0316, "DC attenuation only {atten} (<30 dB)");
+    }
+
+    #[test]
+    fn output_hpf_upscales_passband_by_two() {
+        // At an alternating ±1 sequence (Nyquist, well into the passband)
+        // the high-pass passes the signal at unity and the ×2 restore
+        // doubles it. The first sample sees no filter history, so the
+        // gain is b0·2 ≈ 1.88; by mid-subframe the recursion settles
+        // and |out| ≳ 2·|in| (the filter slightly boosts near Nyquist).
+        let mut state = OutputHpfState::new();
+        let mut sig = [0.0f32; SUBFRAME_SAMPLES];
+        for n in 0..SUBFRAME_SAMPLES {
+            sig[n] = if n % 2 == 0 { 100.0 } else { -100.0 };
+        }
+        output_postprocess(&mut sig, &mut state);
+        // Steady-state magnitude should be at least the ×2 upscale of the
+        // input amplitude (200), allowing for the passband boost.
+        let tail = sig[SUBFRAME_SAMPLES - 1].abs();
+        assert!(tail >= 190.0, "passband not upscaled by ~2: {tail}");
+    }
+
+    #[test]
+    fn output_hpf_state_carries_across_calls() {
+        // Two back-to-back subframes of the same input must NOT reset the
+        // biquad memory between calls: the second call's first sample
+        // should differ from a cold-start first sample.
+        let mut warm = OutputHpfState::new();
+        let mut cold = OutputHpfState::new();
+        let mut a = [50.0f32; SUBFRAME_SAMPLES];
+        output_postprocess(&mut a, &mut warm); // prime `warm`
+        let mut b = [50.0f32; SUBFRAME_SAMPLES];
+        output_postprocess(&mut b, &mut warm); // warm second subframe
+        let mut c = [50.0f32; SUBFRAME_SAMPLES];
+        output_postprocess(&mut c, &mut cold); // cold first subframe
+        assert!(
+            (b[0] - c[0]).abs() > 1e-3,
+            "filter memory did not carry across calls: {} vs {}",
+            b[0],
+            c[0]
+        );
+    }
+
+    #[test]
+    fn agc_uses_l1_norm_ratio() {
+        // Reference with L1 sum 40·|2| = 80; signal with L1 sum 40·|1| =
+        // 40. The eq-88 target gain is 80/40 = 2.0, so the steady-state
+        // per-sample gain converges to 2.0 and the signal is doubled.
+        let reference = [2.0f32; SUBFRAME_SAMPLES];
+        let mut signal = [1.0f32; SUBFRAME_SAMPLES];
+        let mut g = 2.0f32; // start at target so we read steady state
+        agc(&mut signal, &reference, &mut g);
+        // With g(-1) already at the target, every sample is scaled by 2.
+        for &v in signal.iter() {
+            assert!((v - 2.0).abs() < 1e-4, "L1-AGC gain wrong: {v}");
+        }
+        // The carried gain stays at the target.
+        assert!((g - 2.0).abs() < 1e-4, "carried gain drifted: {g}");
+    }
+
+    #[test]
+    fn tilt_compensation_applies_g_t_scaling() {
+        // With k1' = −0.5: γ_t = 0.9, μ = −0.45, g_t = 1 − 0.5 = 0.5,
+        // so 1/g_t = 2.0. For a unit DC step (signal all 1, mem starts 0):
+        //   out[0] = 2·(1 + (−0.45)·0) = 2.0
+        //   out[1] = 2·(1 + (−0.45)·1) = 2·0.55 = 1.1
+        let mut sig = [1.0f32; SUBFRAME_SAMPLES];
+        let mut mem = 0.0f32;
+        tilt_compensation(&mut sig, &mut mem, -0.5);
+        assert!((sig[0] - 2.0).abs() < 1e-4, "out[0] = {}", sig[0]);
+        assert!((sig[1] - 1.1).abs() < 1e-4, "out[1] = {}", sig[1]);
     }
 
     #[test]

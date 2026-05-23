@@ -35,9 +35,9 @@ use crate::lpc::{decode_lsp, interpolate_lsp, lsp_to_lpc, LpcPredictorState};
 use crate::synthesis::{
     adaptive_codebook_excitation, agc, conceal_excitation, decode_gain_indices, decode_pitch_p1,
     decode_pitch_p2, estimate_tilt_k1, fixed_codebook_excitation, gain_pred_error_db,
-    innovation_log_energy_db, pitch_emphasis_postfilter, pitch_sharpen, predict_fixed_gain,
-    short_term_postfilter, synthesise, tilt_compensation, SynthesisState, ERASE_GC_ATTEN,
-    ERASE_GP_ATTEN, EXC_HIST,
+    innovation_log_energy_db, output_postprocess, pitch_emphasis_postfilter, pitch_sharpen,
+    predict_fixed_gain, short_term_postfilter, synthesise, tilt_compensation, SynthesisState,
+    ERASE_GC_ATTEN, ERASE_GP_ATTEN, EXC_HIST,
 };
 #[cfg(test)]
 use crate::LPC_ORDER;
@@ -193,6 +193,9 @@ impl G729Decoder {
             let k1 = estimate_tilt_k1(a);
             tilt_compensation(&mut synthesised, &mut self.syn.tilt_mem, k1);
             agc(&mut synthesised, &pre_post, &mut self.syn.agc_gain);
+            // 4i'. Output post-processing (§4.2.5): 100 Hz high-pass
+            //      filter + ×2 level restore.
+            output_postprocess(&mut synthesised, &mut self.syn.out_hpf);
             // 4j. Write to output.
             let off = sf * SUBFRAME_SAMPLES;
             out[off..off + SUBFRAME_SAMPLES].copy_from_slice(&synthesised[..SUBFRAME_SAMPLES]);
@@ -267,6 +270,10 @@ impl G729Decoder {
             let k1 = estimate_tilt_k1(&a);
             tilt_compensation(&mut synthesised, &mut self.syn.tilt_mem, k1);
             agc(&mut synthesised, &pre_post, &mut self.syn.agc_gain);
+            // Same §4.2.5 output post-processing as the normal path so
+            // concealed frames join the high-pass + ×2 chain cleanly
+            // (keeps the biquad memory continuous across the erasure).
+            output_postprocess(&mut synthesised, &mut self.syn.out_hpf);
 
             let off = sf * SUBFRAME_SAMPLES;
             out[off..off + SUBFRAME_SAMPLES].copy_from_slice(&synthesised[..SUBFRAME_SAMPLES]);
