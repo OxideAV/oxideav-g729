@@ -39,6 +39,7 @@ pub mod decoder;
 pub mod encoder;
 pub mod lpc;
 pub mod lsp_tables;
+pub mod open_loop_pitch;
 pub mod synthesis;
 pub mod weighting;
 

@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- New `open_loop_pitch` module implements the encoder's §3.4 open-loop
+  pitch analysis, spec-faithful (12 unit tests across the module + the
+  encoder search-bounds tests):
+  - `WeightedSpeechState` runs the perceptual-weighting filter
+    `W(z) = A(z/γ1)/A(z/γ2)` to produce the weighted speech `sw(n)` of
+    eq (33), with persistent `s`/`sw` history so the recursion is
+    continuous across subframe and frame boundaries. Cross-checked
+    against an independent block-mode reference recursion.
+  - `open_loop_pitch_search` computes the three-range correlation
+    `R(k) = Σ_{n=0..79} sw(n)·sw(n-k)` (eq 34), normalises it by
+    `sqrt(Σ sw²(n-k))` (eq 35) over the three disjoint delay bands
+    (80…143, 40…79, 20…39), and applies the sub-multiple bias decision
+    tree (`R'(t_i) ≥ 0.85·R'(T_op)` favours shorter delays) to pick
+    `T_op` without latching onto a pitch multiple.
+- Encoder wires `T_op` into the §3.7 closed-loop pitch search: subframe 1
+  now searches the spec's six-sample window `[T_op−3, T_op+3]`
+  (eq f0018-01) and subframe 2 the ten-sample window
+  `[int(T1)−5, int(T1)+4]` (eq f0018-02), both with the spec boundary
+  clamps, via the new `PitchAnchor` enum and `subframe1_search_bounds` /
+  `subframe2_search_bounds` helpers (unit-tested). Replaces the prior
+  ad-hoc ±5 anchor windows.
+- The §3.4 weighted-speech path builds the weighting filter from the
+  *unquantised* per-subframe LP coefficients (interpolated from the
+  unquantised LSP, mirroring the quantised interpolation), and uses the
+  §3.3 "flat" gammas (0.94, 0.6) as a documented default until the
+  LAR-based flat/tilted γ-adaptation (eqs 28–30) is wired in.
 - New `weighting` module implements the encoder's §3.3 perceptual
   weighting filter and §3.5 weighted-synthesis-filter impulse response,
   all spec-faithful (12 unit tests):

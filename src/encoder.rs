@@ -65,10 +65,12 @@ use crate::annex_b_vad::{VadDecision, VadState};
 use crate::bitreader::pitch_parity;
 use crate::lpc::{interpolate_lsp, lsp_to_lpc, LpcPredictorState, MA_HISTORY};
 use crate::lsp_tables::{FG_Q15, FG_SUM_Q15, LSPCB1_Q13, LSPCB2_Q13, MA_NP, M_HALF, NC0, NC1};
+use crate::open_loop_pitch::{open_loop_pitch_search, WeightedSpeechState};
 use crate::synthesis::{
     adaptive_codebook_excitation, fixed_codebook_excitation, gain_pred_error_db,
     innovation_log_energy_db, predict_fixed_gain, SynthesisState, EXC_HIST, GBK1, GBK2,
 };
+use crate::weighting::{GAMMA1_FLAT, GAMMA2_FLAT};
 use crate::{
     ANNEX_B_ENABLE_EXTRADATA, CODEC_ID_STR, FRAME_BYTES, FRAME_SAMPLES, LPC_ORDER, SAMPLE_RATE,
     SUBFRAMES_PER_FRAME, SUBFRAME_SAMPLES,
@@ -379,8 +381,9 @@ struct EncoderState {
     syn: SynthesisState,
     /// Pre-emphasis filter memory (simple one-pole HPF).
     preemph_prev: f32,
-    /// Previous-frame unquantised LSP, for open-loop pitch smoothing.
-    #[allow(dead_code)]
+    /// Previous-frame unquantised LSP, used to interpolate the
+    /// subframe-0 unquantised A(z) for the §3.3 weighting filter that
+    /// feeds the §3.4 open-loop pitch search.
     prev_lsp_raw: [f32; LPC_ORDER],
     /// MA-4 gain prediction history, holding past quantised prediction
     /// errors `U^(k) = 20·log10(γ_q)` for the four most recent subframes
@@ -393,6 +396,11 @@ struct EncoderState {
     /// portion of the 240-sample LP analysis window. Indexed
     /// `[0..LP_PAST_SAMPLES]` — newest samples at the high end.
     win_history: [f32; LP_PAST_SAMPLES],
+    /// §3.3/§3.4 weighted-speech filter state. Holds enough `s` / `sw`
+    /// history to evaluate eq (33) continuously and enough `sw` history
+    /// to evaluate the eq-(34) open-loop pitch correlation at lags up to
+    /// `MAX_PITCH_LAG`.
+    wsp: WeightedSpeechState,
 }
 
 impl EncoderState {
@@ -407,6 +415,7 @@ impl EncoderState {
             // ITU-T G.729 Table 9: initial value of Û^(k) is -14 dB.
             gain_log_hist: [-14.0; 4],
             win_history: [0.0; LP_PAST_SAMPLES],
+            wsp: WeightedSpeechState::new(),
         }
     }
 
@@ -476,6 +485,44 @@ impl EncoderState {
         let lsp_sf0 = interpolate_lsp(&self.lpc.lsp_prev, &lsp_q, 0.5);
         let lsp_sf1 = lsp_q;
         let a_sf = [lsp_to_lpc(&lsp_sf0), lsp_to_lpc(&lsp_sf1)];
+        // Unquantised per-subframe A(z) for the §3.3 weighting filter
+        // W(z) = A(z/γ1)/A(z/γ2). The weighting filter is built from the
+        // *unquantised* LP coefficients (§3.3 first sentence); we
+        // interpolate the unquantised LSP between the previous frame and
+        // the current frame, mirroring the quantised path above.
+        let lsp_unq_sf0 = interpolate_lsp(&self.prev_lsp_raw, &lsp_unq, 0.5);
+        let a_unq_sf = [lsp_to_lpc(&lsp_unq_sf0), lsp_to_lpc(&lsp_unq)];
+
+        // -------- 5b. §3.4 open-loop pitch analysis --------
+        // Produce the perceptually-weighted speech sw(n) for both
+        // subframes (eq 33), then run the once-per-frame open-loop pitch
+        // search (eq 34, 35 + sub-multiple bias) to obtain T_op. T_op
+        // anchors the subframe-0 closed-loop search of §3.7.
+        //
+        // NOTE on the (γ1, γ2) pair: §3.3 adapts the gammas per-frame via
+        // a LAR-based flat/tilted classifier (eqs 28–32). That classifier
+        // is a separate bounded element; until it lands, the open-loop
+        // path uses the §3.3 "flat" gammas (0.94, 0.6) as a stable,
+        // documented default. The weighting *filter* and the eq-(34/35)
+        // search below are fully spec-faithful regardless of which γ pair
+        // is supplied.
+        // Snapshot the pre-frame weighted-speech history (newest sample
+        // at index MAX_PITCH_LAG-1) *before* rolling the current frame
+        // into the filter state — eq (34) correlates the current frame
+        // against this trailing window.
+        let sw_hist = *self.wsp.sw_history();
+        let mut sw_frame = [0.0f32; FRAME_SAMPLES];
+        for sf in 0..SUBFRAMES_PER_FRAME {
+            let off = sf * SUBFRAME_SAMPLES;
+            let mut s_sub = [0.0f32; SUBFRAME_SAMPLES];
+            s_sub.copy_from_slice(&sig[off..off + SUBFRAME_SAMPLES]);
+            let mut sw_sub = [0.0f32; SUBFRAME_SAMPLES];
+            self.wsp
+                .run_subframe(&s_sub, &a_unq_sf[sf], GAMMA1_FLAT, GAMMA2_FLAT, &mut sw_sub);
+            sw_frame[off..off + SUBFRAME_SAMPLES].copy_from_slice(&sw_sub);
+        }
+        let open_loop = open_loop_pitch_search(&sw_frame, &sw_hist);
+        let t_op = open_loop.t_op;
 
         // -------- 6. Subframe analysis --------
         let mut out = EncodedFrame {
@@ -498,10 +545,17 @@ impl EncoderState {
             target.copy_from_slice(&residual[off..off + SUBFRAME_SAMPLES]);
 
             // ---- 6a. Pitch search ----
+            // Subframe 0 searches the §3.7 six-sample window around the
+            // §3.4 open-loop delay T_op (eq f0018-01); subframe 1 searches
+            // around the subframe-0 result T1.
             let (t_int, t_frac) = pitch_search(
                 &self.syn.exc,
                 &target,
-                if sf == 0 { None } else { Some(first_p1_int) },
+                if sf == 0 {
+                    PitchAnchor::OpenLoop(t_op)
+                } else {
+                    PitchAnchor::Subframe1(first_p1_int)
+                },
             );
             if sf == 0 {
                 first_p1_int = t_int;
@@ -587,6 +641,9 @@ impl EncoderState {
         // -------- 7. Roll LSP predictor state --------
         self.lpc.lsp_prev = lsp_q;
         self.lpc.a = a_sf[1];
+        // Roll the unquantised-LSP history used by the §3.3 weighting
+        // filter's subframe-0 interpolation.
+        self.prev_lsp_raw = lsp_unq;
         out
     }
 }
@@ -1031,19 +1088,73 @@ fn lpc_residual(
 // Pitch search (open-loop + closed-loop with 1/3 fractional lag)
 // =========================================================================
 
-/// Choose the best integer pitch + 1/3 fractional shift in the allowed
-/// range 20..=143 (or a narrower ±5 window around `anchor` for subframe 2).
+/// Closed-loop pitch search anchor for [`pitch_search`].
+///
+/// The closed-loop search range is limited to a small window around a
+/// preselected delay (§3.7): the §3.4 open-loop delay `T_op` for the
+/// first subframe, and the first-subframe delay `T1` for the second.
+#[derive(Clone, Copy, Debug)]
+enum PitchAnchor {
+    /// Subframe 1: window around the §3.4 open-loop delay `T_op`
+    /// (eq f0018-01: `t_min = T_op − 3`, `t_max = t_min + 6`).
+    OpenLoop(usize),
+    /// Subframe 2: window around the first-subframe delay `int(T1)`
+    /// (eq f0018-02: `t_min = int(T1) − 5`, `t_max = t_min + 9`).
+    Subframe1(usize),
+}
+
+/// Compute the §3.7 closed-loop search boundaries `[t_min, t_max]` for the
+/// first subframe given the open-loop delay `T_op` (ITU-T G.729
+/// eq f0018-01):
+///
+/// ```text
+///   t_min = T_op − 3;  if t_min < 20 then t_min = 20
+///   t_max = t_min + 6; if t_max > 143 then t_max = 143; t_min = t_max − 6
+/// ```
+fn subframe1_search_bounds(t_op: usize) -> (usize, usize) {
+    let mut t_min = t_op.saturating_sub(3);
+    if t_min < 20 {
+        t_min = 20;
+    }
+    let mut t_max = t_min + 6;
+    if t_max > 143 {
+        t_max = 143;
+        t_min = t_max - 6;
+    }
+    (t_min, t_max)
+}
+
+/// Compute the §3.7 closed-loop search boundaries `[t_min, t_max]` for the
+/// second subframe given the first-subframe delay `int(T1)` (ITU-T G.729
+/// eq f0018-02):
+///
+/// ```text
+///   t_min = int(T1) − 5;  if t_min < 20 then t_min = 20
+///   t_max = t_min + 9;    if t_max > 143 then t_max = 143; t_min = t_max − 9
+/// ```
+fn subframe2_search_bounds(t1_int: usize) -> (usize, usize) {
+    let mut t_min = t1_int.saturating_sub(5);
+    if t_min < 20 {
+        t_min = 20;
+    }
+    let mut t_max = t_min + 9;
+    if t_max > 143 {
+        t_max = 143;
+        t_min = t_max - 9;
+    }
+    (t_min, t_max)
+}
+
+/// Choose the best integer pitch + 1/3 fractional shift in the §3.7
+/// closed-loop window around the supplied [`PitchAnchor`].
 fn pitch_search(
     exc: &[f32; EXC_HIST],
     target: &[f32; SUBFRAME_SAMPLES],
-    anchor: Option<usize>,
+    anchor: PitchAnchor,
 ) -> (usize, i8) {
-    let (lag_lo, lag_hi) = if let Some(a) = anchor {
-        let lo = a.saturating_sub(5).max(20);
-        let hi = (a + 5).min(143);
-        (lo.max(20), hi)
-    } else {
-        (20usize, 143usize)
+    let (lag_lo, lag_hi) = match anchor {
+        PitchAnchor::OpenLoop(t_op) => subframe1_search_bounds(t_op),
+        PitchAnchor::Subframe1(t1) => subframe2_search_bounds(t1),
     };
 
     // Integer search: pick the integer lag maximising normalised
@@ -1426,6 +1537,59 @@ mod tests {
         assert!(w[200] > w[210]);
         assert!(w[210] > w[220]);
         assert!(w[220] > w[239]);
+    }
+
+    #[test]
+    fn subframe1_bounds_match_spec_eq_f0018_01() {
+        // Mid-range T_op: 6-sample span centred slightly below T_op.
+        let (lo, hi) = subframe1_search_bounds(80);
+        assert_eq!((lo, hi), (77, 83)); // T_op−3 .. T_op+3
+        assert_eq!(hi - lo, 6);
+        // Low clamp: T_op near the floor pins t_min at 20.
+        let (lo, hi) = subframe1_search_bounds(21);
+        assert_eq!(lo, 20);
+        assert_eq!(hi, 26);
+        // High clamp: T_op near the ceiling pins t_max at 143 and pushes
+        // t_min back to 137.
+        let (lo, hi) = subframe1_search_bounds(143);
+        assert_eq!(hi, 143);
+        assert_eq!(lo, 137);
+        assert_eq!(hi - lo, 6);
+    }
+
+    #[test]
+    fn subframe2_bounds_match_spec_eq_f0018_02() {
+        // Mid-range T1: 9-sample span.
+        let (lo, hi) = subframe2_search_bounds(80);
+        assert_eq!((lo, hi), (75, 84)); // T1−5 .. T1+4
+        assert_eq!(hi - lo, 9);
+        // Low clamp.
+        let (lo, hi) = subframe2_search_bounds(22);
+        assert_eq!(lo, 20);
+        assert_eq!(hi, 29);
+        // High clamp.
+        let (lo, hi) = subframe2_search_bounds(143);
+        assert_eq!(hi, 143);
+        assert_eq!(lo, 134);
+        assert_eq!(hi - lo, 9);
+    }
+
+    #[test]
+    fn pitch_search_stays_within_open_loop_window() {
+        // A pitch_search anchored on an open-loop T_op must return a lag
+        // inside the §3.7 six-sample window, never the full 20..143 range.
+        let mut exc = [0.0f32; EXC_HIST];
+        // Put a strong periodic structure at lag 60 in the excitation.
+        for (i, e) in exc.iter_mut().enumerate() {
+            *e = if i % 60 == 0 { 1.0 } else { 0.0 };
+        }
+        let target = [0.5f32; SUBFRAME_SAMPLES];
+        let (lo, hi) = subframe1_search_bounds(100);
+        let (t_int, _frac) = pitch_search(&exc, &target, PitchAnchor::OpenLoop(100));
+        assert!(
+            (lo..=hi).contains(&t_int),
+            "t_int {t_int} escaped window [{lo},{hi}]"
+        );
     }
 
     #[test]

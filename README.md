@@ -95,8 +95,9 @@ bit-exact against the ITU reference implementation.
   §4.2.5 output stage — 100 Hz high-pass `H_h2(z)` + ×2 level restore).
 - Encoder: Levinson-Durbin LPC analysis, Chebyshev-based LPC to LSP,
   split-VQ LSP quantisation, §3.3 perceptual-weighting filter `W(z)` +
-  §3.5 weighted-synthesis-filter impulse response `h(n)`, open-loop +
-  closed-loop fractional-lag pitch search, focused 4-pulse ACELP
+  §3.5 weighted-synthesis-filter impulse response `h(n)`, §3.4 open-loop
+  pitch analysis (three-range correlation + sub-multiple bias) anchoring
+  the §3.7 closed-loop fractional-lag search, focused 4-pulse ACELP
   fixed-codebook search, two-stage gain VQ, bit-exact packer for
   ITU-T Table 8.
 - Annex B: VAD + DTX + CNG (simplified, interoperates with this crate's
@@ -137,17 +138,31 @@ bit-exact against the ITU reference implementation.
   `r(0)`-floor (1.0), white-noise correction (×1.0001), and 60 Hz
   bandwidth lag window from eqs (6, 7) all match the spec. This
   realises the spec's 5 ms extra algorithmic delay at the encoder.
-- **Perceptual weighting: spec-faithful building blocks, not yet in the
-  search loop.** The §3.3 weighting filter `W(z) = A(z/γ1)/A(z/γ2)`
-  (eq 27), its adaptive (γ1, γ2) derivation — log-area-ratio
-  coefficients (eq 28), flat/tilted hysteresis classifier (eq 30),
-  minimum-LSP-distance `d_min` (eq 31), and `γ2 = −6·d_min + 1`
-  bounded to [0.4, 0.7] (eq 32) — and the §3.5 weighted-synthesis-filter
-  impulse response `h(n)` of `A(z/γ1)/[Â(z)·A(z/γ2)]` are all implemented
-  in `src/weighting.rs` exactly per spec, with unit tests. The
-  analysis-by-synthesis pitch and fixed-codebook searches still drive off
-  the raw LP residual rather than convolving candidates with `h(n)`;
-  wiring `h(n)` into the §3.7/§3.8 search loops is the next encoder step.
+- **Open-loop pitch analysis (§3.4): spec-faithful.** The encoder now
+  runs the once-per-frame open-loop pitch search on the perceptually-
+  weighted speech `sw(n)` of eq (33): the three-range correlation
+  `R(k) = Σ sw(n)·sw(n-k)` (eq 34) over the three disjoint delay bands
+  (80…143, 40…79, 20…39), normalised by `sqrt(Σ sw²(n-k))` (eq 35), with
+  the sub-multiple bias decision tree (`R'(t_i) ≥ 0.85·R'(T_op)` favours
+  shorter delays to avoid latching onto a pitch multiple). The resulting
+  `T_op` anchors the §3.7 closed-loop search: subframe 1 searches the
+  six-sample window `[T_op−3, T_op+3]` (eq f0018-01), subframe 2 the
+  ten-sample window `[int(T1)−5, int(T1)+4]` (eq f0018-02), both with the
+  spec's boundary clamps. Lives in `src/open_loop_pitch.rs`, unit-tested.
+- **Perceptual weighting: spec-faithful building blocks; γ-adaptation
+  pending.** The §3.3 weighting filter `W(z) = A(z/γ1)/A(z/γ2)` (eq 27)
+  and the §3.5 weighted-synthesis-filter impulse response `h(n)` of
+  `A(z/γ1)/[Â(z)·A(z/γ2)]` are implemented in `src/weighting.rs` exactly
+  per spec. The adaptive (γ1, γ2) derivation building blocks —
+  log-area-ratio coefficients (eq 28), flat/tilted hysteresis classifier
+  (eq 30), minimum-LSP-distance `d_min` (eq 31), and `γ2 = −6·d_min + 1`
+  bounded to [0.4, 0.7] (eq 32) — are present and unit-tested, but the
+  per-frame LAR-based flat/tilted *selection* (eqs 28–30 fed by the
+  Levinson-Durbin reflection coefficients) is not yet wired: the §3.4
+  weighted-speech path uses the §3.3 "flat" gammas (0.94, 0.6) as a
+  documented default. The analysis-by-synthesis fixed-codebook search
+  still drives off the raw LP residual rather than convolving candidates
+  with `h(n)`; wiring `h(n)` into the §3.8 search loop is a later step.
 - **Gain VQ table values: NOT spec-exact.** The table *dimensions*
   match the spec (`GBK1` = 8×2, `GBK2` = 16×2 per §5.2 Table 12), and
   the codebook structure is correct — both rows hold `(ĝ_p, γ̂)` and
