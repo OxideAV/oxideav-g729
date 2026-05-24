@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-g729/compare/v0.0.6...v0.0.7) - 2026-05-24
+
+### Other
+
+- encoder §3.4 open-loop pitch analysis + §3.7 closed-loop windows
+- encoder §3.3 perceptual weighting + §3.5 h(n) impulse response
+- complete §4.2.5 decoder output stage + AGC/tilt spec fixes
+- spec-exact 240-sample asymmetric LP-analysis window per §3.2.1
+- align encoder gain-VQ with spec — γ correction factor + MA-4 predictor
+
 ### Other
 
 - New `open_loop_pitch` module implements the encoder's §3.4 open-loop
