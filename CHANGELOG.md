@@ -6,6 +6,12 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-g729/compare/v0.0.6...v0.0.7) - 2026-05-24
+
+### Other
+
+- orphan rebuild — clean-room reset to register-only scaffold
+
 ### Erased
 
 - Prior master history was force-erased on **2026-05-24** under
