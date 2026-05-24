@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- New `weighting` module implements the encoder's §3.3 perceptual
+  weighting filter and §3.5 weighted-synthesis-filter impulse response,
+  all spec-faithful (12 unit tests):
+  - `bandwidth_expand` — `A(z) → A(z/γ)` (coefficient `a_k → γ^k·a_k`,
+    the numerator/denominator form of eq 27).
+  - `log_area_ratio` (eq 28), `lsp_min_distance` `d_min` (eq 31),
+    `adapt_gamma2` `γ2 = −6·d_min + 1` bounded to [0.4, 0.7] (eq 32),
+    `classify_flat` flat/tilted hysteresis decision (eq 30), and
+    `weighting_gammas` selecting (γ1, γ2) = (0.94, 0.6) flat or
+    (0.98, adapted) tilted.
+  - `weighted_synthesis_impulse_response` — `h(n)` of
+    `W(z)/Â(z) = A(z/γ1)/[Â(z)·A(z/γ2)]`, computed per §3.5 by filtering
+    the `A(z/γ1)` coefficients (zero-extended) through `1/Â(z)` then
+    `1/A(z/γ2)`, truncated to one subframe (40 samples). Cross-checked
+    against an explicit two-pass reference recursion.
+  These are the building blocks for a true analysis-by-synthesis search;
+  the §3.7/§3.8 search loops do not yet convolve candidates with `h(n)`.
 - Decoder now completes the §4.2.5 output post-processing stage: the
   100 Hz high-pass filter `H_h2(z)` (eq 91, coefficients verbatim from
   the spec — b0 = b2 = 0.93980581, b1 = −1.8795834, a1 = −1.9330735,

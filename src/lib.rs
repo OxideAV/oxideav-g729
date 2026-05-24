@@ -40,6 +40,7 @@ pub mod encoder;
 pub mod lpc;
 pub mod lsp_tables;
 pub mod synthesis;
+pub mod weighting;
 
 use oxideav_core::CodecRegistry;
 

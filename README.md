@@ -94,9 +94,11 @@ bit-exact against the ITU reference implementation.
   synthesis, short-term + pitch + tilt postfilter with AGC, and the
   §4.2.5 output stage — 100 Hz high-pass `H_h2(z)` + ×2 level restore).
 - Encoder: Levinson-Durbin LPC analysis, Chebyshev-based LPC to LSP,
-  split-VQ LSP quantisation, open-loop + closed-loop fractional-lag
-  pitch search, focused 4-pulse ACELP fixed-codebook search, two-stage
-  gain VQ, bit-exact packer for ITU-T Table 8.
+  split-VQ LSP quantisation, §3.3 perceptual-weighting filter `W(z)` +
+  §3.5 weighted-synthesis-filter impulse response `h(n)`, open-loop +
+  closed-loop fractional-lag pitch search, focused 4-pulse ACELP
+  fixed-codebook search, two-stage gain VQ, bit-exact packer for
+  ITU-T Table 8.
 - Annex B: VAD + DTX + CNG (simplified, interoperates with this crate's
   own decoder).
 
@@ -135,6 +137,17 @@ bit-exact against the ITU reference implementation.
   `r(0)`-floor (1.0), white-noise correction (×1.0001), and 60 Hz
   bandwidth lag window from eqs (6, 7) all match the spec. This
   realises the spec's 5 ms extra algorithmic delay at the encoder.
+- **Perceptual weighting: spec-faithful building blocks, not yet in the
+  search loop.** The §3.3 weighting filter `W(z) = A(z/γ1)/A(z/γ2)`
+  (eq 27), its adaptive (γ1, γ2) derivation — log-area-ratio
+  coefficients (eq 28), flat/tilted hysteresis classifier (eq 30),
+  minimum-LSP-distance `d_min` (eq 31), and `γ2 = −6·d_min + 1`
+  bounded to [0.4, 0.7] (eq 32) — and the §3.5 weighted-synthesis-filter
+  impulse response `h(n)` of `A(z/γ1)/[Â(z)·A(z/γ2)]` are all implemented
+  in `src/weighting.rs` exactly per spec, with unit tests. The
+  analysis-by-synthesis pitch and fixed-codebook searches still drive off
+  the raw LP residual rather than convolving candidates with `h(n)`;
+  wiring `h(n)` into the §3.7/§3.8 search loops is the next encoder step.
 - **Gain VQ table values: NOT spec-exact.** The table *dimensions*
   match the spec (`GBK1` = 8×2, `GBK2` = 16×2 per §5.2 Table 12), and
   the codebook structure is correct — both rows hold `(ĝ_p, γ̂)` and
