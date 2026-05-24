@@ -1,0 +1,17 @@
+[package]
+name = "oxideav-g729"
+version = "0.0.6"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-g729"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust ITU-T G.729 (CS-ACELP, 8 kbit/s) decoder + encoder"
+
+readme = "README.md"
+homepage = "https://github.com/OxideAV/oxideav-g729"
+keywords = ["multimedia", "audio", "g729", "telephony", "codec"]
+categories = ["multimedia::encoding", "multimedia::audio"]
+
+[dependencies]
+oxideav-core = "0.1"
