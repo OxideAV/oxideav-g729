@@ -6,6 +6,13 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-g729/releases/tag/v0.0.6) - 2026-05-28
+
+### Other
+
+- bit-exact tables foundation — high-pass coefs, Table 8, basic-op LUTs
+- orphan rebuild — clean-room reset to register-only scaffold
+
 ### Added
 
 - `tables` module exposing a small bit-exact subset of the G.729
