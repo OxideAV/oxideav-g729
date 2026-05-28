@@ -12,6 +12,20 @@ readme = "README.md"
 homepage = "https://github.com/OxideAV/oxideav-g729"
 keywords = ["multimedia", "audio", "g729", "telephony", "codec"]
 categories = ["multimedia::encoding", "multimedia::audio"]
+build = "build.rs"
+include = [
+    "src/**/*.rs",
+    "build.rs",
+    "Cargo.toml",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+    # build.rs parses spec-role-named CSVs (verbatim copies of
+    # `docs/audio/g729/tables/`) at compile time. Missing any of
+    # these CSVs breaks `cargo build` / release-plz packaging.
+    "tables/*.csv",
+    "tables/*.meta",
+]
 
 [dependencies]
 oxideav-core = "0.1"
