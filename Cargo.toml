@@ -13,5 +13,21 @@ homepage = "https://github.com/OxideAV/oxideav-g729"
 keywords = ["multimedia", "audio", "g729", "telephony", "codec"]
 categories = ["multimedia::encoding", "multimedia::audio"]
 
+# Library source + clean-room-staged numeric tables. CSV + meta sidecars
+# are required at build time by `build.rs` to compile the bit-exact
+# constants in `src/tables.rs`; they ship with the crate so a
+# from-crates.io build does not depend on the workspace's `docs/`.
+include = [
+    "src/**/*.rs",
+    "tests/**/*.rs",
+    "tables/*.csv",
+    "tables/*.meta",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+]
+
 [dependencies]
 oxideav-core = "0.1"

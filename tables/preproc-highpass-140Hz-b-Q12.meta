@@ -1,0 +1,14 @@
+spec_name: preproc-highpass-140Hz-b-Q12
+spec_role: §3.1 alternate IIR high-pass filter b coefficients (fc=140 Hz; b is 1/2 in Q12, {1899, -3798, 1899})
+c_identifier: b140
+c_type: Word16
+raw_dims: [3]
+resolved_dims: [3]
+element_count: 3
+source_file: g729/c_code/TAB_LD8K.C
+source_sha256: a8d198f94ac0efb7f2c4baea29efce9df3c76f1821ff1b2ff0f3ededbcf4868c
+source_line_start: 543
+source_line_end: 543
+source_url: https://www.itu.int/rec/T-REC-G.729-201206-I/en
+source_zip_sha256: 979680ff3b52b13a5701453178efd32b53e340114638fd330fdb6669eec86620
+extractor: extract.py (pure data extraction; no algorithmic source read)
