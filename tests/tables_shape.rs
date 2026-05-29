@@ -151,4 +151,249 @@ fn all_tables_are_non_empty() {
     assert!(!tables::POW2_TABLE_Q15.is_empty());
     assert!(!tables::LOG2_TABLE_Q15.is_empty());
     assert!(!tables::INV_SQRT_TABLE_Q15.is_empty());
+    assert!(!tables::LPC_HAMMING_WINDOW_Q15.is_empty());
+    assert!(!tables::LPC_LAG_WINDOW_HIGH_Q15.is_empty());
+    assert!(!tables::LPC_LAG_WINDOW_LOW_Q15.is_empty());
+    assert!(!tables::LSF_SEARCH_GRID_COS_Q15.is_empty());
+    assert!(!tables::PITCH_INTERP_FILTER_ANALYSIS_Q15.is_empty());
+    assert!(!tables::PITCH_INTERP_FILTER_SYNTHESIS_Q15.is_empty());
+    assert!(!tables::GAIN_QUANT_MA_PREDICTOR_Q13.is_empty());
+}
+
+// ---------------------------------------------------------------------
+// §3.2.1 LP analysis windowing tables (round 189).
+// ---------------------------------------------------------------------
+
+/// `hamwindow` spans `L_WINDOW = 240` samples, exactly the
+/// LP-analysis frame length per spec §3.2.1.
+#[test]
+fn hamming_window_length_matches_l_window() {
+    assert_eq!(tables::LPC_HAMMING_WINDOW_Q15.len(), tables::L_WINDOW);
+    assert_eq!(tables::L_WINDOW, 240);
+}
+
+/// The Hamming-cos window's peak value is at or above all other
+/// samples, and the staged CSV's first and last entries are both
+/// less than the peak (the window is tapered at both ends). The
+/// peak of the spec's `Hamming_cos` formulation reaches Q15 ≈ 1.0
+/// (`32767`).
+#[test]
+fn hamming_window_peaks_at_q15_unit() {
+    let peak = tables::LPC_HAMMING_WINDOW_Q15
+        .iter()
+        .copied()
+        .max()
+        .unwrap();
+    assert_eq!(peak, 32767, "Hamming window peak should be Q15 ≈ 1.0");
+
+    let first = tables::LPC_HAMMING_WINDOW_Q15[0];
+    let last = *tables::LPC_HAMMING_WINDOW_Q15.last().unwrap();
+    assert!(first < peak);
+    assert!(last < peak);
+}
+
+/// The Hamming-cos window is strictly positive on its full support
+/// (`w[n] = 0.54 - 0.46·cos(...)` lies in `[0.08, 1.0]`).
+#[test]
+fn hamming_window_is_strictly_positive() {
+    for (i, &v) in tables::LPC_HAMMING_WINDOW_Q15.iter().enumerate() {
+        assert!(v > 0, "Hamming window has non-positive entry at {i}: {v}");
+    }
+}
+
+/// `lag_h` / `lag_l` form the high / low halves of a
+/// double-precision `Word32` lag-window pair (§3.2.1 + `oper_32b.c`
+/// double-precision representation). They share length `M = 10`.
+#[test]
+fn lag_window_pair_lengths_match_m() {
+    assert_eq!(tables::LPC_LAG_WINDOW_HIGH_Q15.len(), tables::M);
+    assert_eq!(tables::LPC_LAG_WINDOW_LOW_Q15.len(), tables::M);
+    assert_eq!(tables::M, 10);
+}
+
+/// `lag_h` (the high-order half of the double-precision lag-window
+/// representation) is monotonically decreasing — the bandwidth-
+/// expansion factor applied to autocorrelation taps shrinks with
+/// the tap index `i = 1..M`.
+#[test]
+fn lag_window_high_is_monotonic_decreasing() {
+    for pair in tables::LPC_LAG_WINDOW_HIGH_Q15.windows(2) {
+        assert!(
+            pair[0] > pair[1],
+            "lag_h not strictly decreasing: {} then {}",
+            pair[0],
+            pair[1],
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// §3.2.5 az_lsf() root-search grid (round 189).
+// ---------------------------------------------------------------------
+
+/// The grid is `GRID_POINTS + 1 = 61` Q15 cosine samples spanning
+/// the upper half-circle in 60 equal angular steps.
+#[test]
+fn grid_length_matches_grid_points_plus_one() {
+    assert_eq!(
+        tables::LSF_SEARCH_GRID_COS_Q15.len(),
+        tables::GRID_POINTS + 1
+    );
+    assert_eq!(tables::GRID_POINTS, 60);
+}
+
+/// Endpoints of the cosine grid: `grid[0] = cos(0) ≈ 1.0` (Q15
+/// upper limit `32767`-ish), `grid[60] = cos(π) ≈ -1.0`
+/// (Q15 lower limit `-32768`-ish). The CSV's literal values are
+/// `32760` and `-32760` (matching the ITU C source exactly).
+#[test]
+fn grid_endpoints_match_csv_literals() {
+    assert_eq!(tables::LSF_SEARCH_GRID_COS_Q15[0], 32760);
+    assert_eq!(*tables::LSF_SEARCH_GRID_COS_Q15.last().unwrap(), -32760);
+}
+
+/// `grid[30]` corresponds to `cos(π/2)`, which is exactly `0`. The
+/// G.729 spec's `grid` array deliberately includes this midpoint
+/// (61 samples → odd count → centre sample is the zero crossing).
+#[test]
+fn grid_midpoint_is_zero() {
+    let mid = tables::LSF_SEARCH_GRID_COS_Q15.len() / 2;
+    assert_eq!(tables::LSF_SEARCH_GRID_COS_Q15[mid], 0);
+}
+
+/// The grid is monotonically strictly decreasing across the full
+/// half-circle (cosine is a strictly decreasing function on
+/// `[0, π]`).
+#[test]
+fn grid_is_strictly_decreasing() {
+    for pair in tables::LSF_SEARCH_GRID_COS_Q15.windows(2) {
+        assert!(
+            pair[0] > pair[1],
+            "grid not strictly decreasing: {} then {}",
+            pair[0],
+            pair[1],
+        );
+    }
+}
+
+/// Antisymmetry of cosine on `[0, π]`: `grid[i] = -grid[N-1-i]`.
+/// This catches any axis-flip or off-by-one in the extraction.
+#[test]
+fn grid_is_antisymmetric_about_midpoint() {
+    let g = &tables::LSF_SEARCH_GRID_COS_Q15;
+    let n = g.len();
+    for i in 0..n {
+        assert_eq!(
+            g[i],
+            -g[n - 1 - i],
+            "grid not antisymmetric at i={i}: {} vs -{}",
+            g[i],
+            g[n - 1 - i],
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// §3.7 pitch interpolation filters (round 189).
+// ---------------------------------------------------------------------
+
+/// `inter_3` is the 13-tap (`FIR_SIZE_ANA`) Q15 analysis-side
+/// 1/3-resolution interpolation filter.
+#[test]
+fn pitch_analysis_filter_has_fir_size_ana_taps() {
+    assert_eq!(tables::PITCH_INTERP_FILTER_ANALYSIS_Q15.len(), 13);
+}
+
+/// `inter_3l` is the 31-tap (`FIR_SIZE_SYN`) Q15 synthesis-side
+/// 1/3-resolution interpolation filter.
+#[test]
+fn pitch_synthesis_filter_has_fir_size_syn_taps() {
+    assert_eq!(tables::PITCH_INTERP_FILTER_SYNTHESIS_Q15.len(), 31);
+}
+
+/// The analysis filter's peak tap is positive and at least as
+/// large in magnitude as any other tap (a sensible windowed-sinc
+/// design has the centre tap dominate). Both staged filters share
+/// this property; this is a cheap drift check on the CSV-to-Rust
+/// pipeline.
+#[test]
+fn pitch_analysis_filter_centre_dominates() {
+    let max = tables::PITCH_INTERP_FILTER_ANALYSIS_Q15
+        .iter()
+        .copied()
+        .max()
+        .unwrap();
+    let abs_max = tables::PITCH_INTERP_FILTER_ANALYSIS_Q15
+        .iter()
+        .map(|&v| (v as i32).unsigned_abs())
+        .max()
+        .unwrap();
+    assert!(max > 0);
+    assert_eq!(max as u32, abs_max, "filter peak should be a positive tap");
+}
+
+/// Same dominance property for the synthesis filter — sanity check
+/// that the longer-tap design's peak remains positive.
+#[test]
+fn pitch_synthesis_filter_peak_is_positive() {
+    let max = tables::PITCH_INTERP_FILTER_SYNTHESIS_Q15
+        .iter()
+        .copied()
+        .max()
+        .unwrap();
+    let abs_max = tables::PITCH_INTERP_FILTER_SYNTHESIS_Q15
+        .iter()
+        .map(|&v| (v as i32).unsigned_abs())
+        .max()
+        .unwrap();
+    assert!(max > 0);
+    assert_eq!(max as u32, abs_max);
+}
+
+// ---------------------------------------------------------------------
+// §3.9 MA gain-prediction coefficients (round 189).
+// ---------------------------------------------------------------------
+
+/// `pred` is a 4-element Q13 vector. The meta `spec_role` line
+/// names the real values explicitly as {0.68, 0.58, 0.34, 0.19};
+/// in Q13 those round to {5571, 4751, 2785, 1556} (`round(v *
+/// 8192)`).
+#[test]
+fn gain_ma_predictor_matches_meta_documentation() {
+    assert_eq!(tables::GAIN_QUANT_MA_PREDICTOR_Q13.len(), 4);
+    assert_eq!(
+        tables::GAIN_QUANT_MA_PREDICTOR_Q13,
+        [5571, 4751, 2785, 1556],
+    );
+
+    // Each Q13 entry round-trips back to its spec'd real value
+    // within the Q13 quantisation step (1 / 8192 ≈ 1.22e-4).
+    let real_targets: [f64; 4] = [0.68, 0.58, 0.34, 0.19];
+    let q13_scale = 8192.0;
+    let q13_step = 1.0 / q13_scale;
+    for (i, &v) in tables::GAIN_QUANT_MA_PREDICTOR_Q13.iter().enumerate() {
+        let recovered = f64::from(v) / q13_scale;
+        let err = (recovered - real_targets[i]).abs();
+        assert!(
+            err < q13_step,
+            "pred[{i}] = {v} (Q13 {recovered}) differs from spec target {} by {err}",
+            real_targets[i],
+        );
+    }
+}
+
+/// The MA gain predictor is a monotonically non-increasing vector
+/// (longer-history terms are weighted less). This is a structural
+/// property of the spec'd values that survives the staging
+/// pipeline and would catch any reordering of the CSV.
+#[test]
+fn gain_ma_predictor_is_monotonic_nonincreasing() {
+    for pair in tables::GAIN_QUANT_MA_PREDICTOR_Q13.windows(2) {
+        assert!(
+            pair[0] >= pair[1],
+            "pred not monotonic non-increasing: {} then {}",
+            pair[0],
+            pair[1],
+        );
+    }
 }

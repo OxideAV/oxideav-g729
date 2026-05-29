@@ -33,19 +33,40 @@
 //! this round). The wrapping `src/tables.rs` module then `include!`s
 //! each file behind a public re-export.
 //!
-//! ## Round-173 scope
+//! ## Cumulative scope
 //!
-//! This round wires up:
+//! Round 173 wired up the foundational HPF coefficients, the §4.1
+//! Table-8 bit-allocation array, and the three `basic_op` math
+//! lookups. Round 189 extends that with the §3.2.1 LP-analysis tables
+//! (Hamming window + autocorrelation lag-window pair), the §3.2.5
+//! LSF root-search cosine grid, the §3.7 pitch interpolation filters
+//! (`inter_3` / `inter_3l`), and the §3.9 MA gain-prediction
+//! coefficient vector (`pred`).
+//!
+//! Tables wired this build:
+//!
 //! * §3.1 / §4.2 pre/post high-pass filter coefficients (b100, a100,
-//!   b140, a140) — 4 × 3-entry Word16 arrays.
+//!   b140, a140) — 4 × 3-entry Word16 arrays. (r173)
 //! * §4.1 spec Table 8 bit-allocation per parameter (bitsno) — 13-entry
 //!   Word16 array (the CSV literal count; spec PRM_SIZE constant is 11
 //!   but the source array carries two trailing entries — preserved as
-//!   extracted).
-//! * basic_op() Pow2, Log2, Inv_sqrt lookup tables — 33, 33, 49 entries.
+//!   extracted). (r173)
+//! * basic_op() Pow2, Log2, Inv_sqrt lookup tables — 33, 33, 49
+//!   entries. (r173)
+//! * §3.2.1 LP-analysis windowing: `hamwindow` (240 Q15 samples),
+//!   `lag_h` / `lag_l` (10 + 10 Q15 entries forming the
+//!   double-precision 60 Hz bandwidth-expansion lag window pair).
+//!   (r189)
+//! * §3.2.5 `az_lsf()` root-search grid: 61-entry Q15 cosine table
+//!   over the half-circle. (r189)
+//! * §3.7 pitch interpolation filters: `inter_3` (13-tap analysis)
+//!   and `inter_3l` (31-tap synthesis), both Q15. (r189)
+//! * §3.9 MA gain-prediction coefficients (`pred`) — 4 Q13 entries
+//!   {0.68, 0.58, 0.34, 0.19}. (r189)
 //!
 //! Larger codebook tables (LSP L1/L2, gain GA/GB, MA predictor fg,
-//! interpolation filters, etc.) are NOT compiled this round; their
+//! postfilter interpolation `tab_hup_*`, taming `tab_zone`, Annex B
+//! DTX/CNG, LSF↔LSP cos/slope tables) are NOT compiled yet; their
 //! addition is gated on the docs collaborator handoff (#859 per
 //! workspace memory).
 
@@ -98,6 +119,38 @@ const TABLES: &[Table] = &[
         stem: "basic-op-invsqrt-table",
         elements: 49,
     },
+    // §3.2.1 LP-analysis windowing.
+    Table {
+        stem: "lpc-hamming-window-Q15",
+        elements: 240,
+    },
+    Table {
+        stem: "lpc-autocorr-lag-window-high-Q15",
+        elements: 10,
+    },
+    Table {
+        stem: "lpc-autocorr-lag-window-low-Q15",
+        elements: 10,
+    },
+    // §3.2.5 az_lsf() root-search grid.
+    Table {
+        stem: "lsf-search-grid-cos-Q15",
+        elements: 61,
+    },
+    // §3.7 pitch interpolation filters.
+    Table {
+        stem: "pitch-interpolation-filter-analysis-Q15",
+        elements: 13,
+    },
+    Table {
+        stem: "pitch-interpolation-filter-synthesis-Q15",
+        elements: 31,
+    },
+    // §3.9 MA gain-prediction coefficients.
+    Table {
+        stem: "gain-quantizer-ma-predictor-Q13",
+        elements: 4,
+    },
 ];
 
 /// Maps a CSV stem to its Rust-side `pub const` identifier. Kept here
@@ -113,6 +166,13 @@ fn const_ident(stem: &str) -> &'static str {
         "basic-op-pow2-table" => "POW2_TABLE_Q15",
         "basic-op-log2-table" => "LOG2_TABLE_Q15",
         "basic-op-invsqrt-table" => "INV_SQRT_TABLE_Q15",
+        "lpc-hamming-window-Q15" => "LPC_HAMMING_WINDOW_Q15",
+        "lpc-autocorr-lag-window-high-Q15" => "LPC_LAG_WINDOW_HIGH_Q15",
+        "lpc-autocorr-lag-window-low-Q15" => "LPC_LAG_WINDOW_LOW_Q15",
+        "lsf-search-grid-cos-Q15" => "LSF_SEARCH_GRID_COS_Q15",
+        "pitch-interpolation-filter-analysis-Q15" => "PITCH_INTERP_FILTER_ANALYSIS_Q15",
+        "pitch-interpolation-filter-synthesis-Q15" => "PITCH_INTERP_FILTER_SYNTHESIS_Q15",
+        "gain-quantizer-ma-predictor-Q13" => "GAIN_QUANT_MA_PREDICTOR_Q13",
         _ => panic!("unknown table stem: {stem}"),
     }
 }

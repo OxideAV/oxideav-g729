@@ -1,0 +1,14 @@
+spec_name: lpc-autocorr-lag-window-high-Q15
+spec_role: §3.2.1 autocorrelation lag window, bandwidth-expanded 60 Hz, high-half of double-precision pair (see oper_32b.c)
+c_identifier: lag_h
+c_type: Word16
+raw_dims: [M]
+resolved_dims: [10]
+element_count: 10
+source_file: g729/c_code/TAB_LD8K.C
+source_sha256: a8d198f94ac0efb7f2c4baea29efce9df3c76f1821ff1b2ff0f3ededbcf4868c
+source_line_start: 63
+source_line_end: 73
+source_url: https://www.itu.int/rec/T-REC-G.729-201206-I/en
+source_zip_sha256: 979680ff3b52b13a5701453178efd32b53e340114638fd330fdb6669eec86620
+extractor: extract.py (pure data extraction; no algorithmic source read)

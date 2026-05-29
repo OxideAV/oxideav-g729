@@ -8,19 +8,31 @@
 //! electronic attachment is read here or anywhere else in this crate
 //! (`docs/IMPLEMENTOR_ROUND.md`, clean-room rule).
 //!
-//! ## Round-173 coverage
+//! ## Coverage
+//!
+//! Round 173 (foundation):
 //!
 //! * §3.1 / §4.2 pre/post high-pass filters (b100/a100 Q13;
 //!   b140/a140 Q12).
 //! * §4.1 spec Table 8 bit allocation per parameter (`bitsno`).
 //! * basic_op() math LUTs (`Pow2`, `Log2`, `Inv_sqrt`).
 //!
-//! Larger codebook tables (LSP L1/L2, gain GA/GB, MA predictor `fg`,
-//! interpolation filters `inter_3` / `inter_3l`, postfilter
-//! interpolation `tab_hup_*`, taming `tab_zone`, Annex B DTX/CNG) are
-//! intentionally NOT compiled this round; they will land once the
-//! companion docs (specifier clarifications + decode-side wiring per
-//! spec clauses) are unblocked.
+//! Round 189 (LP analysis / pitch / gain prediction):
+//!
+//! * §3.2.1 LP analysis windowing — `hamwindow` 240-sample Q15
+//!   Hamming window, `lag_h` / `lag_l` 10-entry Q15 60 Hz
+//!   bandwidth-expansion lag-window pair.
+//! * §3.2.5 `az_lsf()` cosine grid (61 Q15 entries spanning the
+//!   half-circle in 60 equal steps).
+//! * §3.7 pitch interpolation filters — `inter_3` 13-tap analysis,
+//!   `inter_3l` 31-tap synthesis (both Q15).
+//! * §3.9 MA gain-prediction coefficients `pred` — 4 Q13 entries
+//!   {0.68, 0.58, 0.34, 0.19}.
+//!
+//! Still NOT compiled (gated on the docs collaborator specifier
+//! pass): LSP L1/L2 codebooks, gain GA/GB codebooks, MA predictor
+//! `fg`, postfilter interpolation `tab_hup_*`, taming `tab_zone`,
+//! Annex B DTX/CNG, LSF↔LSP cos/slope tables.
 //!
 //! ## Q-format convention reminder (G.729 §1.4)
 //!
@@ -41,6 +53,28 @@ include!(concat!(
 include!(concat!(env!("OUT_DIR"), "/basic-op-pow2-table.rs"));
 include!(concat!(env!("OUT_DIR"), "/basic-op-log2-table.rs"));
 include!(concat!(env!("OUT_DIR"), "/basic-op-invsqrt-table.rs"));
+include!(concat!(env!("OUT_DIR"), "/lpc-hamming-window-Q15.rs"));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/lpc-autocorr-lag-window-high-Q15.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/lpc-autocorr-lag-window-low-Q15.rs"
+));
+include!(concat!(env!("OUT_DIR"), "/lsf-search-grid-cos-Q15.rs"));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/pitch-interpolation-filter-analysis-Q15.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/pitch-interpolation-filter-synthesis-Q15.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/gain-quantizer-ma-predictor-Q13.rs"
+));
 
 /// G.729 §4.1 transmitted parameter count per frame (spec `PRM_SIZE`).
 /// The bit-allocation table [`BIT_ALLOCATION_TABLE8`] carries 13
@@ -61,3 +95,20 @@ pub const PRM_SIZE: usize = 11;
 /// whereas the ITU C source's `bitsno` array packs 13 values;
 /// reconciling the two is deferred to the docs collaborator).
 pub const BITS_PER_FRAME: usize = 80;
+
+/// G.729 LP-analysis predictor order — 10, per spec §3.2.1 (`M` in
+/// the ITU C source). The 10th-order LP filter is fit to each
+/// `L_WINDOW = 240`-sample analysis frame using the autocorrelation
+/// method.
+pub const M: usize = 10;
+
+/// G.729 LP-analysis window length — 240 samples (`L_WINDOW`), per
+/// spec §3.2.1. The Hamming window in [`LPC_HAMMING_WINDOW_Q15`]
+/// spans this number of samples.
+pub const L_WINDOW: usize = 240;
+
+/// G.729 LSF root-search grid resolution — 60 evenly-spaced points
+/// on the upper half-circle, per spec §3.2.5 (`GRID_POINTS`). The
+/// staged cosine grid [`LSF_SEARCH_GRID_COS_Q15`] holds
+/// `GRID_POINTS + 1 = 61` samples.
+pub const GRID_POINTS: usize = 60;

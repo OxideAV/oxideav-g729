@@ -1,0 +1,14 @@
+spec_name: lpc-hamming-window-Q15
+spec_role: §3.2.1 LP analysis windowing (Hamming_cos window, 240 samples)
+c_identifier: hamwindow
+c_type: Word16
+raw_dims: [L_WINDOW]
+resolved_dims: [240]
+element_count: 240
+source_file: g729/c_code/TAB_LD8K.C
+source_sha256: a8d198f94ac0efb7f2c4baea29efce9df3c76f1821ff1b2ff0f3ededbcf4868c
+source_line_start: 16
+source_line_end: 40
+source_url: https://www.itu.int/rec/T-REC-G.729-201206-I/en
+source_zip_sha256: 979680ff3b52b13a5701453178efd32b53e340114638fd330fdb6669eec86620
+extractor: extract.py (pure data extraction; no algorithmic source read)

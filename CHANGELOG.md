@@ -8,6 +8,46 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 189 extends the bit-exact numeric-tables wire-up with the
+  §3.2.1 LP-analysis windowing tables, the §3.2.5 LSF cosine grid,
+  the §3.7 pitch interpolation filters, and the §3.9 MA gain-
+  prediction coefficient vector. Same CSV/meta provenance chain as
+  the round-173 entries (`docs/audio/g729/tables/` → crate's
+  `tables/` → `build.rs` → `OUT_DIR/<stem>.rs` →
+  `src/tables.rs::include!`):
+  - `tables::LPC_HAMMING_WINDOW_Q15` — §3.2.1 LP-analysis Hamming
+    window (`hamwindow`, `[i16; 240]`).
+  - `tables::LPC_LAG_WINDOW_HIGH_Q15` — §3.2.1 60 Hz lag-window
+    high half (`lag_h`, `[i16; 10]`).
+  - `tables::LPC_LAG_WINDOW_LOW_Q15` — §3.2.1 60 Hz lag-window
+    low half (`lag_l`, `[i16; 10]`).
+  - `tables::LSF_SEARCH_GRID_COS_Q15` — §3.2.5 `az_lsf()`
+    root-search cosine grid (`grid`, `[i16; 61]`).
+  - `tables::PITCH_INTERP_FILTER_ANALYSIS_Q15` — §3.7
+    1/3-resolution pitch analysis filter (`inter_3`, `[i16; 13]`).
+  - `tables::PITCH_INTERP_FILTER_SYNTHESIS_Q15` — §3.7
+    1/3-resolution pitch synthesis filter (`inter_3l`, `[i16; 31]`).
+  - `tables::GAIN_QUANT_MA_PREDICTOR_Q13` — §3.9 MA gain
+    predictor `pred` (`[i16; 4]` ≈ {0.68, 0.58, 0.34, 0.19}).
+- New spec-dimension helper constants exposed alongside the table
+  module: `M = 10` (LP order), `L_WINDOW = 240` (LP-analysis frame
+  length), `GRID_POINTS = 60` (LSF root-search grid resolution).
+- `tests/tables_shape.rs` grows from 10 to 26 tests, structurally
+  verifying every newly-staged table:
+  - Hamming window length matches `L_WINDOW`; peak equals Q15 ≈ 1.0
+    (`32767`); every sample is strictly positive.
+  - Lag-window pair lengths match `M`; `lag_h` is strictly
+    monotonically decreasing.
+  - Cosine grid length matches `GRID_POINTS + 1`; endpoints match
+    the CSV literals (`32760` / `-32760`); midpoint is exactly `0`;
+    grid is strictly decreasing and antisymmetric about the
+    midpoint.
+  - Pitch analysis / synthesis filters: peak tap is positive and
+    equals the maximum-magnitude tap.
+  - MA gain predictor matches `[5571, 4751, 2785, 1556]` literally
+    and round-trips to {0.68, 0.58, 0.34, 0.19} within one Q13
+    quantisation step; vector is monotonically non-increasing.
+
 - Round 173 lands the bit-exact numeric-tables foundation. The
   following constants are compiled at build time by `build.rs` from
   CSVs under `tables/` (byte-for-byte copies of the spec-role-named
@@ -59,11 +99,10 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Next
 
-- Larger codebook tables (LSP L1/L2 codebooks, gain GA/GB codebooks,
-  MA predictor `fg`, pitch interpolation `inter_3` / `inter_3l`,
-  postfilter interpolation `tab_hup_s` / `tab_hup_l`, taming
-  `tab_zone`, LSF↔LSP cos/slope tables, autocorrelation
-  lag/Hamming windows, Annex B DTX/CNG) — staged under
+- Remaining codebook tables (LSP L1/L2 codebooks, gain GA/GB
+  codebooks, MA predictor `fg`, postfilter interpolation
+  `tab_hup_s` / `tab_hup_l`, taming `tab_zone`, LSF↔LSP cos/slope
+  tables, Annex B DTX/CNG) — staged under
   `docs/audio/g729/tables/`, awaiting per-clause specifier pass.
 - Decoder / encoder wire-up against the staged ITU-T G.729
   Recommendation text (spec PDF at `docs/audio/g729/`).
