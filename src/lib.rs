@@ -20,6 +20,12 @@
 //! * §4.1 spec Table 8 bit-allocation per analysis parameter.
 //! * `basic_op()` Pow2, Log2, and Inv_sqrt 16-bit lookup tables.
 //!
+//! Round 191 adds a parser for the **ITU serial bitstream format**
+//! used by the staged conformance corpus under
+//! `docs/audio/g729/conformance/`. See [`serial`] for the 164-byte
+//! frame layout (sync + bits-per-frame header + 80 bit-value words)
+//! and [`serial::parse_frame`] for the decoder.
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -46,6 +52,7 @@
 
 use oxideav_core::RuntimeContext;
 
+pub mod serial;
 pub mod tables;
 
 /// Crate-local error type. Until decode + encode are wired up, every

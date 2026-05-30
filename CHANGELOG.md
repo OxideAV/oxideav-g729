@@ -8,6 +8,32 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 191 wires up the ITU serial bitstream format used by the
+  staged conformance corpus at `docs/audio/g729/conformance/`:
+  - New `serial` module with public `SYNC_WORD = 0x6B21`,
+    `BITS_HEADER = 80`, `BIT_ZERO = 0x007F`, `BIT_ONE = 0x0081`,
+    `BIT_ERASED = 0x0000`, `FRAME_WORDS = 82`, `FRAME_BYTES = 164`
+    constants. The framing-literal values are empirically observed
+    in the staged `.bit` files; the 164-byte cadence is documented
+    in `docs/audio/g729/conformance/README.md`.
+  - `serial::parse_frame(&[u8]) -> Result<FrameKind, SerialError>`
+    distinguishes normal frames (`FrameKind::Active([bool; 80])`)
+    from frame-erasure sentinels (`FrameKind::Erased`), and rejects
+    wrong-length, wrong-sync, wrong-header, invalid-bit-word, and
+    mid-frame mixed-erasure inputs.
+  - `serial::frame_count(&[u8])` byte-length cross-check.
+  - 13 new unit tests in `src/serial.rs` cover the happy paths and
+    all five error variants.
+  - 6 new integration tests in `tests/serial_conformance.rs` walk
+    the staged `docs/audio/g729/conformance/{g729-core,g729a}/`
+    corpus when present, validating sync + header per frame,
+    matching `.bit` frame count against `.pst` PCM frame count, and
+    pinning the erasure-sentinel frame count exactly for each
+    decoder-only sequence (`ERASURE` 60/300, `OVERFLOW` 1/384,
+    `PARITY` 0/300 — same counts on the Annex-A set). The harness
+    cleanly skips when the corpus path is absent (published-crate
+    build mode), so `cargo test` stays green either way.
+
 - Round 189 extends the bit-exact numeric-tables wire-up with the
   §3.2.1 LP-analysis windowing tables, the §3.2.5 LSF cosine grid,
   the §3.7 pitch interpolation filters, and the §3.9 MA gain-

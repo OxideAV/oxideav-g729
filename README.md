@@ -17,12 +17,47 @@ Pure-Rust ITU-T **G.729** (CS-ACELP, 8 kbit/s) narrowband speech codec.
 
 Round 173 landed the bit-exact numeric-tables foundation; round 189
 extends it with the LP-analysis windowing, LSF cosine grid, pitch
-interpolation filters, and the MA gain-prediction coefficients. All
-values are compiled at build time by `build.rs` from CSVs under
-`tables/`, themselves byte-for-byte copies of the spec-role-named
-outputs under `docs/audio/g729/tables/`. Each `pub const` carries
-the spec clause, the original ITU C identifier, and the source-file
+interpolation filters, and the MA gain-prediction coefficients;
+round 191 adds the ITU serial bitstream parser and a structural
+harness validating it against the staged conformance corpus.
+
+All numeric values are compiled at build time by `build.rs` from CSVs
+under `tables/`, themselves byte-for-byte copies of the spec-role-named
+outputs under `docs/audio/g729/tables/`. Each `pub const` carries the
+spec clause, the original ITU C identifier, and the source-file
 SHA-256 in its generated doc comment.
+
+### Round 191 — ITU serial bitstream parser
+
+The on-wire `.bit` format used by the ITU conformance test sequences
+under `docs/audio/g729/conformance/` is parsed by a new `serial`
+module:
+
+- `serial::SYNC_WORD` (`0x6B21`), `serial::BITS_HEADER` (= 80),
+  `serial::BIT_ZERO` (`0x007F`), `serial::BIT_ONE` (`0x0081`), and
+  `serial::BIT_ERASED` (`0x0000`) — the per-word framing literals
+  observed in the staged corpus.
+- `serial::FRAME_WORDS = 82`, `serial::FRAME_BYTES = 164` — the
+  fixed Word16 / byte cadence per 10 ms / 80-bit frame.
+- `serial::parse_frame(&[u8]) -> Result<FrameKind, SerialError>` —
+  validates sync + header, distinguishes normal frames
+  (`FrameKind::Active([bool; 80])`) from frame-erasure sentinels
+  (`FrameKind::Erased`), and rejects mid-frame mixes of normal /
+  erased payload words.
+- `serial::frame_count(&[u8])` — byte-length sanity check that the
+  buffer is a whole number of 164-byte frames.
+
+A new `tests/serial_conformance.rs` integration test walks the
+staged `docs/audio/g729/conformance/{g729-core,g729a}/` directories
+when present, validating that every `.bit` file is a sequence of
+well-formed ITU serial frames, that the frame count matches the
+companion `.pst` PCM stream, and that the `.in` PCM stream's
+length sits in the expected encoder-look-ahead window. Erasure-
+sentinel counts are pinned exactly: `ERASURE.BIT` has 60 of 300
+erased frames; `OVERFLOW.BIT` has 1 of 384; `PARITY.BIT` has 0;
+all other sequences have 0. The harness logs a clean skip when the
+corpus path is absent (published-crate build mode), so the test
+surface remains green either way.
 
 | spec clause | constant | shape | role |
 |---|---|---|---|
@@ -73,6 +108,12 @@ Annex B DTX/CNG, LSF↔LSP cos/slope tables) are staged under
 `docs/audio/g729/tables/` but are not yet compiled in; the Implementer
 leaves them out until the docs collaborator's specifier pass clarifies
 the per-clause wire-up direction.
+
+The 80 transmitted bits per frame that `serial::parse_frame` returns
+are an **opaque payload** at this layer; mapping them onto the §4.1
+Table-8 parameters (L0/L1/L2/L3 LSPs, P0/P1/P2 pitch, C1/S1/GA1/GB1
+fixed-codebook indices, etc.) is a future round, gated on the same
+docs-collaborator specifier pass.
 
 ## Clean-room provenance
 
