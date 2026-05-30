@@ -6,6 +6,15 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-g729/releases/tag/v0.0.6) - 2026-05-30
+
+### Other
+
+- r191 — ITU serial bitstream parser + conformance-corpus harness
+- r189 — wire up LP-analysis / LSF grid / pitch interp / MA gain pred tables
+- bit-exact tables foundation — HPF coefs, Table 8, basic_op LUTs
+- orphan rebuild — clean-room reset to register-only scaffold
+
 ### Added
 
 - Round 191 wires up the ITU serial bitstream format used by the
