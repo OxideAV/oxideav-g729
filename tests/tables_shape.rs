@@ -397,3 +397,126 @@ fn gain_ma_predictor_is_monotonic_nonincreasing() {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// §3.2.4 LSP quantiser two-stage VQ codebooks (round 195).
+// ---------------------------------------------------------------------
+
+/// `LSP_QUANT_CODEBOOK_L1_Q13` is the first-stage codebook `lspcb1`
+/// with `NC0 = 128` 10-dimensional Q13 entries. The 7-bit `L1` index
+/// covers exactly the codebook's row count, so `1 << L1_BITS == NC0`.
+#[test]
+fn l1_codebook_shape_matches_nc0_by_m() {
+    assert_eq!(tables::LSP_QUANT_CODEBOOK_L1_Q13.len(), tables::NC0);
+    for (i, row) in tables::LSP_QUANT_CODEBOOK_L1_Q13.iter().enumerate() {
+        assert_eq!(row.len(), tables::M, "L1 row {i} not M-wide");
+    }
+    assert_eq!(1 << tables::L1_BITS, tables::NC0);
+}
+
+/// `LSP_QUANT_CODEBOOK_L2_Q13` is the packed second-stage codebook
+/// `lspcb2`: `NC1 = 32` rows of 10 Q13 values, with the lower 5
+/// columns holding the L2 split-VQ contribution and the upper 5
+/// holding L3. The 5-bit L2/L3 indices match the row count exactly,
+/// so `1 << L2_BITS == NC1` and `L2_BITS == L3_BITS`.
+#[test]
+fn l2_codebook_shape_matches_nc1_by_m() {
+    assert_eq!(tables::LSP_QUANT_CODEBOOK_L2_Q13.len(), tables::NC1);
+    for (i, row) in tables::LSP_QUANT_CODEBOOK_L2_Q13.iter().enumerate() {
+        assert_eq!(row.len(), tables::M, "L2 row {i} not M-wide");
+    }
+    assert_eq!(1 << tables::L2_BITS, tables::NC1);
+    assert_eq!(tables::L2_BITS, tables::L3_BITS);
+}
+
+/// Lock the first three rows of the L1 codebook to their CSV
+/// literals — these are documented in the trace doc's §3.5 worked
+/// example as the leading rows of `lspcb1`, and pinning them here
+/// gives a focused drift check against any reordering or off-by-one
+/// in the matrix CSV reader.
+#[test]
+fn l1_codebook_leading_rows_match_csv_literals() {
+    assert_eq!(
+        tables::LSP_QUANT_CODEBOOK_L1_Q13[0],
+        [1486, 2168, 3751, 9074, 12134, 13944, 17983, 19173, 21190, 21820],
+    );
+    assert_eq!(
+        tables::LSP_QUANT_CODEBOOK_L1_Q13[1],
+        [1730, 2640, 3450, 4870, 6126, 7876, 15644, 17817, 20294, 21902],
+    );
+    assert_eq!(
+        tables::LSP_QUANT_CODEBOOK_L1_Q13[2],
+        [1568, 2256, 3088, 4874, 11063, 13393, 18307, 19293, 21109, 21741],
+    );
+}
+
+/// Lock the first row of the L2 codebook to its CSV literal — like
+/// the L1 check above, this catches matrix-reader drift early.
+#[test]
+fn l2_codebook_first_row_matches_csv_literal() {
+    assert_eq!(
+        tables::LSP_QUANT_CODEBOOK_L2_Q13[0],
+        [-435, -815, -742, 1033, -518, 582, -1201, 829, 86, 385],
+    );
+}
+
+/// Every L1 row holds an LSF-quantiser contribution whose 10 values
+/// span a moderate Q13 range; no entry should overflow Word16. The
+/// `[i16; 10]` typing guarantees that statically, but assert it here
+/// in observation form so a future drift to `[i32; ..]` (e.g. via a
+/// build-script bug) is caught by intent rather than only by type
+/// check. Also assert the entries are bounded above by a value
+/// well below Q13 ≈ 4.0 — the LSF domain is `[0, π]` so a 10th
+/// coefficient ≤ π × 8192 ≈ 25735 is the natural upper limit.
+#[test]
+fn l1_codebook_entries_are_in_lsf_domain() {
+    for (i, row) in tables::LSP_QUANT_CODEBOOK_L1_Q13.iter().enumerate() {
+        for (j, &v) in row.iter().enumerate() {
+            assert!(
+                (0..=26000).contains(&v),
+                "L1 row {i} col {j} outside Q13 LSF domain [0, ~π·2^13]: {v}",
+            );
+        }
+    }
+}
+
+/// The bounds-checked L1 lookup helper returns a 10-element slice
+/// that matches the underlying constant by value.
+#[test]
+fn lsp_l1_entry_helper_matches_constant() {
+    for index in [0_usize, 1, 7, 64, 127] {
+        assert_eq!(
+            tables::lsp_l1_entry(index),
+            &tables::LSP_QUANT_CODEBOOK_L1_Q13[index],
+        );
+    }
+}
+
+/// The L2 / L3 lookup helpers each return a 5-element slice whose
+/// values are the lower / upper half of the row, respectively. The
+/// concatenation reproduces the full row.
+#[test]
+fn lsp_l2_l3_helpers_reconstruct_packed_row() {
+    for index in [0_usize, 1, 16, 31] {
+        let lo = tables::lsp_l2_entry(index);
+        let hi = tables::lsp_l3_entry(index);
+        assert_eq!(lo.len(), tables::M / 2);
+        assert_eq!(hi.len(), tables::M / 2);
+
+        let mut joined = Vec::with_capacity(tables::M);
+        joined.extend_from_slice(lo);
+        joined.extend_from_slice(hi);
+        assert_eq!(joined.as_slice(), &tables::LSP_QUANT_CODEBOOK_L2_Q13[index]);
+    }
+}
+
+/// The total transmitted-LSP bit count derives from the four
+/// per-stage bit fields and matches spec Table 1.
+#[test]
+fn lsp_total_bits_match_spec_table_1() {
+    assert_eq!(tables::LSP_TOTAL_BITS, 18);
+    assert_eq!(
+        tables::LSP_TOTAL_BITS,
+        tables::L0_BITS + tables::L1_BITS + tables::L2_BITS + tables::L3_BITS,
+    );
+}

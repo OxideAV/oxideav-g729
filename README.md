@@ -19,7 +19,11 @@ Round 173 landed the bit-exact numeric-tables foundation; round 189
 extends it with the LP-analysis windowing, LSF cosine grid, pitch
 interpolation filters, and the MA gain-prediction coefficients;
 round 191 adds the ITU serial bitstream parser and a structural
-harness validating it against the staged conformance corpus.
+harness validating it against the staged conformance corpus; round
+195 wires in the §3.2.4 LSP-quantiser two-stage VQ codebooks (L1
+128×10, L2/L3 packed 32×10), with bounds-checked lookup helpers
+and per-frame conformance validation that every L1/L2/L3 index in
+the staged `LSP.BIT` vector lies in the codebook dimensions.
 
 All numeric values are compiled at build time by `build.rs` from CSVs
 under `tables/`, themselves byte-for-byte copies of the spec-role-named
@@ -76,10 +80,43 @@ surface remains green either way.
 | §3.7 | `PITCH_INTERP_FILTER_ANALYSIS_Q15` | `[i16; 13]` | adaptive-codebook 1/3-resolution analysis filter (`inter_3`) |
 | §3.7 | `PITCH_INTERP_FILTER_SYNTHESIS_Q15` | `[i16; 31]` | adaptive-codebook 1/3-resolution synthesis filter (`inter_3l`) |
 | §3.9 | `GAIN_QUANT_MA_PREDICTOR_Q13` | `[i16; 4]` | MA gain-prediction coefficients `pred` (≈ {0.68, 0.58, 0.34, 0.19}) |
+| §3.2.4 | `LSP_QUANT_CODEBOOK_L1_Q13` | `[[i16; 10]; 128]` | first-stage LSP VQ codebook `lspcb1` (7-bit `L1` index, Q13) |
+| §3.2.4 | `LSP_QUANT_CODEBOOK_L2_Q13` | `[[i16; 10]; 32]` | second-stage packed split-VQ codebook `lspcb2` (5-bit `L2` lower / `L3` upper, Q13) |
 
 Helper spec-dimension constants are also exposed:
 `PRM_SIZE = 11`, `BITS_PER_FRAME = 80`, `M = 10` (LP order),
-`L_WINDOW = 240`, `GRID_POINTS = 60`.
+`L_WINDOW = 240`, `GRID_POINTS = 60`, `NC0 = 128`, `NC1 = 32`,
+`L0_BITS = 1`, `L1_BITS = 7`, `L2_BITS = L3_BITS = 5`,
+`LSP_TOTAL_BITS = 18`.
+
+Round-195 lookup helpers (bounds-checked):
+
+- `lsp_l1_entry(l1: usize) -> &'static [i16; M]` — borrows the
+  full 10-coefficient row of the first-stage codebook.
+- `lsp_l2_entry(l2: usize) -> &'static [i16]` — borrows the lower
+  5 coefficients of the packed second-stage codebook (the L2 split).
+- `lsp_l3_entry(l3: usize) -> &'static [i16]` — borrows the upper
+  5 coefficients of the same row (the L3 split).
+
+### Round 195 — LSP-quantiser two-stage VQ codebooks
+
+The §3.2.4 first-stage (`lspcb1`, NC0 = 128 × M = 10) and packed
+second-stage (`lspcb2`, NC1 = 32 × M = 10) Q13 codebooks compile to
+2-D `[[i16; 10]; N]` arrays so callers index by `(stage_index,
+coefficient_index)` directly. The build script's CSV reader gains a
+matrix path that asserts both row count and per-row column count
+against the declared shape, so any CSV drift trips the build with
+the offending stem in the error.
+
+The companion `tests/serial_conformance.rs` walks the staged
+`LSP.BIT` vector (the ITU sequence whose `READMETV.txt` self-
+documents as the "LSP quantization (the L0/L1/L2/L3 VQ)" exerciser)
+in both `g729-core/` and `g729a/`, extracts (L0, L1, L2, L3) from
+the first 18 bits of every active frame MSB-first per spec Table 8
+NOTE, and asserts each index lies in the codebook dimensions. A
+companion synthetic-frame test pins the MSB-first packing
+convention so the bit ordering is locked even when the corpus is
+absent (published-crate mode).
 
 The companion `tests/tables_shape.rs` pins each round-173 table as
 before, and additionally verifies the round-189 tables' structural
@@ -102,18 +139,28 @@ properties:
 ## What is NOT wired up
 
 Every decode/encode entry point still returns `Error::NotImplemented`.
-The remaining codebook tables (LSP L1/L2, gain GA/GB, MA predictor
-`fg`, postfilter interpolation `tab_hup_*`, taming `tab_zone`,
-Annex B DTX/CNG, LSF↔LSP cos/slope tables) are staged under
+The remaining codebook tables (gain GA/GB, MA predictor `fg`,
+postfilter interpolation `tab_hup_*`, taming `tab_zone`, Annex B
+DTX/CNG, LSF↔LSP cos/slope tables) are staged under
 `docs/audio/g729/tables/` but are not yet compiled in; the Implementer
 leaves them out until the docs collaborator's specifier pass clarifies
 the per-clause wire-up direction.
 
+Round 195 wires the L1/L2 codebooks themselves but not the full
+LSP-from-bits reconstruction: that requires the MA predictor `fg`
+(switched by `L0`), the §3.2.4 rearrangement steps that enforce a
+minimum adjacent distance, and the 4-step stability clamp. Those
+follow on once `fg` is compiled. The harness still validates the
+on-wire bit layout: the staged `LSP.BIT` test vector (the ITU's
+dedicated L0/L1/L2/L3 exerciser) is walked frame-by-frame, each
+frame's L1 7-bit index is checked against `NC0`, and each L2/L3
+5-bit index against `NC1` — a necessary condition for any future
+LSP reconstruction to remain in-bounds.
+
 The 80 transmitted bits per frame that `serial::parse_frame` returns
-are an **opaque payload** at this layer; mapping them onto the §4.1
-Table-8 parameters (L0/L1/L2/L3 LSPs, P0/P1/P2 pitch, C1/S1/GA1/GB1
-fixed-codebook indices, etc.) is a future round, gated on the same
-docs-collaborator specifier pass.
+are otherwise still an **opaque payload** at this layer; mapping the
+non-LSP bits onto the §4.1 Table-8 parameters (P0/P1/P2 pitch,
+C1/S1/GA1/GB1 fixed-codebook indices, etc.) is a future round.
 
 ## Clean-room provenance
 

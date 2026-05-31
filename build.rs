@@ -64,7 +64,20 @@
 //! * §3.9 MA gain-prediction coefficients (`pred`) — 4 Q13 entries
 //!   {0.68, 0.58, 0.34, 0.19}. (r189)
 //!
-//! Larger codebook tables (LSP L1/L2, gain GA/GB, MA predictor fg,
+//! Round 195 adds the §3.2.4 LSP quantiser two-stage VQ codebooks:
+//!
+//! * `LSP_QUANT_CODEBOOK_L1_Q13` — first-stage 10-D codebook
+//!   `lspcb1`, 128 × 10 Word16 (Q13); 7 transmitted bits per frame.
+//! * `LSP_QUANT_CODEBOOK_L2_Q13` — second-stage 10-wide table
+//!   `lspcb2` holding the two 5-D split codebooks side-by-side,
+//!   32 × 10 Word16 (Q13); 5 + 5 transmitted bits per frame.
+//!
+//! Each codebook entry is one **row** of the source CSV — the build
+//! script's [`Shape::Matrix`] path emits a 2-D `[[i16; cols]; rows]`
+//! array so callers can index by `(stage_index, coefficient_index)`
+//! directly.
+//!
+//! Remaining codebook tables (gain GA/GB, MA predictor `fg`,
 //! postfilter interpolation `tab_hup_*`, taming `tab_zone`, Annex B
 //! DTX/CNG, LSF↔LSP cos/slope tables) are NOT compiled yet; their
 //! addition is gated on the docs collaborator handoff (#859 per
@@ -74,82 +87,117 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Static description of a table to compile: (file stem, declared
-/// element count). The element count is asserted against the CSV's
-/// observed literal count; a mismatch fails the build so a CSV that
-/// drifts from the documented shape is caught immediately.
+/// Static description of a table to compile.
+///
+/// `shape` selects the on-disk CSV layout AND the emitted Rust array
+/// shape:
+///
+/// * [`Shape::Flat`] — one Word16 literal per line. Emits
+///   `pub const NAME: [i16; N] = [...]`.
+/// * [`Shape::Matrix { rows, cols }`] — `rows` lines, each carrying
+///   `cols` comma-separated Word16 literals. Emits
+///   `pub const NAME: [[i16; cols]; rows] = [[..], ..]`.
+///
+/// In both cases the build script asserts the observed literal counts
+/// against the declared dimensions, so any CSV-vs-declaration drift
+/// trips the build immediately.
 struct Table {
     stem: &'static str,
-    elements: usize,
+    shape: Shape,
+}
+
+#[derive(Clone, Copy)]
+enum Shape {
+    /// 1-D table: `elements` literals on consecutive lines.
+    Flat { elements: usize },
+    /// 2-D codebook: `rows` rows × `cols` columns of literals (one row
+    /// per line, `,`-separated columns).
+    Matrix { rows: usize, cols: usize },
 }
 
 const TABLES: &[Table] = &[
     // §3.1 / §4.2 pre_proc()+post_pro() — IIR HPF coefs.
     Table {
         stem: "preproc-highpass-100Hz-b-Q13",
-        elements: 3,
+        shape: Shape::Flat { elements: 3 },
     },
     Table {
         stem: "preproc-highpass-100Hz-a-Q13",
-        elements: 3,
+        shape: Shape::Flat { elements: 3 },
     },
     Table {
         stem: "preproc-highpass-140Hz-b-Q12",
-        elements: 3,
+        shape: Shape::Flat { elements: 3 },
     },
     Table {
         stem: "preproc-highpass-140Hz-a-Q12",
-        elements: 3,
+        shape: Shape::Flat { elements: 3 },
     },
     // §4.1 spec Table 8 bit allocation per analysis parameter.
     Table {
         stem: "bit-allocation-per-parameter-table8",
-        elements: 13,
+        shape: Shape::Flat { elements: 13 },
     },
     // basic_op math lookup tables.
     Table {
         stem: "basic-op-pow2-table",
-        elements: 33,
+        shape: Shape::Flat { elements: 33 },
     },
     Table {
         stem: "basic-op-log2-table",
-        elements: 33,
+        shape: Shape::Flat { elements: 33 },
     },
     Table {
         stem: "basic-op-invsqrt-table",
-        elements: 49,
+        shape: Shape::Flat { elements: 49 },
     },
     // §3.2.1 LP-analysis windowing.
     Table {
         stem: "lpc-hamming-window-Q15",
-        elements: 240,
+        shape: Shape::Flat { elements: 240 },
     },
     Table {
         stem: "lpc-autocorr-lag-window-high-Q15",
-        elements: 10,
+        shape: Shape::Flat { elements: 10 },
     },
     Table {
         stem: "lpc-autocorr-lag-window-low-Q15",
-        elements: 10,
+        shape: Shape::Flat { elements: 10 },
     },
     // §3.2.5 az_lsf() root-search grid.
     Table {
         stem: "lsf-search-grid-cos-Q15",
-        elements: 61,
+        shape: Shape::Flat { elements: 61 },
     },
     // §3.7 pitch interpolation filters.
     Table {
         stem: "pitch-interpolation-filter-analysis-Q15",
-        elements: 13,
+        shape: Shape::Flat { elements: 13 },
     },
     Table {
         stem: "pitch-interpolation-filter-synthesis-Q15",
-        elements: 31,
+        shape: Shape::Flat { elements: 31 },
     },
     // §3.9 MA gain-prediction coefficients.
     Table {
         stem: "gain-quantizer-ma-predictor-Q13",
-        elements: 4,
+        shape: Shape::Flat { elements: 4 },
+    },
+    // §3.2.4 LSP quantiser two-stage VQ codebooks. L1 is the
+    // first-stage 10-D codebook (NC0 = 128 entries, 7 bits); L2 is the
+    // second-stage 10-wide table that holds the two 5-D split codebooks
+    // (NC1 = 32 entries, 5 + 5 bits) packed side-by-side per the
+    // staged trace doc §3.5 (single `lspcb2` array in the ITU source).
+    Table {
+        stem: "lsp-quantizer-codebook-L1-Q13",
+        shape: Shape::Matrix {
+            rows: 128,
+            cols: 10,
+        },
+    },
+    Table {
+        stem: "lsp-quantizer-codebook-L2-Q13",
+        shape: Shape::Matrix { rows: 32, cols: 10 },
     },
 ];
 
@@ -173,6 +221,8 @@ fn const_ident(stem: &str) -> &'static str {
         "pitch-interpolation-filter-analysis-Q15" => "PITCH_INTERP_FILTER_ANALYSIS_Q15",
         "pitch-interpolation-filter-synthesis-Q15" => "PITCH_INTERP_FILTER_SYNTHESIS_Q15",
         "gain-quantizer-ma-predictor-Q13" => "GAIN_QUANT_MA_PREDICTOR_Q13",
+        "lsp-quantizer-codebook-L1-Q13" => "LSP_QUANT_CODEBOOK_L1_Q13",
+        "lsp-quantizer-codebook-L2-Q13" => "LSP_QUANT_CODEBOOK_L2_Q13",
         _ => panic!("unknown table stem: {stem}"),
     }
 }
@@ -194,39 +244,14 @@ fn main() {
     }
 }
 
-/// Reads a CSV (one Word16 literal per line) plus its meta sidecar and
-/// writes a `pub const NAME: [i16; N] = [...];` declaration to `dest`,
-/// carrying the meta's spec_role + source provenance in a doc comment.
+/// Reads the CSV + meta sidecar pair for `table` and writes the
+/// corresponding `pub const` declaration to `dest`. The emitted Rust
+/// type follows [`Table::shape`] — 1-D arrays for [`Shape::Flat`],
+/// 2-D arrays for [`Shape::Matrix`] (one inner array per row of the
+/// CSV).
 fn emit_table(table: &Table, csv: &Path, meta: &Path, dest: &Path) {
     let csv_text =
         fs::read_to_string(csv).unwrap_or_else(|e| panic!("read {} failed: {e}", csv.display()));
-    let values: Vec<i16> = csv_text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| {
-            l.trim()
-                .parse::<i32>()
-                .unwrap_or_else(|e| panic!("parse `{}` from {} failed: {e}", l, csv.display()))
-        })
-        .map(|v| {
-            i16::try_from(v).unwrap_or_else(|_| {
-                panic!(
-                    "value {v} in {} does not fit Word16 (i16) per meta's c_type",
-                    csv.display()
-                )
-            })
-        })
-        .collect();
-
-    assert_eq!(
-        values.len(),
-        table.elements,
-        "{} CSV element count ({}) does not match TABLES declaration ({})",
-        csv.display(),
-        values.len(),
-        table.elements,
-    );
-
     let meta_text =
         fs::read_to_string(meta).unwrap_or_else(|e| panic!("read {} failed: {e}", meta.display()));
     let spec_role = meta_field(&meta_text, "spec_role").unwrap_or("(spec_role missing)");
@@ -236,6 +261,7 @@ fn emit_table(table: &Table, csv: &Path, meta: &Path, dest: &Path) {
     let c_identifier = meta_field(&meta_text, "c_identifier").unwrap_or("(c_identifier missing)");
 
     let ident = const_ident(table.stem);
+
     let mut body = String::new();
     body.push_str(&format!("/// {spec_role}\n"));
     body.push_str("///\n");
@@ -253,17 +279,109 @@ fn emit_table(table: &Table, csv: &Path, meta: &Path, dest: &Path) {
     body.push_str(&format!(
         "/// Electronic-attachment ZIP SHA-256: `{zip_sha256}`.\n"
     ));
-    body.push_str(&format!(
-        "pub const {ident}: [i16; {len}] = [\n",
-        ident = ident,
-        len = values.len(),
-    ));
-    for v in &values {
-        body.push_str(&format!("    {v},\n"));
+
+    match table.shape {
+        Shape::Flat { elements } => {
+            let values = parse_flat_csv(&csv_text, csv);
+            assert_eq!(
+                values.len(),
+                elements,
+                "{} CSV element count ({}) does not match TABLES declaration ({})",
+                csv.display(),
+                values.len(),
+                elements,
+            );
+            body.push_str(&format!(
+                "pub const {ident}: [i16; {len}] = [\n",
+                ident = ident,
+                len = values.len(),
+            ));
+            for v in &values {
+                body.push_str(&format!("    {v},\n"));
+            }
+            body.push_str("];\n");
+        }
+        Shape::Matrix { rows, cols } => {
+            let matrix = parse_matrix_csv(&csv_text, csv, rows, cols);
+            body.push_str(&format!(
+                "pub const {ident}: [[i16; {cols}]; {rows}] = [\n",
+                ident = ident,
+                rows = rows,
+                cols = cols,
+            ));
+            for row in &matrix {
+                body.push_str("    [");
+                for (i, v) in row.iter().enumerate() {
+                    if i > 0 {
+                        body.push_str(", ");
+                    }
+                    body.push_str(&format!("{v}"));
+                }
+                body.push_str("],\n");
+            }
+            body.push_str("];\n");
+        }
     }
-    body.push_str("];\n");
 
     fs::write(dest, body).unwrap_or_else(|e| panic!("write {} failed: {e}", dest.display()));
+}
+
+/// Parses a 1-D CSV (one literal per non-empty line) into a `Vec<i16>`,
+/// panicking with the CSV path on parse / overflow.
+fn parse_flat_csv(csv_text: &str, csv: &Path) -> Vec<i16> {
+    csv_text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| parse_word16(l.trim(), csv))
+        .collect()
+}
+
+/// Parses a 2-D CSV: one row per non-empty line, `,`-separated literals
+/// per row. Asserts the row count and per-row column count exactly
+/// match the declared shape.
+fn parse_matrix_csv(csv_text: &str, csv: &Path, rows: usize, cols: usize) -> Vec<Vec<i16>> {
+    let parsed: Vec<Vec<i16>> = csv_text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let row: Vec<i16> = l
+                .split(',')
+                .map(|tok| parse_word16(tok.trim(), csv))
+                .collect();
+            assert_eq!(
+                row.len(),
+                cols,
+                "{} row literal count ({}) does not match declared cols ({})",
+                csv.display(),
+                row.len(),
+                cols,
+            );
+            row
+        })
+        .collect();
+    assert_eq!(
+        parsed.len(),
+        rows,
+        "{} row count ({}) does not match TABLES declaration ({})",
+        csv.display(),
+        parsed.len(),
+        rows,
+    );
+    parsed
+}
+
+/// Parses one Word16 literal token (the input must already be
+/// whitespace-trimmed). Panics with the CSV path on overflow.
+fn parse_word16(tok: &str, csv: &Path) -> i16 {
+    let v = tok
+        .parse::<i32>()
+        .unwrap_or_else(|e| panic!("parse `{tok}` from {} failed: {e}", csv.display()));
+    i16::try_from(v).unwrap_or_else(|_| {
+        panic!(
+            "value {v} in {} does not fit Word16 (i16) per meta's c_type",
+            csv.display()
+        )
+    })
 }
 
 /// Extracts a `key: value` line from a `.meta` text body. Returns

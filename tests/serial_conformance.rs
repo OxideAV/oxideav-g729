@@ -28,7 +28,7 @@
 use std::path::{Path, PathBuf};
 
 use oxideav_g729::serial::{self, FrameKind, FRAME_BYTES, FRAME_WORDS};
-use oxideav_g729::tables::BITS_PER_FRAME;
+use oxideav_g729::tables::{self, BITS_PER_FRAME, L0_BITS, L1_BITS, L2_BITS, L3_BITS, NC0, NC1};
 
 /// Walks parent directories from `CARGO_MANIFEST_DIR` looking for
 /// `docs/audio/g729/conformance/`. Returns `None` if not found
@@ -298,4 +298,153 @@ fn frame_geometry_constants_match_readme_table() {
     assert_eq!(FRAME_BYTES, 164);
     assert_eq!(BITS_PER_FRAME, 80);
     assert_eq!(BITS_PER_FRAME * 2, 160); // PCM frame bytes
+}
+
+/// Reads a contiguous bit slice `bits[offset..offset+width]` as an
+/// MSB-first big-endian unsigned integer, matching the spec Table 8
+/// NOTE on bit-stream ordering ("Bit-stream ordering follows Table 8
+/// top-to-bottom, MSB first per parameter").
+fn read_msb_first(bits: &[bool], offset: usize, width: usize) -> u32 {
+    let mut value = 0u32;
+    for k in 0..width {
+        value = (value << 1) | u32::from(bits[offset + k]);
+    }
+    value
+}
+
+/// Extracts the (L0, L1, L2, L3) LSP-quantiser indices from an active
+/// frame's bit array. Per spec Table 1 / Table 8 these are the first
+/// `1 + 7 + 5 + 5 = 18` transmitted bits, in that order, MSB-first
+/// per parameter. The bit ordering is the same as the on-wire word
+/// order documented in `crate::serial`.
+fn lsp_indices(bits: &[bool]) -> (u32, u32, u32, u32) {
+    let mut cursor = 0;
+    let l0 = read_msb_first(bits, cursor, L0_BITS);
+    cursor += L0_BITS;
+    let l1 = read_msb_first(bits, cursor, L1_BITS);
+    cursor += L1_BITS;
+    let l2 = read_msb_first(bits, cursor, L2_BITS);
+    cursor += L2_BITS;
+    let l3 = read_msb_first(bits, cursor, L3_BITS);
+    (l0, l1, l2, l3)
+}
+
+/// Walks every active frame of the `LSP.BIT` conformance vector and
+/// asserts that the L0 / L1 / L2 / L3 indices extracted per spec
+/// Table 1 (1 + 7 + 5 + 5 bits MSB-first) all lie in the codebook
+/// dimensions wired up in [`crate::tables`]. The `LSP` sequence is
+/// the ITU's targeted exerciser for the LSP-quantiser branch, per
+/// `docs/audio/g729/conformance/README.md` ("`LSP` — LSP
+/// quantization (the L0/L1/L2/L3 VQ)"), so it is the natural fixture
+/// for first-principles validation that the on-wire bit layout
+/// matches the codebook shapes the build script produces.
+///
+/// This test does NOT yet decode LSP coefficients (that requires the
+/// MA predictor `fg` and the §3.2.4 stability clamp / rearrangement
+/// steps, neither of which is wired up this round). It checks the
+/// weaker but still load-bearing property that every transmitted L1
+/// index is < NC0 (= 128) and every L2 / L3 index is < NC1 (= 32),
+/// which is a necessary condition for any future codebook lookup to
+/// succeed.
+fn validate_lsp_indices(label: &str, bit_bytes: &[u8]) -> usize {
+    let n = serial::frame_count(bit_bytes)
+        .unwrap_or_else(|e| panic!("{label}: frame_count failed: {e}"));
+    let mut active_frames = 0usize;
+    for f in 0..n {
+        let frame = &bit_bytes[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+        let bits = match serial::parse_frame(frame).unwrap() {
+            FrameKind::Active(bits) => bits,
+            FrameKind::Erased => continue,
+        };
+        let (l0, l1, l2, l3) = lsp_indices(&bits[..]);
+        assert!(
+            (l0 as usize) < (1 << L0_BITS),
+            "{label}: frame #{f}: L0 ({l0}) out of 1-bit range",
+        );
+        assert!(
+            (l1 as usize) < NC0,
+            "{label}: frame #{f}: L1 ({l1}) out of NC0 ({NC0})",
+        );
+        assert!(
+            (l2 as usize) < NC1,
+            "{label}: frame #{f}: L2 ({l2}) out of NC1 ({NC1})",
+        );
+        assert!(
+            (l3 as usize) < NC1,
+            "{label}: frame #{f}: L3 ({l3}) out of NC1 ({NC1})",
+        );
+        // Smoke check: a bounds-checked codebook lookup against
+        // every L1 / L2 / L3 index returned by the parser succeeds
+        // (the helpers panic on out-of-range, so this exercises the
+        // happy path end-to-end).
+        let _ = tables::lsp_l1_entry(l1 as usize);
+        let _ = tables::lsp_l2_entry(l2 as usize);
+        let _ = tables::lsp_l3_entry(l3 as usize);
+        active_frames += 1;
+    }
+    active_frames
+}
+
+#[test]
+fn lsp_conformance_indices_are_in_codebook_range() {
+    let Some(root) = conformance_root() else {
+        eprintln!("skip: conformance corpus not present");
+        return;
+    };
+    for variant in ["g729-core", "g729a"] {
+        let dir = root.join(variant);
+        if !dir.is_dir() {
+            eprintln!("skip: {} not present", dir.display());
+            continue;
+        }
+        let bit_path = dir.join("LSP.BIT");
+        let bit_bytes = match std::fs::read(&bit_path) {
+            Ok(b) => b,
+            Err(_) => {
+                eprintln!("skip: {} not present", bit_path.display());
+                continue;
+            }
+        };
+        let label = format!("{variant}/LSP");
+        let active = validate_lsp_indices(&label, &bit_bytes);
+        // The ITU `LSP` sequence in both g729-core and g729a is a
+        // pure encoder output (no erasure splices), so every parsed
+        // frame should contribute one set of LSP indices.
+        let total = serial::frame_count(&bit_bytes).unwrap();
+        assert_eq!(
+            active,
+            total,
+            "{label}: LSP.BIT carried {} erasure frames (expected 0)",
+            total - active,
+        );
+        assert!(active > 0, "{label}: no active frames extracted");
+    }
+}
+
+#[test]
+fn lsp_indices_helper_round_trips_first_active_frame_bits() {
+    // Synthesise an active frame whose first 18 bits encode a known
+    // (L0, L1, L2, L3) tuple, then assert the extractor returns the
+    // same values. This locks the bit ordering convention used by
+    // `validate_lsp_indices` independently of any staged corpus
+    // file, so the structural test above stays meaningful in
+    // published-crate mode too.
+    let l0 = 1u32;
+    let l1 = 0b101_0101u32; // 7 bits = 0x55
+    let l2 = 0b1_0110u32; // 5 bits = 0x16
+    let l3 = 0b0_1001u32; // 5 bits = 0x09
+
+    let mut bits = vec![false; BITS_PER_FRAME];
+    let mut cursor = 0;
+    for (value, width) in [(l0, L0_BITS), (l1, L1_BITS), (l2, L2_BITS), (l3, L3_BITS)] {
+        for k in 0..width {
+            // MSB-first: bit index `cursor + k` gets the (width-1-k)-th bit.
+            let bit_pos = width - 1 - k;
+            bits[cursor + k] = (value >> bit_pos) & 1 == 1;
+        }
+        cursor += width;
+    }
+
+    let (got_l0, got_l1, got_l2, got_l3) = lsp_indices(&bits);
+    assert_eq!((got_l0, got_l1, got_l2, got_l3), (l0, l1, l2, l3));
 }

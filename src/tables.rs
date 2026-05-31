@@ -29,10 +29,24 @@
 //! * §3.9 MA gain-prediction coefficients `pred` — 4 Q13 entries
 //!   {0.68, 0.58, 0.34, 0.19}.
 //!
+//! Round 195 (LSP quantiser two-stage VQ codebooks):
+//!
+//! * §3.2.4 first-stage codebook `lspcb1` — [`LSP_QUANT_CODEBOOK_L1_Q13`],
+//!   shape `[[i16; M]; NC0]` = `[[i16; 10]; 128]`, Q13 (7-bit index).
+//! * §3.2.4 second-stage codebook `lspcb2` — [`LSP_QUANT_CODEBOOK_L2_Q13`],
+//!   shape `[[i16; M]; NC1]` = `[[i16; 10]; 32]`, Q13. Per the staged
+//!   trace doc §3.5 the spec describes two 5-D codebooks L2 + L3, but
+//!   the ITU C source packs them as one 32 × 10 array — lower 5
+//!   coefficients (indices `0..M/2`) are the L2 contribution, upper 5
+//!   (`M/2..M`) are L3, both 5-bit indexed.
+//! * [`lsp_l1_entry`] / [`lsp_l2_entry`] / [`lsp_l3_entry`] — bounds-
+//!   checked lookup helpers returning a borrowed 5- or 10-slice into
+//!   the compiled codebook.
+//!
 //! Still NOT compiled (gated on the docs collaborator specifier
-//! pass): LSP L1/L2 codebooks, gain GA/GB codebooks, MA predictor
-//! `fg`, postfilter interpolation `tab_hup_*`, taming `tab_zone`,
-//! Annex B DTX/CNG, LSF↔LSP cos/slope tables.
+//! pass): gain GA/GB codebooks, MA predictor `fg`, postfilter
+//! interpolation `tab_hup_*`, taming `tab_zone`, Annex B DTX/CNG,
+//! LSF↔LSP cos/slope tables.
 //!
 //! ## Q-format convention reminder (G.729 §1.4)
 //!
@@ -75,6 +89,14 @@ include!(concat!(
     env!("OUT_DIR"),
     "/gain-quantizer-ma-predictor-Q13.rs"
 ));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/lsp-quantizer-codebook-L1-Q13.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/lsp-quantizer-codebook-L2-Q13.rs"
+));
 
 /// G.729 §4.1 transmitted parameter count per frame (spec `PRM_SIZE`).
 /// The bit-allocation table [`BIT_ALLOCATION_TABLE8`] carries 13
@@ -112,3 +134,77 @@ pub const L_WINDOW: usize = 240;
 /// staged cosine grid [`LSF_SEARCH_GRID_COS_Q15`] holds
 /// `GRID_POINTS + 1 = 61` samples.
 pub const GRID_POINTS: usize = 60;
+
+/// G.729 §3.2.4 first-stage LSP VQ codebook size — `NC0 = 128`
+/// entries indexed by the 7-bit `L1` parameter. The full codebook
+/// [`LSP_QUANT_CODEBOOK_L1_Q13`] has shape `[[i16; M]; NC0]`.
+pub const NC0: usize = 128;
+
+/// G.729 §3.2.4 second-stage LSP VQ codebook size — `NC1 = 32`
+/// entries per split (5-bit indices `L2` and `L3`). The packed
+/// second-stage table [`LSP_QUANT_CODEBOOK_L2_Q13`] has shape
+/// `[[i16; M]; NC1]`; the lower five coefficients of each row are
+/// the L2 contribution, the upper five are L3.
+pub const NC1: usize = 32;
+
+/// Bit-width of the first-stage LSP-VQ index `L1` per spec Table 1
+/// / §3.2.4 — 7 bits, so `1 << L1_BITS == NC0 == 128`.
+pub const L1_BITS: usize = 7;
+
+/// Bit-width of the second-stage L2 / L3 LSP-VQ indices per spec
+/// Table 1 / §3.2.4 — 5 bits each, so `1 << L2_BITS == NC1 == 32`.
+pub const L2_BITS: usize = 5;
+
+/// Bit-width of `L3` (same split-VQ resolution as L2).
+pub const L3_BITS: usize = 5;
+
+/// Bit-width of the predictor-switch flag `L0` per spec Table 1 /
+/// §3.2.4 — 1 bit selecting one of two MA-predictor histories. The
+/// MA predictor coefficient table itself (`fg`) is not yet wired in
+/// this round.
+pub const L0_BITS: usize = 1;
+
+/// Total transmitted LSP-quantiser bit count per frame:
+/// `L0 + L1 + L2 + L3 = 1 + 7 + 5 + 5 = 18`, matching the spec
+/// Table 1 entry for "Line spectrum pairs".
+pub const LSP_TOTAL_BITS: usize = L0_BITS + L1_BITS + L2_BITS + L3_BITS;
+
+/// Returns a borrowed slice of the §3.2.4 first-stage `lspcb1`
+/// codebook row at index `l1`, which holds all `M = 10` Q13
+/// coefficients of the first-stage contribution for that 7-bit
+/// codeword.
+///
+/// # Panics
+///
+/// Panics if `l1 >= NC0` (i.e. the caller passed a value not
+/// expressible in the 7-bit `L1` field). Callers that decode `L1`
+/// from a transmitted frame can rely on the fact that masking with
+/// `(1 << L1_BITS) - 1` always yields an in-range value.
+#[must_use]
+pub fn lsp_l1_entry(l1: usize) -> &'static [i16; M] {
+    &LSP_QUANT_CODEBOOK_L1_Q13[l1]
+}
+
+/// Returns the lower-5 (L2) half of the packed `lspcb2` row at
+/// index `l2`. Each value is the Q13 second-stage contribution to
+/// LSP coefficients `0..M/2`.
+///
+/// # Panics
+///
+/// Panics if `l2 >= NC1`.
+#[must_use]
+pub fn lsp_l2_entry(l2: usize) -> &'static [i16] {
+    &LSP_QUANT_CODEBOOK_L2_Q13[l2][..M / 2]
+}
+
+/// Returns the upper-5 (L3) half of the packed `lspcb2` row at
+/// index `l3`. Each value is the Q13 second-stage contribution to
+/// LSP coefficients `M/2..M`.
+///
+/// # Panics
+///
+/// Panics if `l3 >= NC1`.
+#[must_use]
+pub fn lsp_l3_entry(l3: usize) -> &'static [i16] {
+    &LSP_QUANT_CODEBOOK_L2_Q13[l3][M / 2..]
+}

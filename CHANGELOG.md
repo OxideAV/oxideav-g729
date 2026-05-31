@@ -6,6 +6,46 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Round 195 wires up the §3.2.4 LSP-quantiser two-stage VQ
+  codebooks (the `lspcb1` / `lspcb2` tables of the staged trace
+  doc) and lockable lookup helpers:
+  - `tables::LSP_QUANT_CODEBOOK_L1_Q13` — first-stage codebook,
+    shape `[[i16; 10]; 128]` Q13 (the 7-bit `L1` index).
+  - `tables::LSP_QUANT_CODEBOOK_L2_Q13` — packed second-stage
+    codebook, shape `[[i16; 10]; 32]` Q13 (5-bit `L2` lower-5
+    coefficients / `L3` upper-5).
+  - New spec-dimension constants: `NC0 = 128`, `NC1 = 32`,
+    `L0_BITS = 1`, `L1_BITS = 7`, `L2_BITS = L3_BITS = 5`,
+    `LSP_TOTAL_BITS = 18`.
+  - Bounds-checked lookup helpers `lsp_l1_entry(l1)`,
+    `lsp_l2_entry(l2)`, `lsp_l3_entry(l3)` returning borrowed
+    slices into the compiled codebooks.
+- `build.rs` gains a `Shape::Matrix { rows, cols }` table type and
+  a comma-separated row parser, so 2-D codebooks emit as
+  `[[i16; cols]; rows]` arrays directly. Row count and per-row
+  column count are both asserted against the declared shape — any
+  CSV drift trips the build with the offending stem in the error.
+- `tests/tables_shape.rs` grows with 8 new round-195 tests:
+  shape (NC0 × M, NC1 × M), bit-width derivations
+  (`1 << L1_BITS == NC0`, same for L2 / L3), pinned literals for
+  the first three L1 rows + first L2 row (matrix-reader drift
+  check), Q13 LSF-domain range check across all 1280 L1 entries,
+  helper-vs-constant equivalence, and L2 + L3 helper concatenation
+  recovering the packed row.
+- `tests/serial_conformance.rs` grows with 2 new round-195 tests:
+  `lsp_conformance_indices_are_in_codebook_range` walks the
+  staged `LSP.BIT` vector for both `g729-core/` and `g729a/`,
+  extracts (L0, L1, L2, L3) per spec Table 8 NOTE (MSB-first per
+  parameter), and asserts each frame's L1 / L2 / L3 lies in
+  codebook range — also smoke-testing the bounds-checked lookup
+  helpers across every transmitted index in the ITU corpus.
+  `lsp_indices_helper_round_trips_first_active_frame_bits`
+  synthesises a frame with known (L0, L1, L2, L3) and locks the
+  MSB-first packing convention independently of the corpus, so
+  the bit ordering is checked in published-crate mode too.
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-g729/releases/tag/v0.0.6) - 2026-05-30
 
 ### Other
