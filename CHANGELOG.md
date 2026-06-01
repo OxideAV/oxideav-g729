@@ -8,6 +8,49 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 207 wires the §3.2.4 LSP-frame reconstruction algorithm
+  around the round-195 / round-201 tables, in a new
+  `oxideav_g729::lsp_reconstruct` module:
+  - `codebook_sum(l1, l2, l3) -> [f32; 10]` evaluates spec eq (19)
+    (`l̂_i = L1_i(L1) + L2_i(L2)` for `i ∈ 1..=5`, `L1_i(L1) +
+    L3_{i-5}(L3)` for `i ∈ 6..=10`). The Q13 codebook literals are
+    converted to `f32` at the boundary (`v / 8192.0`); out-of-range
+    indices surface as the typed `L1OutOfRange` / `L2OutOfRange` /
+    `L3OutOfRange` variants of `LspReconstructError` rather than
+    panicking.
+  - `rearrange_pass(coefs, j)` performs the spec §3.2.4 figure
+    `F0013-01` adjacent-pair fix-up — for `i = 1..10`, if
+    `l̂_{i-1} > l̂_i − J` the pair is replaced with
+    `((l̂_i + l̂_{i-1}) − J)/2` and `((l̂_i + l̂_{i-1}) + J)/2`.
+    `rearrange_twice(coefs)` runs the two passes the spec calls
+    for (`J = REARRANGE_J1 = 0.0012`, then
+    `J = REARRANGE_J2 = 0.0006`).
+  - `stability_clamp(coefs)` applies the spec §3.2.4 4-step
+    stability check: (1) sort ascending; (2) floor `ω̂_1` at
+    `CLAMP_FLOOR = 0.005`; (3) enforce a minimum adjacent gap
+    `CLAMP_MIN_GAP = 0.0391` across `i = 2..=10`; (4) ceil
+    `ω̂_10` at `CLAMP_CEIL = 3.135`. All four constants are the
+    `pub const` spec literals.
+  - `LspReconstructor` carries the 4-frame MA history (`[[f32; 10];
+    MA_NP]`). `new()` initialises every history slot to the spec
+    start-up vector `l̂_i = i · π / 11` for `i ∈ 1..=10` per spec
+    §3.2.4 ("at start up the initial values of `l̂_i^(m-k)` are
+    given by `l̂_i = iπ/11` for all `k < 0`").
+    `reconstruct_frame(l0, l1, l2, l3)` runs codebook-sum →
+    `rearrange_twice` → eq (20) MA prediction (using
+    `LSP_MA_PREDICTOR_FG_Q15` and the round-201 `fg_sum` factor) →
+    `stability_clamp`, advances the MA history (pushing the
+    post-rearrange residual into slot 0), and returns the
+    reconstructed `ω̂^(m)` LSF vector.
+  - 12 new unit tests pin the algorithmic invariants: spec start-up
+    vector, codebook-sum boundary conversion at `(0, 0, 0)`, every
+    error variant on out-of-range indices, rearrange-pass minimum
+    distance and no-op stability, `rearrange_twice` finishing at
+    the `J2 = 0.0006` margin, stability clamp's floor + gap + ceil
+    on a deliberately violating input and no-op on a clean LSF
+    vector, end-to-end clamp compliance, MA-history shift across
+    one frame, and clamp compliance under both `L0` predictor
+    modes.
 - Round 201 completes the §3.2.4 LSP-reconstruction inputs by
   wiring the MA-predictor `fg` family (spec eq (20) / (20a)):
   - `tables::LSP_MA_PREDICTOR_FG_Q15` — 3-D Q15 coefficient cube,

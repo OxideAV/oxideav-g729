@@ -53,6 +53,7 @@
 
 use oxideav_core::RuntimeContext;
 
+pub mod lsp_reconstruct;
 pub mod serial;
 pub mod tables;
 

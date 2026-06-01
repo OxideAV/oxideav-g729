@@ -29,7 +29,13 @@ MA-predictor `fg` family (the 2×4×10 Q15 coefficient cube plus
 its per-mode `fg_sum` Q15 / `fg_sum_inv` Q12 helpers) and adds a
 `Shape::Cube` table type to `build.rs` so 3-D coefficient slabs
 emit as `[[[i16; cols]; rows]; planes]` arrays with full
-dimensional drift-checking.
+dimensional drift-checking; round 207 builds the §3.2.4
+reconstruction algorithm itself on top of those tables — a new
+`lsp_reconstruct` module that maps `(L0, L1, L2, L3)` to a
+reconstructed `ω̂^(m)` LSF vector via codebook sum (eq (19)),
+twice-applied rearrangement (`J = 0.0012` then `J = 0.0006`),
+MA-prediction (eq (20)), and the 4-step stability clamp (floor
+0.005, min-gap 0.0391, ceil 3.135).
 
 All numeric values are compiled at build time by `build.rs` from CSVs
 under `tables/`, themselves byte-for-byte copies of the spec-role-named
@@ -197,6 +203,36 @@ provenance chain itself is unchanged (it still lives in the
 constant rustdoc emission is scrubbed to keep the in-`src/` doc
 surface free of algorithmic-source filenames.
 
+### Round 207 — §3.2.4 LSP-frame reconstruction
+
+A new `oxideav_g729::lsp_reconstruct` module ties the round-195
+codebooks and the round-201 MA-predictor cube into the spec
+§3.2.4 decode pipeline:
+
+- `codebook_sum(l1, l2, l3) -> Result<[f32; 10], _>` evaluates spec
+  eq (19) (`l̂_i = L1_i(L1) + L2_i(L2)` for `i ∈ 1..=5`,
+  `L1_i(L1) + L3_{i-5}(L3)` for `i ∈ 6..=10`). Q13 codebook entries
+  are converted to `f32` at the boundary; out-of-range indices
+  surface as typed `LspReconstructError` variants (no panic).
+- `rearrange_pass(coefs, j)` implements the spec §3.2.4 figure
+  `F0013-01` fix-up; `rearrange_twice(coefs)` runs it with
+  `J = REARRANGE_J1 = 0.0012` and then `J = REARRANGE_J2 = 0.0006`.
+- `stability_clamp(coefs)` applies the spec §3.2.4 4-step
+  invariants (sort ascending, `CLAMP_FLOOR = 0.005`,
+  `CLAMP_MIN_GAP = 0.0391`, `CLAMP_CEIL = 3.135`).
+- `LspReconstructor::new()` initialises the 4-frame MA history to
+  the spec start-up vector `l̂_i = i · π / 11`.
+  `reconstruct_frame(l0, l1, l2, l3)` runs eq (19) → rearrange
+  twice → eq (20) MA prediction → stability clamp, advances the
+  internal history, and returns the reconstructed `ω̂^(m)` LSF
+  vector.
+
+12 unit tests pin the algorithmic invariants (spec start-up
+vector, codebook-sum boundary, every typed error variant,
+rearrangement min-distance + no-op, two-pass `J2 = 0.0006`
+finish, stability-clamp floor + gap + ceil + no-op, end-to-end
+clamp compliance, MA-history shift, both `L0` modes).
+
 ## What is NOT wired up
 
 Every decode/encode entry point still returns `Error::NotImplemented`.
@@ -207,13 +243,16 @@ compiled in; the Implementer leaves them out until the docs
 collaborator's specifier pass clarifies the per-clause wire-up
 direction.
 
-With round 201 the §3.2.4 reconstruction inputs (`fg`, `fg_sum`,
-`fg_sum_inv`) are present, but the full LSP-from-bits
-reconstruction is not yet implemented in code: that still requires
-the §3.2.4 rearrangement steps that enforce a minimum adjacent
-distance (twice, `J = 0.0012` then `J = 0.0006`) and the 4-step
-stability clamp. The reconstruction function itself follows next
-round.
+With round 207 the §3.2.4 LSP-from-bits reconstruction (codebook
+sum → rearrange twice → MA prediction → stability clamp) is wired
+end-to-end through the `lsp_reconstruct` module. What still
+remains for a full LSP decode path is: §3.2.5 interpolation (the
+first-subframe linear interpolation in the cosine domain across
+the current and previous frame's reconstructed LSPs), §3.2.6
+LSP→LP conversion (eqs (25)–(26)), and the §4.1.1 wiring that
+extracts `(L0, L1, L2, L3)` from the parsed `serial` frame and
+feeds it through `LspReconstructor`. The latter is small; the
+former two need their own focused rounds.
 
 The harness still validates the on-wire bit layout: the staged
 `LSP.BIT` test vector (the ITU's dedicated L0/L1/L2/L3 exerciser)
