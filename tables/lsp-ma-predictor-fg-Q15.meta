@@ -1,0 +1,14 @@
+spec_name: lsp-ma-predictor-fg-Q15
+spec_role: §3.2.4 LSP MA predictor coefficients (2 modes × MA_NP=4 × M=10, Q15)
+c_identifier: fg
+c_type: Word16
+raw_dims: [2][MA_NP][M]
+resolved_dims: [2, 4, 10]
+element_count: 80
+source_file: g729/c_code/TAB_LD8K.C
+source_sha256: a8d198f94ac0efb7f2c4baea29efce9df3c76f1821ff1b2ff0f3ededbcf4868c
+source_line_start: 324
+source_line_end: 337
+source_url: https://www.itu.int/rec/T-REC-G.729-201206-I/en
+source_zip_sha256: 979680ff3b52b13a5701453178efd32b53e340114638fd330fdb6669eec86620
+extractor: extract.py (pure data extraction; no algorithmic source read)

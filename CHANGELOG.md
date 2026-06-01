@@ -8,6 +8,58 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 201 completes the §3.2.4 LSP-reconstruction inputs by
+  wiring the MA-predictor `fg` family (spec eq (20) / (20a)):
+  - `tables::LSP_MA_PREDICTOR_FG_Q15` — 3-D Q15 coefficient cube,
+    shape `[[[i16; 10]; 4]; 2]`. Outer dim is the `L0` predictor
+    mode; middle dim is the MA history depth (`MA_NP = 4`); inner
+    dim is the LP order `M = 10`.
+  - `tables::LSP_MA_PREDICTOR_FG_SUM_Q15` — per-mode `(Q15_ONE −
+    Σ_k fg[mode][k][i])` Q15 factor, shape `[[i16; 10]; 2]`.
+  - `tables::LSP_MA_PREDICTOR_FG_SUM_INV_Q12` — per-mode Q12
+    reciprocal of `fg_sum`, shape `[[i16; 10]; 2]`. Pre-tabulated
+    to avoid a per-sample division during reconstruction.
+  - New spec-dimension constant `MA_NP = 4` (LSP MA prediction
+    order); doc on `L0_BITS` updated to point at the new tables.
+  - Bounds-checked lookup helpers `lsp_fg_plane(mode)`,
+    `lsp_fg_sum(mode)`, `lsp_fg_sum_inv(mode)` returning borrowed
+    per-mode plane / row references.
+- `build.rs` gains a `Shape::Cube { planes, rows, cols }` table
+  type and a `parse_cube_csv` helper, so 3-D coefficient slabs
+  emit as `[[[i16; cols]; rows]; planes]` arrays. The CSV layout
+  is `planes` lines, each carrying `rows * cols` comma-separated
+  literals in row-major order within each plane; both the line
+  count and the per-line literal count are asserted against the
+  declared shape — any CSV drift trips the build with the
+  offending stem in the error.
+- `tests/tables_shape.rs` grows with 8 new round-201 tests:
+  shape (`2 × MA_NP × M` for `fg`, `2 × M` for the two sum rows)
+  cross-checked against `1 << L0_BITS == 2`; first row of each
+  `fg` plane pinned to CSV literals (drift check on the 3-D
+  cube reader's row-major flattening); history-depth peak decay
+  (`fg[mode][MA_NP - 1]` peak magnitude is strictly less than the
+  `fg[mode][0]` peak in both modes); strict positivity across all
+  80 `fg` entries (sign-flip drift check); `fg_sum` matches the
+  spec-stated `(Q15_ONE − Σ_k fg)` factor within 4 Q15 ulps;
+  `fg_sum_inv` is the Q12 reciprocal of `fg_sum` within 3 Q12
+  ulps; and the three new helpers each return slices equal to
+  the underlying constants. The `all_tables_are_non_empty`
+  smoke also gains the three new round-201 constants and the
+  round-195 LSP codebook constants that it previously missed.
+
+### Changed
+
+- `build.rs` no longer emits per-`pub const` rustdoc lines naming
+  the staged electronic attachment's source filename, original C
+  identifier, or per-file SHA-256. The provenance chain itself
+  is unchanged (it still lives in the `.meta` sidecars under
+  `docs/audio/g729/tables/` and in the CHANGELOG's round notes);
+  only the in-`src/` rustdoc emission is scrubbed to keep
+  algorithmic-source filenames out of the generated documentation
+  surface. Existing round-189 / round-195 doc comments lose the
+  `Source file inside …` and `Original C identifier` lines as a
+  side-effect of the same rebuild.
+
 - Round 195 wires up the §3.2.4 LSP-quantiser two-stage VQ
   codebooks (the `lspcb1` / `lspcb2` tables of the staged trace
   doc) and lockable lookup helpers:

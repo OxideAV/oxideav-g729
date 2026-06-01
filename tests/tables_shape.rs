@@ -158,6 +158,11 @@ fn all_tables_are_non_empty() {
     assert!(!tables::PITCH_INTERP_FILTER_ANALYSIS_Q15.is_empty());
     assert!(!tables::PITCH_INTERP_FILTER_SYNTHESIS_Q15.is_empty());
     assert!(!tables::GAIN_QUANT_MA_PREDICTOR_Q13.is_empty());
+    assert!(!tables::LSP_QUANT_CODEBOOK_L1_Q13.is_empty());
+    assert!(!tables::LSP_QUANT_CODEBOOK_L2_Q13.is_empty());
+    assert!(!tables::LSP_MA_PREDICTOR_FG_Q15.is_empty());
+    assert!(!tables::LSP_MA_PREDICTOR_FG_SUM_Q15.is_empty());
+    assert!(!tables::LSP_MA_PREDICTOR_FG_SUM_INV_Q12.is_empty());
 }
 
 // ---------------------------------------------------------------------
@@ -519,4 +524,191 @@ fn lsp_total_bits_match_spec_table_1() {
         tables::LSP_TOTAL_BITS,
         tables::L0_BITS + tables::L1_BITS + tables::L2_BITS + tables::L3_BITS,
     );
+}
+
+// ---------------------------------------------------------------------
+// §3.2.4 LSP MA-predictor `fg` family (round 201).
+// ---------------------------------------------------------------------
+
+/// `LSP_MA_PREDICTOR_FG_Q15` is the 3-D predictor cube: outer 2-mode
+/// dimension (selected by `L0`), inner `MA_NP` × `M` plane carrying
+/// the 4th-order MA coefficients across each LSP coordinate.
+/// `MA_NP == 4` per spec §3.2.4 eq (20).
+#[test]
+fn fg_cube_shape_matches_two_by_ma_np_by_m() {
+    assert_eq!(tables::MA_NP, 4);
+    assert_eq!(tables::LSP_MA_PREDICTOR_FG_Q15.len(), 2);
+    for (mode, plane) in tables::LSP_MA_PREDICTOR_FG_Q15.iter().enumerate() {
+        assert_eq!(
+            plane.len(),
+            tables::MA_NP,
+            "fg[{mode}] inner-row count not MA_NP",
+        );
+        for (k, row) in plane.iter().enumerate() {
+            assert_eq!(row.len(), tables::M, "fg[{mode}][{k}] row not M-wide",);
+        }
+    }
+    // The outer dim is exactly enumerable from the 1-bit L0 field.
+    assert_eq!(1 << tables::L0_BITS, tables::LSP_MA_PREDICTOR_FG_Q15.len());
+}
+
+/// `LSP_MA_PREDICTOR_FG_SUM_Q15` and `LSP_MA_PREDICTOR_FG_SUM_INV_Q12`
+/// are per-mode rows of `M` Q-format scalars. There is one row per
+/// predictor mode, matching the outer dim of the `fg` cube exactly.
+#[test]
+fn fg_sum_and_inv_shapes_match_two_by_m() {
+    assert_eq!(tables::LSP_MA_PREDICTOR_FG_SUM_Q15.len(), 2);
+    assert_eq!(tables::LSP_MA_PREDICTOR_FG_SUM_INV_Q12.len(), 2);
+    for mode in 0..2 {
+        assert_eq!(tables::LSP_MA_PREDICTOR_FG_SUM_Q15[mode].len(), tables::M);
+        assert_eq!(
+            tables::LSP_MA_PREDICTOR_FG_SUM_INV_Q12[mode].len(),
+            tables::M
+        );
+    }
+}
+
+/// Pin the very first row of each `fg` plane to its CSV literal — the
+/// 3-D matrix reader is exercised here for the first time, and this
+/// gives a focused drift check that the row-major flattening within
+/// each plane survived the build script unscrambled.
+///
+/// Values are the first 10 of the staged `fg` CSV (mode 0, k = 0) and
+/// the first 10 of the second CSV line (mode 1, k = 0).
+#[test]
+fn fg_first_rows_match_csv_literals() {
+    assert_eq!(
+        tables::LSP_MA_PREDICTOR_FG_Q15[0][0],
+        [8421, 9109, 9175, 8965, 9034, 9057, 8765, 8775, 9106, 8673],
+    );
+    assert_eq!(
+        tables::LSP_MA_PREDICTOR_FG_Q15[1][0],
+        [7733, 7880, 8188, 8175, 8247, 8490, 8637, 8601, 8359, 7569],
+    );
+}
+
+/// The last MA-history row of each plane is the lowest-weighted tap
+/// (predictor weight shrinks with history depth). For both modes
+/// the magnitude of every entry in `fg[mode][MA_NP - 1]` should be
+/// less than the largest magnitude in `fg[mode][0]` — a structural
+/// monotonicity check that catches any plane- or row-flip in the
+/// 3-D parser without pinning all 80 values.
+#[test]
+fn fg_history_decays_per_mode() {
+    for mode in 0..2 {
+        let head_peak = tables::LSP_MA_PREDICTOR_FG_Q15[mode][0]
+            .iter()
+            .map(|v| (i32::from(*v)).unsigned_abs())
+            .max()
+            .unwrap();
+        let tail_peak = tables::LSP_MA_PREDICTOR_FG_Q15[mode][tables::MA_NP - 1]
+            .iter()
+            .map(|v| (i32::from(*v)).unsigned_abs())
+            .max()
+            .unwrap();
+        assert!(
+            tail_peak < head_peak,
+            "fg[{mode}] tail peak ({tail_peak}) >= head peak ({head_peak})",
+        );
+    }
+}
+
+/// `fg_sum[mode][i]` is the Q15 representation of the spec eq (20a)
+/// factor `(1 − Σ_{k=0..MA_NP} fg[mode][k][i])` — the per-coordinate
+/// weight by which the reconstructed L1+L2/L3 contribution is scaled
+/// after the MA history is subtracted. Computed in i32 to avoid
+/// Word16 wrap; the staged value is within a few Q15 quantisation
+/// steps of the directly-evaluated factor (independent rounding on
+/// each side of the extraction).
+#[test]
+fn fg_sum_is_one_minus_per_column_fg_sum() {
+    let q15_one: i32 = 32768;
+    for mode in 0..2 {
+        for i in 0..tables::M {
+            let col_sum: i32 = (0..tables::MA_NP)
+                .map(|k| i32::from(tables::LSP_MA_PREDICTOR_FG_Q15[mode][k][i]))
+                .sum();
+            let expected = q15_one - col_sum;
+            let actual = i32::from(tables::LSP_MA_PREDICTOR_FG_SUM_Q15[mode][i]);
+            let err = (actual - expected).abs();
+            // Allow up to 4 Q15 ulps difference: the staged values are
+            // each independently quantised from the underlying reals,
+            // and the spec's clause 2.5 explicitly notes the prose's
+            // decimal values are rounded versions of the fixed-point
+            // truth.
+            assert!(
+                err <= 4,
+                "fg_sum[{mode}][{i}] = {actual}; expected ≈ Q15_ONE − Σ_k fg = {expected} (err {err})",
+            );
+        }
+    }
+}
+
+/// `fg_sum_inv[mode][i]` is the Q12 reciprocal of `fg_sum[mode][i]`,
+/// so we should have `fg_sum_inv ≈ 2^12 * (2^15 / fg_sum)`. The
+/// reconstruction uses these as a pre-divided factor; this
+/// reciprocal-relation check pins both staged tables together with a
+/// tolerance that accommodates the independent rounding on each side.
+#[test]
+fn fg_sum_inv_is_reciprocal_of_fg_sum() {
+    let q15 = 32768.0_f64;
+    let q12 = 4096.0_f64;
+    for mode in 0..2 {
+        for i in 0..tables::M {
+            let sum = f64::from(tables::LSP_MA_PREDICTOR_FG_SUM_Q15[mode][i]);
+            assert!(sum > 0.0, "fg_sum[{mode}][{i}] not positive: {sum}");
+            let real_sum = sum / q15;
+            let expected_inv = (1.0 / real_sum) * q12;
+            let actual_inv = f64::from(tables::LSP_MA_PREDICTOR_FG_SUM_INV_Q12[mode][i]);
+            let err = (actual_inv - expected_inv).abs();
+            // Three Q12 steps' tolerance accommodates the
+            // sum-then-divide rounding chain (Q15 rounding on the
+            // sum then Q12 rounding on the reciprocal).
+            assert!(
+                err < 3.0,
+                "fg_sum_inv[{mode}][{i}] = {actual_inv}; expected ≈ {expected_inv} (err {err})",
+            );
+        }
+    }
+}
+
+/// All `fg` entries are strictly positive — the MA predictor weights
+/// are positive in both modes. This is a cheap drift check that the
+/// 3-D parser hasn't accidentally sign-flipped any plane or row.
+#[test]
+fn fg_entries_are_strictly_positive() {
+    for mode in 0..2 {
+        for k in 0..tables::MA_NP {
+            for i in 0..tables::M {
+                let v = tables::LSP_MA_PREDICTOR_FG_Q15[mode][k][i];
+                assert!(v > 0, "fg[{mode}][{k}][{i}] not positive: {v}");
+            }
+        }
+    }
+}
+
+/// The per-mode `fg` plane accessor returns a borrowed slab whose
+/// rows match the underlying constant element-wise.
+#[test]
+fn lsp_fg_plane_helper_matches_constant() {
+    for mode in 0..2 {
+        let plane = tables::lsp_fg_plane(mode);
+        assert_eq!(plane, &tables::LSP_MA_PREDICTOR_FG_Q15[mode]);
+    }
+}
+
+/// The per-mode `fg_sum` / `fg_sum_inv` accessors return a borrowed
+/// 10-element row equal to the underlying constants.
+#[test]
+fn lsp_fg_sum_and_inv_helpers_match_constants() {
+    for mode in 0..2 {
+        assert_eq!(
+            tables::lsp_fg_sum(mode),
+            &tables::LSP_MA_PREDICTOR_FG_SUM_Q15[mode],
+        );
+        assert_eq!(
+            tables::lsp_fg_sum_inv(mode),
+            &tables::LSP_MA_PREDICTOR_FG_SUM_INV_Q12[mode],
+        );
+    }
 }

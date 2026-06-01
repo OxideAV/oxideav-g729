@@ -23,7 +23,13 @@ harness validating it against the staged conformance corpus; round
 195 wires in the §3.2.4 LSP-quantiser two-stage VQ codebooks (L1
 128×10, L2/L3 packed 32×10), with bounds-checked lookup helpers
 and per-frame conformance validation that every L1/L2/L3 index in
-the staged `LSP.BIT` vector lies in the codebook dimensions.
+the staged `LSP.BIT` vector lies in the codebook dimensions; round
+201 completes the §3.2.4 LSP-reconstruction inputs by wiring the
+MA-predictor `fg` family (the 2×4×10 Q15 coefficient cube plus
+its per-mode `fg_sum` Q15 / `fg_sum_inv` Q12 helpers) and adds a
+`Shape::Cube` table type to `build.rs` so 3-D coefficient slabs
+emit as `[[[i16; cols]; rows]; planes]` arrays with full
+dimensional drift-checking.
 
 All numeric values are compiled at build time by `build.rs` from CSVs
 under `tables/`, themselves byte-for-byte copies of the spec-role-named
@@ -82,12 +88,15 @@ surface remains green either way.
 | §3.9 | `GAIN_QUANT_MA_PREDICTOR_Q13` | `[i16; 4]` | MA gain-prediction coefficients `pred` (≈ {0.68, 0.58, 0.34, 0.19}) |
 | §3.2.4 | `LSP_QUANT_CODEBOOK_L1_Q13` | `[[i16; 10]; 128]` | first-stage LSP VQ codebook `lspcb1` (7-bit `L1` index, Q13) |
 | §3.2.4 | `LSP_QUANT_CODEBOOK_L2_Q13` | `[[i16; 10]; 32]` | second-stage packed split-VQ codebook `lspcb2` (5-bit `L2` lower / `L3` upper, Q13) |
+| §3.2.4 | `LSP_MA_PREDICTOR_FG_Q15` | `[[[i16; 10]; 4]; 2]` | LSP MA-predictor cube `fg` — outer dim is `L0` predictor mode, middle dim is MA history (`MA_NP = 4`), inner dim is LP order `M = 10`, Q15 |
+| §3.2.4 | `LSP_MA_PREDICTOR_FG_SUM_Q15` | `[[i16; 10]; 2]` | per-mode `(Q15_ONE − Σ_k fg[mode][k][i])` factor, Q15 |
+| §3.2.4 | `LSP_MA_PREDICTOR_FG_SUM_INV_Q12` | `[[i16; 10]; 2]` | per-mode reciprocal of `fg_sum`, Q12 — pre-tabulated reconstruction inputs (spec eq (20a)) |
 
 Helper spec-dimension constants are also exposed:
 `PRM_SIZE = 11`, `BITS_PER_FRAME = 80`, `M = 10` (LP order),
 `L_WINDOW = 240`, `GRID_POINTS = 60`, `NC0 = 128`, `NC1 = 32`,
-`L0_BITS = 1`, `L1_BITS = 7`, `L2_BITS = L3_BITS = 5`,
-`LSP_TOTAL_BITS = 18`.
+`MA_NP = 4`, `L0_BITS = 1`, `L1_BITS = 7`,
+`L2_BITS = L3_BITS = 5`, `LSP_TOTAL_BITS = 18`.
 
 Round-195 lookup helpers (bounds-checked):
 
@@ -97,6 +106,16 @@ Round-195 lookup helpers (bounds-checked):
   5 coefficients of the packed second-stage codebook (the L2 split).
 - `lsp_l3_entry(l3: usize) -> &'static [i16]` — borrows the upper
   5 coefficients of the same row (the L3 split).
+
+Round-201 lookup helpers (bounds-checked):
+
+- `lsp_fg_plane(mode: usize) -> &'static [[i16; M]; MA_NP]` —
+  borrows the per-mode `[MA_NP][M]` Q15 predictor plane. `mode` is
+  the 1-bit `L0` field.
+- `lsp_fg_sum(mode: usize) -> &'static [i16; M]` — borrows the
+  per-mode `(Q15_ONE − Σ_k fg[mode][k][i])` Q15 factor row.
+- `lsp_fg_sum_inv(mode: usize) -> &'static [i16; M]` — borrows the
+  per-mode Q12 reciprocal of the `fg_sum` row.
 
 ### Round 195 — LSP-quantiser two-stage VQ codebooks
 
@@ -136,26 +155,72 @@ properties:
   exactly and round-trips to the spec-documented real values
   {0.68, 0.58, 0.34, 0.19} within one Q13 quantisation step.
 
+### Round 201 — LSP MA-predictor `fg` family
+
+The §3.2.4 MA-predictor reconstruction inputs land this round. The
+3-D `fg` cube is wired alongside its per-mode `fg_sum` Q15 factor
+and the `fg_sum_inv` Q12 reciprocal — these are the staged tables
+that, with the round-195 L1+L2/L3 codebooks, let the reconstruction
+equation (spec eq (20) / (20a)) be evaluated end-to-end.
+
+A new `Shape::Cube { planes, rows, cols }` `build.rs` table type
+parses the 3-D CSV layout (`planes` lines, each carrying
+`rows * cols` comma-separated literals in row-major order within
+each plane) and asserts both the line count and per-line literal
+count against the declared shape. The emitted Rust type is
+`pub const NAME: [[[i16; cols]; rows]; planes]`, so callers index
+by `(mode, history_step, coordinate)` directly.
+
+The companion `tests/tables_shape.rs` grows with 8 new round-201
+tests:
+
+- shape (`2 × MA_NP × M` for `fg`; `2 × M` for `fg_sum` and
+  `fg_sum_inv`) with the outer dim cross-checked against
+  `1 << L0_BITS == 2`;
+- first row of each `fg` plane pinned to CSV literals (a focused
+  drift check on the 3-D cube reader's row-major flattening);
+- history-depth peak decay (`fg[mode][MA_NP - 1]` peak magnitude
+  is strictly less than the `fg[mode][0]` peak magnitude in both
+  modes);
+- strict positivity across all 80 `fg` entries (sign-flip drift
+  check);
+- `fg_sum` matches the spec-stated `(Q15_ONE − Σ_k fg[mode][k][i])`
+  factor within 4 Q15 ulps;
+- `fg_sum_inv` is the Q12 reciprocal of `fg_sum` within 3 Q12 ulps;
+- `lsp_fg_plane` / `lsp_fg_sum` / `lsp_fg_sum_inv` helpers each
+  return slices equal to the underlying constants.
+
+`build.rs` also drops the per-table doc comment that previously
+named the source file inside the staged electronic attachment. The
+provenance chain itself is unchanged (it still lives in the
+`.meta` sidecars under `docs/audio/g729/tables/`); only the per-
+constant rustdoc emission is scrubbed to keep the in-`src/` doc
+surface free of algorithmic-source filenames.
+
 ## What is NOT wired up
 
 Every decode/encode entry point still returns `Error::NotImplemented`.
-The remaining codebook tables (gain GA/GB, MA predictor `fg`,
-postfilter interpolation `tab_hup_*`, taming `tab_zone`, Annex B
-DTX/CNG, LSF↔LSP cos/slope tables) are staged under
-`docs/audio/g729/tables/` but are not yet compiled in; the Implementer
-leaves them out until the docs collaborator's specifier pass clarifies
-the per-clause wire-up direction.
+The remaining codebook tables (gain GA/GB, postfilter interpolation
+`tab_hup_*`, taming `tab_zone`, Annex B DTX/CNG, LSF↔LSP cos/slope
+tables) are staged under `docs/audio/g729/tables/` but are not yet
+compiled in; the Implementer leaves them out until the docs
+collaborator's specifier pass clarifies the per-clause wire-up
+direction.
 
-Round 195 wires the L1/L2 codebooks themselves but not the full
-LSP-from-bits reconstruction: that requires the MA predictor `fg`
-(switched by `L0`), the §3.2.4 rearrangement steps that enforce a
-minimum adjacent distance, and the 4-step stability clamp. Those
-follow on once `fg` is compiled. The harness still validates the
-on-wire bit layout: the staged `LSP.BIT` test vector (the ITU's
-dedicated L0/L1/L2/L3 exerciser) is walked frame-by-frame, each
-frame's L1 7-bit index is checked against `NC0`, and each L2/L3
-5-bit index against `NC1` — a necessary condition for any future
-LSP reconstruction to remain in-bounds.
+With round 201 the §3.2.4 reconstruction inputs (`fg`, `fg_sum`,
+`fg_sum_inv`) are present, but the full LSP-from-bits
+reconstruction is not yet implemented in code: that still requires
+the §3.2.4 rearrangement steps that enforce a minimum adjacent
+distance (twice, `J = 0.0012` then `J = 0.0006`) and the 4-step
+stability clamp. The reconstruction function itself follows next
+round.
+
+The harness still validates the on-wire bit layout: the staged
+`LSP.BIT` test vector (the ITU's dedicated L0/L1/L2/L3 exerciser)
+is walked frame-by-frame, each frame's L1 7-bit index is checked
+against `NC0`, and each L2/L3 5-bit index against `NC1` — a
+necessary condition for any future LSP reconstruction to remain
+in-bounds.
 
 The 80 transmitted bits per frame that `serial::parse_frame` returns
 are otherwise still an **opaque payload** at this layer; mapping the

@@ -67,9 +67,9 @@
 //! Round 195 adds the §3.2.4 LSP quantiser two-stage VQ codebooks:
 //!
 //! * `LSP_QUANT_CODEBOOK_L1_Q13` — first-stage 10-D codebook
-//!   `lspcb1`, 128 × 10 Word16 (Q13); 7 transmitted bits per frame.
+//!   (`lspcb1`), 128 × 10 Word16 (Q13); 7 transmitted bits per frame.
 //! * `LSP_QUANT_CODEBOOK_L2_Q13` — second-stage 10-wide table
-//!   `lspcb2` holding the two 5-D split codebooks side-by-side,
+//!   (`lspcb2`) holding the two 5-D split codebooks side-by-side,
 //!   32 × 10 Word16 (Q13); 5 + 5 transmitted bits per frame.
 //!
 //! Each codebook entry is one **row** of the source CSV — the build
@@ -77,11 +77,31 @@
 //! array so callers can index by `(stage_index, coefficient_index)`
 //! directly.
 //!
-//! Remaining codebook tables (gain GA/GB, MA predictor `fg`,
-//! postfilter interpolation `tab_hup_*`, taming `tab_zone`, Annex B
-//! DTX/CNG, LSF↔LSP cos/slope tables) are NOT compiled yet; their
-//! addition is gated on the docs collaborator handoff (#859 per
-//! workspace memory).
+//! Round 201 adds the §3.2.4 LSP MA-predictor `fg` matrix that
+//! completes the L0-switched reconstruction inputs (spec eq (20),
+//! eq (20a)):
+//!
+//! * `LSP_MA_PREDICTOR_FG_Q15` — the [2][MA_NP=4][M=10] Word16 (Q15)
+//!   coefficient cube. `L0` selects the outer slice; the inner
+//!   4-tap row is the spec's 4th-order MA over past quantised LSP
+//!   residuals.
+//! * `LSP_MA_PREDICTOR_FG_SUM_Q15` — the [2][M] Q15 per-mode column
+//!   sums (`Σ fg[mode][k][i]` over k) used by the reconstruction
+//!   equation's denominator-style term.
+//! * `LSP_MA_PREDICTOR_FG_SUM_INV_Q12` — the [2][M] Q12 reciprocals
+//!   of the per-mode column sums, pre-tabulated for the
+//!   reconstruction.
+//!
+//! `Shape::Cube { planes, rows, cols }` is added to support the 3-D
+//! `fg` layout: the CSV stores rows in row-major order (`planes ×
+//! rows` lines of `cols` comma-separated literals); the emitted
+//! Rust array shape is `[[[i16; cols]; rows]; planes]`.
+//!
+//! Remaining codebook tables (gain GA/GB, postfilter interpolation
+//! (`tab_hup_*`), taming (`tab_zone`), Annex B DTX/CNG,
+//! LSF↔LSP cos/slope tables) are NOT compiled yet; their addition
+//! is gated on the docs collaborator handoff (#859 per workspace
+//! memory).
 
 use std::env;
 use std::fs;
@@ -97,8 +117,13 @@ use std::path::{Path, PathBuf};
 /// * [`Shape::Matrix { rows, cols }`] — `rows` lines, each carrying
 ///   `cols` comma-separated Word16 literals. Emits
 ///   `pub const NAME: [[i16; cols]; rows] = [[..], ..]`.
+/// * [`Shape::Cube { planes, rows, cols }`] — `planes × rows` lines
+///   each carrying `cols` comma-separated Word16 literals. The CSV
+///   stores planes in row-major order (plane 0's rows first, then
+///   plane 1's rows, etc.). Emits
+///   `pub const NAME: [[[i16; cols]; rows]; planes] = [...]`.
 ///
-/// In both cases the build script asserts the observed literal counts
+/// In every case the build script asserts the observed literal counts
 /// against the declared dimensions, so any CSV-vs-declaration drift
 /// trips the build immediately.
 struct Table {
@@ -113,6 +138,13 @@ enum Shape {
     /// 2-D codebook: `rows` rows × `cols` columns of literals (one row
     /// per line, `,`-separated columns).
     Matrix { rows: usize, cols: usize },
+    /// 3-D coefficient cube: `planes × rows` lines × `cols` columns.
+    /// Plane `p` occupies CSV lines `p * rows .. (p + 1) * rows`.
+    Cube {
+        planes: usize,
+        rows: usize,
+        cols: usize,
+    },
 }
 
 const TABLES: &[Table] = &[
@@ -199,6 +231,28 @@ const TABLES: &[Table] = &[
         stem: "lsp-quantizer-codebook-L2-Q13",
         shape: Shape::Matrix { rows: 32, cols: 10 },
     },
+    // §3.2.4 LSP MA-predictor `fg` family (round 201). `fg` is the
+    // 3-D switched-predictor coefficient cube: outer dim selects the
+    // L0 predictor mode (2 modes), middle dim is the MA history depth
+    // (MA_NP = 4), inner dim is the LP order (M = 10). `fg_sum` and
+    // `fg_sum_inv` are the per-mode column sum and its reciprocal,
+    // pre-tabulated as the reconstruction inputs.
+    Table {
+        stem: "lsp-ma-predictor-fg-Q15",
+        shape: Shape::Cube {
+            planes: 2,
+            rows: 4,
+            cols: 10,
+        },
+    },
+    Table {
+        stem: "lsp-ma-predictor-fg-sum-Q15",
+        shape: Shape::Matrix { rows: 2, cols: 10 },
+    },
+    Table {
+        stem: "lsp-ma-predictor-fg-sum-inv-Q12",
+        shape: Shape::Matrix { rows: 2, cols: 10 },
+    },
 ];
 
 /// Maps a CSV stem to its Rust-side `pub const` identifier. Kept here
@@ -223,6 +277,9 @@ fn const_ident(stem: &str) -> &'static str {
         "gain-quantizer-ma-predictor-Q13" => "GAIN_QUANT_MA_PREDICTOR_Q13",
         "lsp-quantizer-codebook-L1-Q13" => "LSP_QUANT_CODEBOOK_L1_Q13",
         "lsp-quantizer-codebook-L2-Q13" => "LSP_QUANT_CODEBOOK_L2_Q13",
+        "lsp-ma-predictor-fg-Q15" => "LSP_MA_PREDICTOR_FG_Q15",
+        "lsp-ma-predictor-fg-sum-Q15" => "LSP_MA_PREDICTOR_FG_SUM_Q15",
+        "lsp-ma-predictor-fg-sum-inv-Q12" => "LSP_MA_PREDICTOR_FG_SUM_INV_Q12",
         _ => panic!("unknown table stem: {stem}"),
     }
 }
@@ -255,10 +312,7 @@ fn emit_table(table: &Table, csv: &Path, meta: &Path, dest: &Path) {
     let meta_text =
         fs::read_to_string(meta).unwrap_or_else(|e| panic!("read {} failed: {e}", meta.display()));
     let spec_role = meta_field(&meta_text, "spec_role").unwrap_or("(spec_role missing)");
-    let source_file = meta_field(&meta_text, "source_file").unwrap_or("(source_file missing)");
-    let source_sha256 = meta_field(&meta_text, "source_sha256").unwrap_or("(sha missing)");
     let zip_sha256 = meta_field(&meta_text, "source_zip_sha256").unwrap_or("(zip sha missing)");
-    let c_identifier = meta_field(&meta_text, "c_identifier").unwrap_or("(c_identifier missing)");
 
     let ident = const_ident(table.stem);
 
@@ -269,13 +323,16 @@ fn emit_table(table: &Table, csv: &Path, meta: &Path, dest: &Path) {
         "/// Compiled from `tables/{}.csv` (staged copy of `docs/audio/g729/tables/{}.csv`).\n",
         table.stem, table.stem
     ));
-    body.push_str(&format!(
-        "/// Original ITU C identifier: `{c_identifier}`.\n"
-    ));
-    body.push_str(&format!(
-        "/// Source file inside ITU electronic attachment: `{source_file}`.\n"
-    ));
-    body.push_str(&format!("/// Source file SHA-256: `{source_sha256}`.\n"));
+    body.push_str(
+        "/// Per-file provenance (origin filename, byte ranges, file-level SHA-256) is\n",
+    );
+    body.push_str(
+        "/// recorded in the paired `.meta` sidecar under `docs/audio/g729/tables/`; the\n",
+    );
+    body.push_str(
+        "/// crate's `src/` deliberately does not name any algorithmic-source file of the\n",
+    );
+    body.push_str("/// staged electronic attachment.\n");
     body.push_str(&format!(
         "/// Electronic-attachment ZIP SHA-256: `{zip_sha256}`.\n"
     ));
@@ -318,6 +375,31 @@ fn emit_table(table: &Table, csv: &Path, meta: &Path, dest: &Path) {
                     body.push_str(&format!("{v}"));
                 }
                 body.push_str("],\n");
+            }
+            body.push_str("];\n");
+        }
+        Shape::Cube { planes, rows, cols } => {
+            let cube = parse_cube_csv(&csv_text, csv, planes, rows, cols);
+            body.push_str(&format!(
+                "pub const {ident}: [[[i16; {cols}]; {rows}]; {planes}] = [\n",
+                ident = ident,
+                planes = planes,
+                rows = rows,
+                cols = cols,
+            ));
+            for plane in &cube {
+                body.push_str("    [\n");
+                for row in plane {
+                    body.push_str("        [");
+                    for (i, v) in row.iter().enumerate() {
+                        if i > 0 {
+                            body.push_str(", ");
+                        }
+                        body.push_str(&format!("{v}"));
+                    }
+                    body.push_str("],\n");
+                }
+                body.push_str("    ],\n");
             }
             body.push_str("];\n");
         }
@@ -368,6 +450,57 @@ fn parse_matrix_csv(csv_text: &str, csv: &Path, rows: usize, cols: usize) -> Vec
         rows,
     );
     parsed
+}
+
+/// Parses a 3-D CSV: `planes` lines, each carrying
+/// `rows * cols` comma-separated literals stored in row-major order
+/// (row 0's cols, then row 1's cols, …). Line count and per-line
+/// literal count are both asserted against the declared shape; any
+/// drift trips the build with the offending stem in the error.
+fn parse_cube_csv(
+    csv_text: &str,
+    csv: &Path,
+    planes: usize,
+    rows: usize,
+    cols: usize,
+) -> Vec<Vec<Vec<i16>>> {
+    let flat_rows: Vec<Vec<i16>> = csv_text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let row: Vec<i16> = l
+                .split(',')
+                .map(|tok| parse_word16(tok.trim(), csv))
+                .collect();
+            assert_eq!(
+                row.len(),
+                rows * cols,
+                "{} per-plane literal count ({}) does not match rows * cols ({} * {} = {})",
+                csv.display(),
+                row.len(),
+                rows,
+                cols,
+                rows * cols,
+            );
+            row
+        })
+        .collect();
+    assert_eq!(
+        flat_rows.len(),
+        planes,
+        "{} plane count ({}) does not match declared planes ({})",
+        csv.display(),
+        flat_rows.len(),
+        planes,
+    );
+    flat_rows
+        .into_iter()
+        .map(|plane_flat| {
+            (0..rows)
+                .map(|r| plane_flat[r * cols..(r + 1) * cols].to_vec())
+                .collect()
+        })
+        .collect()
 }
 
 /// Parses one Word16 literal token (the input must already be

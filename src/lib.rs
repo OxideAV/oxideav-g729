@@ -31,12 +31,12 @@
 //! ## What is NOT wired up
 //!
 //! Every decode/encode entry point still returns
-//! [`Error::NotImplemented`]. The larger codebook tables (LSP L1/L2,
-//! gain GA/GB, MA predictor `fg`, interpolation filters `inter_3` /
-//! `inter_3l`, postfilter interpolation, taming, Annex B DTX/CNG) are
-//! staged under `docs/audio/g729/tables/` but not yet compiled in; the
-//! Implementer leaves them out until the docs collaborator's specifier
-//! pass clarifies the per-clause wire-up direction.
+//! [`Error::NotImplemented`]. The remaining codebook tables (gain
+//! GA/GB, postfilter interpolation, taming, Annex B DTX/CNG, LSF↔LSP
+//! cos/slope tables) are staged under `docs/audio/g729/tables/` but
+//! not yet compiled in; the Implementer leaves them out until the
+//! docs collaborator's specifier pass clarifies the per-clause
+//! wire-up direction.
 //!
 //! ## Clean-room provenance
 //!
@@ -44,9 +44,10 @@
 //! from CSVs under `tables/<spec-name>.csv`, which are byte-for-byte
 //! copies of the spec-role-named outputs under
 //! `docs/audio/g729/tables/`. The extractor that produced those CSVs
-//! reads only the ITU electronic attachment's `tab_*.c` data files
-//! (provenance recorded in each CSV's `.meta` sidecar). No
-//! algorithmic source is consulted.
+//! reads only data-only `.c` table files staged alongside the spec;
+//! per-file provenance (origin filename, byte ranges, file-level
+//! SHA-256) is recorded in each CSV's `.meta` sidecar under
+//! `docs/audio/g729/tables/`. No algorithmic source is consulted.
 
 #![warn(missing_debug_implementations)]
 

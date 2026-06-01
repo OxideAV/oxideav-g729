@@ -4,9 +4,9 @@
 //! copy of `docs/audio/g729/tables/<spec-name>.csv` (extractor output,
 //! see that directory's `README.md` for the provenance chain).
 //!
-//! Only data is reproduced. No algorithmic source from the ITU
-//! electronic attachment is read here or anywhere else in this crate
-//! (`docs/IMPLEMENTOR_ROUND.md`, clean-room rule).
+//! Only data is reproduced. No algorithmic source distributed
+//! alongside the ITU recommendation is read here or anywhere else in
+//! this crate (`docs/IMPLEMENTOR_ROUND.md`, clean-room rule).
 //!
 //! ## Coverage
 //!
@@ -31,21 +31,41 @@
 //!
 //! Round 195 (LSP quantiser two-stage VQ codebooks):
 //!
-//! * §3.2.4 first-stage codebook `lspcb1` — [`LSP_QUANT_CODEBOOK_L1_Q13`],
+//! * §3.2.4 first-stage codebook (`lspcb1`) — [`LSP_QUANT_CODEBOOK_L1_Q13`],
 //!   shape `[[i16; M]; NC0]` = `[[i16; 10]; 128]`, Q13 (7-bit index).
-//! * §3.2.4 second-stage codebook `lspcb2` — [`LSP_QUANT_CODEBOOK_L2_Q13`],
+//! * §3.2.4 second-stage codebook (`lspcb2`) — [`LSP_QUANT_CODEBOOK_L2_Q13`],
 //!   shape `[[i16; M]; NC1]` = `[[i16; 10]; 32]`, Q13. Per the staged
 //!   trace doc §3.5 the spec describes two 5-D codebooks L2 + L3, but
-//!   the ITU C source packs them as one 32 × 10 array — lower 5
-//!   coefficients (indices `0..M/2`) are the L2 contribution, upper 5
-//!   (`M/2..M`) are L3, both 5-bit indexed.
+//!   the staged 32 × 10 single-array packing exposes the lower 5
+//!   coefficients (indices `0..M/2`) as the L2 contribution and the
+//!   upper 5 (`M/2..M`) as L3, both 5-bit indexed.
 //! * [`lsp_l1_entry`] / [`lsp_l2_entry`] / [`lsp_l3_entry`] — bounds-
 //!   checked lookup helpers returning a borrowed 5- or 10-slice into
 //!   the compiled codebook.
 //!
+//! Round 201 (LSP MA-predictor `fg` family — completes §3.2.4
+//! reconstruction inputs per spec eqs (20) / (20a)):
+//!
+//! * [`LSP_MA_PREDICTOR_FG_Q15`] — shape `[[[i16; M]; MA_NP]; 2]` =
+//!   `[[[i16; 10]; 4]; 2]`, Q15. Outer dim selects the L0 predictor
+//!   mode (1 bit); the inner `[MA_NP][M]` plane carries the 4th-order
+//!   MA coefficients across each LSP coordinate.
+//! * [`LSP_MA_PREDICTOR_FG_SUM_Q15`] — shape `[[i16; M]; 2]`, Q15.
+//!   Per-mode column sums of the `fg` plane (`Σ_k fg[mode][k][i]` for
+//!   each `i ∈ 0..M`); the reconstruction equation factor used to
+//!   normalise the MA prediction.
+//! * [`LSP_MA_PREDICTOR_FG_SUM_INV_Q12`] — shape `[[i16; M]; 2]`, Q12.
+//!   Pre-tabulated reciprocal of the per-mode column sums.
+//! * [`lsp_fg_plane`] / [`lsp_fg_sum`] / [`lsp_fg_sum_inv`] —
+//!   bounds-checked accessor helpers returning a borrowed
+//!   per-mode plane / row.
+//! * New spec-dimension constant `MA_NP = 4` (LSP MA prediction
+//!   order); `L0_BITS == 1` matches the outer-dim count exactly,
+//!   `1 << L0_BITS == 2`.
+//!
 //! Still NOT compiled (gated on the docs collaborator specifier
-//! pass): gain GA/GB codebooks, MA predictor `fg`, postfilter
-//! interpolation `tab_hup_*`, taming `tab_zone`, Annex B DTX/CNG,
+//! pass): gain GA/GB codebooks, postfilter interpolation
+//! (`tab_hup_*`), taming (`tab_zone`), Annex B DTX/CNG,
 //! LSF↔LSP cos/slope tables.
 //!
 //! ## Q-format convention reminder (G.729 §1.4)
@@ -97,11 +117,17 @@ include!(concat!(
     env!("OUT_DIR"),
     "/lsp-quantizer-codebook-L2-Q13.rs"
 ));
+include!(concat!(env!("OUT_DIR"), "/lsp-ma-predictor-fg-Q15.rs"));
+include!(concat!(env!("OUT_DIR"), "/lsp-ma-predictor-fg-sum-Q15.rs"));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/lsp-ma-predictor-fg-sum-inv-Q12.rs"
+));
 
 /// G.729 §4.1 transmitted parameter count per frame (spec `PRM_SIZE`).
 /// The bit-allocation table [`BIT_ALLOCATION_TABLE8`] carries 13
-/// entries (the literal count of the ITU C source's `bitsno` array);
-/// only the first `PRM_SIZE` indices correspond to the 11 parameters
+/// entries (the literal count of the staged-CSV `bitsno` array); only
+/// the first `PRM_SIZE` indices correspond to the 11 parameters
 /// defined in spec Table 8. The remaining trailing entries are
 /// preserved as-extracted to match the source array byte-for-byte and
 /// to avoid silently dropping data — consumers indexing the table for
@@ -113,15 +139,14 @@ pub const PRM_SIZE: usize = 11;
 /// specification-stated frame size; the relationship between this
 /// value and the 13-entry [`BIT_ALLOCATION_TABLE8`] extraction is
 /// documented in the table-shape test (the literal CSV sum is 66,
-/// not 80 — spec Table 8 itself lists 15 per-parameter rows,
-/// whereas the ITU C source's `bitsno` array packs 13 values;
-/// reconciling the two is deferred to the docs collaborator).
+/// not 80 — spec Table 8 itself lists 15 per-parameter rows, whereas
+/// the staged `bitsno` array packs 13 values; reconciling the two is
+/// deferred to the docs collaborator).
 pub const BITS_PER_FRAME: usize = 80;
 
-/// G.729 LP-analysis predictor order — 10, per spec §3.2.1 (`M` in
-/// the ITU C source). The 10th-order LP filter is fit to each
-/// `L_WINDOW = 240`-sample analysis frame using the autocorrelation
-/// method.
+/// G.729 LP-analysis predictor order — 10, per spec §3.2.1. The
+/// 10th-order LP filter is fit to each `L_WINDOW = 240`-sample
+/// analysis frame using the autocorrelation method.
 pub const M: usize = 10;
 
 /// G.729 LP-analysis window length — 240 samples (`L_WINDOW`), per
@@ -147,6 +172,11 @@ pub const NC0: usize = 128;
 /// the L2 contribution, the upper five are L3.
 pub const NC1: usize = 32;
 
+/// G.729 §3.2.4 LSP MA-prediction order — 4 taps, per spec eq (20).
+/// The `fg` matrix carries `MA_NP` per-tap coefficient rows for each
+/// of the two predictor modes selected by `L0`.
+pub const MA_NP: usize = 4;
+
 /// Bit-width of the first-stage LSP-VQ index `L1` per spec Table 1
 /// / §3.2.4 — 7 bits, so `1 << L1_BITS == NC0 == 128`.
 pub const L1_BITS: usize = 7;
@@ -160,8 +190,10 @@ pub const L3_BITS: usize = 5;
 
 /// Bit-width of the predictor-switch flag `L0` per spec Table 1 /
 /// §3.2.4 — 1 bit selecting one of two MA-predictor histories. The
-/// MA predictor coefficient table itself (`fg`) is not yet wired in
-/// this round.
+/// per-mode MA coefficient plane is [`LSP_MA_PREDICTOR_FG_Q15`] (the
+/// outer dimension is indexed by `L0`); the helpers
+/// [`lsp_fg_plane`] / [`lsp_fg_sum`] / [`lsp_fg_sum_inv`] borrow the
+/// per-mode rows.
 pub const L0_BITS: usize = 1;
 
 /// Total transmitted LSP-quantiser bit count per frame:
@@ -207,4 +239,54 @@ pub fn lsp_l2_entry(l2: usize) -> &'static [i16] {
 #[must_use]
 pub fn lsp_l3_entry(l3: usize) -> &'static [i16] {
     &LSP_QUANT_CODEBOOK_L2_Q13[l3][M / 2..]
+}
+
+/// Returns the §3.2.4 `fg` MA-predictor coefficient plane for the
+/// `L0`-selected predictor mode — a `[MA_NP][M]` Q15 slab whose
+/// `k`-th row holds the order-`k` MA tap across the 10 LSP
+/// coordinates.
+///
+/// The 1-bit `L0` parameter selects between the two predictor modes
+/// (eq (20)); the encoder picks whichever mode gives the lower
+/// reconstruction error.
+///
+/// # Panics
+///
+/// Panics if `mode >= 2` (i.e. the caller passed a value outside the
+/// 1-bit `L0` domain). Callers decoding `L0` from a transmitted frame
+/// can rely on the fact that masking with `(1 << L0_BITS) - 1` always
+/// yields an in-range value.
+#[must_use]
+pub fn lsp_fg_plane(mode: usize) -> &'static [[i16; M]; MA_NP] {
+    &LSP_MA_PREDICTOR_FG_Q15[mode]
+}
+
+/// Returns the §3.2.4 `fg_sum` row for the `L0`-selected predictor
+/// mode — the Q15 per-coordinate sum
+/// `Σ_{k=0..MA_NP} fg[mode][k][i]` for `i ∈ 0..M`.
+///
+/// This per-mode sum participates in the reconstruction equation
+/// (spec eq (20a)) that maps the L1/L2/L3 codebook contributions and
+/// the past quantised LSP residuals onto the final reconstructed LSP
+/// vector.
+///
+/// # Panics
+///
+/// Panics if `mode >= 2`.
+#[must_use]
+pub fn lsp_fg_sum(mode: usize) -> &'static [i16; M] {
+    &LSP_MA_PREDICTOR_FG_SUM_Q15[mode]
+}
+
+/// Returns the §3.2.4 `fg_sum_inv` row for the `L0`-selected
+/// predictor mode — the Q12 per-coordinate reciprocal of
+/// [`lsp_fg_sum`], pre-tabulated so the reconstruction can avoid a
+/// per-sample division.
+///
+/// # Panics
+///
+/// Panics if `mode >= 2`.
+#[must_use]
+pub fn lsp_fg_sum_inv(mode: usize) -> &'static [i16; M] {
+    &LSP_MA_PREDICTOR_FG_SUM_INV_Q12[mode]
 }
