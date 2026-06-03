@@ -40,7 +40,14 @@ per-subframe LSP interpolation (spec eq (24), `q_i^(1) = ½(q^prev
 + q^curr)`, `q_i^(2) = q^curr` — *linear interpolation in the
 cosine domain*) onto the §3.2.4 output, with `omega_to_q` /
 `q_to_omega` boundary helpers and a stateful `LspInterpolator`
-that advances `previous_q ← current_q` per frame.
+that advances `previous_q ← current_q` per frame; round 218
+wires the §3.2.6 LSP→LP conversion (spec eqs (13) / (14)
+sum/difference polynomial recursion `F_1 = Π(1 − 2q_{odd}·z^-1
++ z^-2)` / `F_2 = Π(1 − 2q_{even}·z^-1 + z^-2)`, eq (25) `(1 ±
+z^-1)` factor restoration, eq (26) `A(z) = (F'_1 + F'_2) / 2`
+recombination with `F'_1` symmetric / `F'_2` antisymmetric of
+length 6) with a stateless `lsp_to_lp(&[f32; 10]) -> [f32; 10]`
+per-subframe entry point and an `lsf_to_lp` boundary wrapper.
 
 All numeric values are compiled at build time by `build.rs` from CSVs
 under `tables/`, themselves byte-for-byte copies of the spec-role-named
@@ -238,6 +245,61 @@ rearrangement min-distance + no-op, two-pass `J2 = 0.0006`
 finish, stability-clamp floor + gap + ceil + no-op, end-to-end
 clamp compliance, MA-history shift, both `L0` modes).
 
+### Round 218 — §3.2.6 LSP-to-LP conversion
+
+A new `oxideav_g729::lsp_to_lp` module ties the round-213
+per-subframe cosine-domain LSP output into the 10-coefficient LP
+synthesis filter `A(z) = 1 + Σ_{i=1..=10} a_i · z^-i` that the
+spec §3.5+ impulse-response / synthesis stages consume:
+
+- `lsp_to_lp(q_in: &[f32; 10]) -> [f32; 10]` runs the three
+  spec-cited steps of §3.2.6 in sequence: (1) build the
+  `F_1` / `F_2` sum/difference polynomial coefficients `f_1(i)`,
+  `f_2(i)` for `i ∈ 0..=5` via the spec's recursion derived from
+  polynomial multiplication by `(1 − 2·q·z^-1 + z^-2)` (with the
+  convention `f(-1) = 0`), (2) restore the `(1 ± z^-1)` factors
+  via eq (25) (`f'_1(i) = f_1(i) + f_1(i-1)`,
+  `f'_2(i) = f_2(i) − f_2(i-1)`), (3) recombine via eq (26)
+  (`a_i = ½·f'_1(i) + ½·f'_2(i)` for `i ∈ 1..=5` and
+  `a_i = ½·f'_1(11-i) − ½·f'_2(11-i)` for `i ∈ 6..=10`, using
+  `F'_1` symmetric / `F'_2` antisymmetric of length 6).
+- `lsf_to_lp(omega: &[f32; 10]) -> [f32; 10]` — convenience
+  wrapper that converts LSF-domain `ω̂` to LP via the cosine
+  boundary `q_i = cos(ω̂_i)` (so callers staying in the LSF domain
+  don't have to drive `omega_to_q` explicitly).
+- `LpCoefficients = [f32; 10]` — public alias for the output type;
+  slot `i - 1` holds `a_i` for `i ∈ 1..=10` with `a_0 = 1.0`
+  implicit (not stored).
+
+8 new unit tests pin the algorithmic invariants:
+
+- start-up state (`ω̂_i = i · π / 11`) produces finite
+  coefficients (no NaN / no inf from the recursion);
+- the recursion matches a brute-force polynomial-multiplication
+  oracle (literally multiplying out `Π(1 − 2·q·z^-1 + z^-2)` by
+  vector accumulation, then applying eqs (25) / (26) in the test)
+  on two distinct LSP patterns to a ≤ 1e-4 drift — locks the
+  in-place inner-loop ordering against any read-after-write bug;
+- closed-form spot checks at `z = 1` and `z = −1`: from eq (26)
+  `A(1) = F_1(1) = Π_{odd}(2 − 2·q_i)` (because `F'_2(1) = 0`)
+  and `A(−1) = F_2(−1) = Π_{even}(2 + 2·q_i)` (because
+  `F'_1(−1) = 0`), each pinned to a ≤ 1e-3 drift — a sign error
+  in either half of eq (26) trips one or the other;
+- coefficient range stays inside ±32 (defence against a missing
+  ½ factor in eq (26) — real-speech `a_i` is O(1) to O(3));
+- the `lsf_to_lp` convenience wrapper matches the explicit
+  `lsp_to_lp(&omega_to_q(&omega))` pipeline to ≤ 1e-7;
+- end-to-end through the §3.2.4 reconstructor + §3.2.5
+  interpolator + §3.2.6 conversion on a 3-frame non-steady-state
+  `(L0, L1, L2, L3)` chain produces finite per-subframe `a_i`
+  vectors AND the two subframes within a frame differ on a
+  changing input (the cosine-domain midpoint of `(previous,
+  current)` LSPs in subframe 1 vs the bare `current` LSPs in
+  subframe 2 yields distinct LP filters);
+- the all-zero `q` corner case (all LSPs at `ω̂_i = π/2`)
+  produces a finite vector — the well-conditioned input is a
+  drift check on the eq (15) recursion's `f(-1) = 0` boundary.
+
 ## What is NOT wired up
 
 Every decode/encode entry point still returns `Error::NotImplemented`.
@@ -248,16 +310,18 @@ compiled in; the Implementer leaves them out until the docs
 collaborator's specifier pass clarifies the per-clause wire-up
 direction.
 
-With round 207 the §3.2.4 LSP-from-bits reconstruction (codebook
-sum → rearrange twice → MA prediction → stability clamp) is wired
-end-to-end through the `lsp_reconstruct` module. What still
-remains for a full LSP decode path is: §3.2.5 interpolation (the
-first-subframe linear interpolation in the cosine domain across
-the current and previous frame's reconstructed LSPs), §3.2.6
-LSP→LP conversion (eqs (25)–(26)), and the §4.1.1 wiring that
-extracts `(L0, L1, L2, L3)` from the parsed `serial` frame and
-feeds it through `LspReconstructor`. The latter is small; the
-former two need their own focused rounds.
+With round 218 the §3.2.4 LSP-from-bits reconstruction (codebook
+sum → rearrange twice → MA prediction → stability clamp) +
+§3.2.5 per-subframe interpolation (cosine-domain midpoint with
+the previous frame) + §3.2.6 LSP→LP conversion
+(`F_1` / `F_2` recursion → eq (25) `(1 ± z^-1)` factor restoration
+→ eq (26) `A(z) = (F'_1 + F'_2) / 2`) are wired end-to-end through
+the `lsp_reconstruct` + `lsp_interpolate` + `lsp_to_lp` modules.
+What remains for a wired-up LP-coefficient decode path is the
+§4.1.1 plumbing that extracts `(L0, L1, L2, L3)` from the parsed
+`serial` frame and feeds it through `LspReconstructor`
+→ `LspInterpolator` → `lsp_to_lp`. That's a small piece of glue
+code rather than a new algorithmic block.
 
 The harness still validates the on-wire bit layout: the staged
 `LSP.BIT` test vector (the ITU's dedicated L0/L1/L2/L3 exerciser)

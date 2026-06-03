@@ -34,6 +34,12 @@
 //! (spec eq (24), linear interpolation in the cosine domain) on
 //! top of the round-207 LSF output — see [`lsp_interpolate`].
 //!
+//! Round 218 wires the §3.2.6 LSP-to-LP conversion (spec eqs (13)
+//! / (14) F1/F2 sum/difference polynomial recursion, eq (25) `(1 ±
+//! z^-1)` factor restoration, eq (26) `A(z) = (F'_1 + F'_2) / 2`
+//! recombination) on top of the round-213 per-subframe cosine-
+//! domain LSPs — see [`lsp_to_lp`].
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -63,6 +69,7 @@ use oxideav_core::RuntimeContext;
 
 pub mod lsp_interpolate;
 pub mod lsp_reconstruct;
+pub mod lsp_to_lp;
 pub mod serial;
 pub mod tables;
 

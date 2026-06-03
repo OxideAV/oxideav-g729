@@ -8,6 +8,45 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 218 wires the §3.2.6 LSP-to-LP conversion on top of the
+  round-213 per-subframe cosine-domain LSP output, in a new
+  `oxideav_g729::lsp_to_lp` module:
+  - `lsp_to_lp(q_in: &[f32; 10]) -> [f32; 10]` runs the spec
+    §3.2.6 three-step recipe: (1) build the F1/F2 sum/difference
+    polynomial coefficients `f_1(i)`, `f_2(i)` for `i ∈ 0..=5`
+    via the spec recursion derived from polynomial multiplication
+    by `(1 − 2·q·z^-1 + z^-2)` (spec convention `f(-1) = 0`);
+    (2) restore the `(1 ± z^-1)` factors per eq (25)
+    (`f'_1(i) = f_1(i) + f_1(i-1)`,
+    `f'_2(i) = f_2(i) − f_2(i-1)`); (3) recombine via eq (26)
+    (`a_i = ½·f'_1(i) + ½·f'_2(i)` for `i ∈ 1..=5`,
+    `a_i = ½·f'_1(11-i) − ½·f'_2(11-i)` for `i ∈ 6..=10`, using
+    `F'_1` symmetric / `F'_2` antisymmetric of length 6).
+  - `lsf_to_lp(omega: &[f32; 10]) -> [f32; 10]` — boundary
+    wrapper from the LSF domain `ω̂` via `q_i = cos(ω̂_i)`.
+  - `pub type LpCoefficients = [f32; 10]` — output type alias;
+    slot `i - 1` holds `a_i` for `i ∈ 1..=10`, with `a_0 = 1.0`
+    implicit (not stored).
+  - 8 new unit tests pin the algorithmic invariants: start-up
+    state produces finite coefficients; recursion matches a
+    brute-force polynomial-multiplication oracle on two LSP
+    patterns to ≤ 1e-4 drift (independent re-derivation of
+    eqs (13) / (14) by literal accumulation, then eqs (25) /
+    (26) applied in the test, locks the in-place inner-loop
+    ordering against read-after-write bugs); closed-form spot
+    checks at `z = 1` (`A(1) = Π_{odd}(2 − 2·q_i)`, since
+    `F'_2(1) = 0`) and at `z = -1`
+    (`A(-1) = Π_{even}(2 + 2·q_i)`, since `F'_1(-1) = 0`) to
+    ≤ 1e-3 drift; coefficient range stays in `±32` (defence
+    against a missing ½ factor); `lsf_to_lp` wrapper matches
+    the explicit `lsp_to_lp(&omega_to_q(&omega))` to ≤ 1e-7;
+    full §3.2.4 → §3.2.5 → §3.2.6 chain on a 3-frame
+    non-steady-state `(L0, L1, L2, L3)` input produces finite
+    per-subframe `a_i` AND distinct subframe-1 / subframe-2
+    filters; all-zero `q` corner case (`ω̂_i = π/2` for all i)
+    produces finite coefficients (drift check on the spec
+    `f(-1) = 0` boundary).
+
 - Round 213 wires the §3.2.5 per-subframe LSP interpolation
   (spec eq (24)) on top of the round-207 §3.2.4 reconstructor, in
   a new `oxideav_g729::lsp_interpolate` module:
