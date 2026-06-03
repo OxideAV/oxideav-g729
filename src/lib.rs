@@ -40,6 +40,12 @@
 //! recombination) on top of the round-213 per-subframe cosine-
 //! domain LSPs — see [`lsp_to_lp`].
 //!
+//! Round 225 wires the §4.1 / Table-8 parameter unpacker that
+//! splits the round-191 serial 80-bit payload into the 15 typed
+//! codeword indices (`L0` / `L1` / `L2` / `L3`, `P1` / `P0`,
+//! `C1` / `S1` / `GA1` / `GB1`, `P2`, `C2` / `S2` / `GA2` / `GB2`)
+//! the §4.1 decode procedure consumes — see [`parameters`].
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -70,6 +76,7 @@ use oxideav_core::RuntimeContext;
 pub mod lsp_interpolate;
 pub mod lsp_reconstruct;
 pub mod lsp_to_lp;
+pub mod parameters;
 pub mod serial;
 pub mod tables;
 

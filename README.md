@@ -47,7 +47,17 @@ sum/difference polynomial recursion `F_1 = Π(1 − 2q_{odd}·z^-1
 z^-1)` factor restoration, eq (26) `A(z) = (F'_1 + F'_2) / 2`
 recombination with `F'_1` symmetric / `F'_2` antisymmetric of
 length 6) with a stateless `lsp_to_lp(&[f32; 10]) -> [f32; 10]`
-per-subframe entry point and an `lsf_to_lp` boundary wrapper.
+per-subframe entry point and an `lsf_to_lp` boundary wrapper;
+round 225 wires the §4.1 / Table-8 parameter unpacker, splitting
+the round-191 serial 80-bit payload into the 15 typed codeword
+indices (`L0` / `L1` / `L2` / `L3`, `P1` / `P0`, `C1` / `S1` /
+`GA1` / `GB1`, `P2`, `C2` / `S2` / `GA2` / `GB2`) the §4.1
+decode procedure consumes, and ties the §3.7.2 pitch-parity
+predicate against the corpus — 0 mismatches on every active
+frame of `SPEECH.BIT` (3 750 × 2 variants), non-zero mismatches
+on `PARITY.BIT` (the dedicated §4.1.2 concealment exerciser),
+every codeword in-domain on every active frame of the full
+staged corpus.
 
 All numeric values are compiled at build time by `build.rs` from CSVs
 under `tables/`, themselves byte-for-byte copies of the spec-role-named
@@ -300,6 +310,97 @@ spec §3.5+ impulse-response / synthesis stages consume:
   produces a finite vector — the well-conditioned input is a
   drift check on the eq (15) recursion's `f(-1) = 0` boundary.
 
+### Round 225 — §4.1 / Table-8 parameter unpacker
+
+The 80-bit payload that `serial::parse_frame` returns as a
+`FrameKind::Active` bit array is split into its 15 spec-Table-8
+codeword indices by a new `oxideav_g729::parameters` module:
+
+- `Parameters` — `Copy` struct carrying the per-frame indices
+  (`l0` / `l1` / `l2` / `l3` for the §3.2.4 LSP quantiser;
+  `p1` / `p0` for §3.7 / §3.7.2 subframe-1 pitch + parity;
+  `c1` / `s1` for §3.8 subframe-1 fixed codebook;
+  `ga1` / `gb1` for §3.9.2 subframe-1 conjugate-structure gain
+  VQ; same set with the `2` suffix for subframe 2). Field
+  widths: 1+7+5+5 + 8+1+13+4+3+4 + 5+13+4+3+4 = 18 + 33 + 29 =
+  **80** bits, matching the spec frame budget.
+- `unpack_parameters(&FrameKind) -> Result<Parameters,
+  ParameterError>` — the §4.1 frame-level entry point;
+  rejects `FrameKind::Erased` with `ParameterError::Erased`
+  (the §4.4 concealment path applies for an erasure-sentinel
+  frame and consumes no transmitted bits).
+- `unpack_bit_array(&[bool; 80]) -> Parameters` — lower-level
+  variant for unit-testing the unpacker without spinning the
+  framing layer.
+- `Parameters::pitch_parity_ok(&self) -> bool` — §3.7.2 /
+  §4.1.2 parity check, with **the parity-init value pinned to
+  1 (odd-parity convention)** based on the corpus: every active
+  frame of `g729-core/SPEECH.BIT` + `g729a/SPEECH.BIT` (3 750 ×
+  2 = 7 500 frames of clean encoder output) has
+  `P0 = 1 XOR XOR_reduce(six_MSBs(P1))`; under the alternative
+  even-parity reading every frame fails. See the *Spec gap*
+  note on the method docstring.
+
+The per-codeword bit layout follows the spec **Table-8 NOTE**
+("the bit stream ordering is reflected by the order in the
+table; for each parameter, the most significant bit (MSB) is
+transmitted first"). The 15 start-offsets are derived at
+compile time from the codeword-width array and statically
+asserted to sum to `BITS_PER_FRAME` so the layout can never
+silently drift.
+
+The published `parameters::C_BITS`, `S_BITS`, `GA_BITS`,
+`GB_BITS`, `P0_BITS`, `P1_BITS`, `P2_BITS` constants pin the
+per-codeword widths at the crate's public surface; their
+aggregate constants `FIXED_CODEBOOK_BITS_PER_FRAME = 34`,
+`GAIN_QUANT_BITS_PER_FRAME = 14`, `PITCH_BITS_PER_FRAME = 14`
+plus the existing `LSP_TOTAL_BITS = 18` re-express the
+frame-level grouping decoders rely on (`18 + 34 + 14 + 14 =
+80`).
+
+9 new unit tests pin the algorithmic invariants:
+
+- all-zero bits map every codeword to 0; all-ones bits saturate
+  every codeword to `(1 << width) - 1`;
+- L1 saturation lies in `0..NC0` and L2 / L3 saturation lies in
+  `0..NC1` (the codebook dimensions wire up cleanly);
+- single-bit flip of each of the 80 array slots changes
+  exactly one codeword, and that codeword is the one whose
+  `[start, start + width)` window contains the slot — locks
+  the MSB-first / Table-8-top-to-bottom convention against
+  any off-by-one;
+- the documented start offsets `(0, 1, 8, 13, 18, 26, 27, 40,
+  44, 47, 51, 56, 69, 73, 76)` hold exactly, and slot 80 is
+  the end-of-frame boundary (defensive against a future drift
+  in the bit-width table);
+- round-trip pack-then-unpack on a hand-chosen `Parameters`
+  vector recovers every field bit-exactly;
+- §3.7.2 parity-rule worked checks on three crafted P1 values
+  pin the odd-parity-init convention;
+- `unpack_parameters` rejects an erasure sentinel with
+  `ParameterError::Erased`;
+- the high-level and low-level entry points agree on the same
+  bit array.
+
+2 new integration tests against the staged corpus:
+
+- `unpack_parameters_in_domain_on_full_corpus` walks every
+  `.BIT` file in `g729-core/` + `g729a/` and asserts that
+  every active frame's `Parameters` has every field in its
+  spec-stated domain (L1 < NC0, L2/L3 < NC1, C1/C2 < 2^13,
+  signs < 2^4, GA < 2^3, GB < 2^4, P2 < 2^5);
+- `pitch_parity_distribution_matches_corpus_intent` asserts
+  that `SPEECH.BIT` produces **zero** parity mismatches
+  (clean encoder output) and that `PARITY.BIT` produces a
+  **non-zero** number of mismatches (the dedicated §4.1.2
+  concealment-path exerciser).
+
+With round 225 the small piece of glue between the §3.2.4
+reconstructor + §3.2.5 interpolator + §3.2.6 LSP→LP chain
+and the on-wire bit stream is in place: `unpack_parameters`
+yields the `(L0, L1, L2, L3)` tuple that
+`LspReconstructor::reconstruct_frame` consumes directly.
+
 ## What is NOT wired up
 
 Every decode/encode entry point still returns `Error::NotImplemented`.
@@ -310,30 +411,24 @@ compiled in; the Implementer leaves them out until the docs
 collaborator's specifier pass clarifies the per-clause wire-up
 direction.
 
-With round 218 the §3.2.4 LSP-from-bits reconstruction (codebook
-sum → rearrange twice → MA prediction → stability clamp) +
-§3.2.5 per-subframe interpolation (cosine-domain midpoint with
-the previous frame) + §3.2.6 LSP→LP conversion
-(`F_1` / `F_2` recursion → eq (25) `(1 ± z^-1)` factor restoration
-→ eq (26) `A(z) = (F'_1 + F'_2) / 2`) are wired end-to-end through
-the `lsp_reconstruct` + `lsp_interpolate` + `lsp_to_lp` modules.
-What remains for a wired-up LP-coefficient decode path is the
-§4.1.1 plumbing that extracts `(L0, L1, L2, L3)` from the parsed
-`serial` frame and feeds it through `LspReconstructor`
-→ `LspInterpolator` → `lsp_to_lp`. That's a small piece of glue
-code rather than a new algorithmic block.
-
-The harness still validates the on-wire bit layout: the staged
-`LSP.BIT` test vector (the ITU's dedicated L0/L1/L2/L3 exerciser)
-is walked frame-by-frame, each frame's L1 7-bit index is checked
-against `NC0`, and each L2/L3 5-bit index against `NC1` — a
-necessary condition for any future LSP reconstruction to remain
-in-bounds.
-
-The 80 transmitted bits per frame that `serial::parse_frame` returns
-are otherwise still an **opaque payload** at this layer; mapping the
-non-LSP bits onto the §4.1 Table-8 parameters (P0/P1/P2 pitch,
-C1/S1/GA1/GB1 fixed-codebook indices, etc.) is a future round.
+With round 225 the §4.1 / Table-8 parameter unpacker chains the
+round-191 framing layer to the §3.2.4 / §3.2.5 / §3.2.6 LSP
+decode chain end-to-end: `serial::parse_frame` →
+`parameters::unpack_parameters` → `(L0, L1, L2, L3)` →
+`LspReconstructor::reconstruct_frame` → `LspInterpolator::interpolate`
+→ `lsp_to_lp` per subframe. The `(P1, P0, P2, C1, S1, GA1, GB1,
+C2, S2, GA2, GB2)` tuple is *available* via the same
+`Parameters` struct but the §3.7 / §3.8 / §3.9 decode-side
+algorithms that consume those indices are not yet wired
+(§3.7 maps `P1` → fractional pitch delay; §3.8 maps `C1` →
+pulse positions; §3.9 maps `GA1` / `GB1` → quantised gain via
+the GA / GB conjugate-structure codebooks). The remaining
+codebook tables (GA / GB gain, postfilter interpolation
+`tab_hup_*`, taming `tab_zone`, Annex B DTX/CNG, LSF↔LSP
+cos/slope tables) are staged under `docs/audio/g729/tables/`
+but not yet compiled in; the Implementer leaves them out until
+the docs collaborator's specifier pass clarifies the per-clause
+wire-up direction.
 
 ## Clean-room provenance
 

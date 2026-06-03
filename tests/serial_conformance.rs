@@ -27,6 +27,9 @@
 
 use std::path::{Path, PathBuf};
 
+use oxideav_g729::parameters::{
+    self, unpack_parameters, C_BITS, GA_BITS, GB_BITS, P0_BITS, P1_BITS, P2_BITS, S_BITS,
+};
 use oxideav_g729::serial::{self, FrameKind, FRAME_BYTES, FRAME_WORDS};
 use oxideav_g729::tables::{self, BITS_PER_FRAME, L0_BITS, L1_BITS, L2_BITS, L3_BITS, NC0, NC1};
 
@@ -418,6 +421,228 @@ fn lsp_conformance_indices_are_in_codebook_range() {
             total - active,
         );
         assert!(active > 0, "{label}: no active frames extracted");
+    }
+}
+
+/// Walks every active frame of every staged corpus file and asserts
+/// that `unpack_parameters` returns codewords whose values lie in the
+/// spec-stated domain for each field. This locks the Table-8 / §4.1
+/// codeword layout against every available conformance vector, not
+/// just the LSP-targeted one.
+fn validate_unpack_parameters_in_domain(label: &str, bit_bytes: &[u8]) -> usize {
+    let n = serial::frame_count(bit_bytes)
+        .unwrap_or_else(|e| panic!("{label}: frame_count failed: {e}"));
+    let mut active = 0usize;
+    for f in 0..n {
+        let frame = &bit_bytes[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+        let kind = serial::parse_frame(frame).unwrap();
+        let params = match unpack_parameters(&kind) {
+            Ok(p) => p,
+            Err(parameters::ParameterError::Erased) => continue,
+        };
+        // Spec Table-8 domain checks for every codeword.
+        assert!(
+            (params.l0 as usize) < (1 << L0_BITS),
+            "{label}: frame #{f}: L0 ({}) out of 1-bit range",
+            params.l0,
+        );
+        assert!(
+            (params.l1 as usize) < NC0,
+            "{label}: frame #{f}: L1 ({}) out of NC0 ({NC0})",
+            params.l1,
+        );
+        assert!(
+            (params.l2 as usize) < NC1,
+            "{label}: frame #{f}: L2 ({}) out of NC1 ({NC1})",
+            params.l2,
+        );
+        assert!(
+            (params.l3 as usize) < NC1,
+            "{label}: frame #{f}: L3 ({}) out of NC1 ({NC1})",
+            params.l3,
+        );
+        // P1 is an 8-bit field; u8 already covers it. P0 is a 1-bit
+        // field; bounded check on the upper bit.
+        assert!(
+            (u32::from(params.p0)) < (1u32 << P0_BITS),
+            "{label}: frame #{f}: P0 ({}) out of 1-bit range",
+            params.p0,
+        );
+        let _p1_bits = P1_BITS;
+        // C1 / C2 are 13-bit fields (max 0x1FFF).
+        assert!(
+            (u32::from(params.c1)) < (1u32 << C_BITS),
+            "{label}: frame #{f}: C1 ({:#x}) out of 13-bit range",
+            params.c1,
+        );
+        assert!(
+            (u32::from(params.c2)) < (1u32 << C_BITS),
+            "{label}: frame #{f}: C2 ({:#x}) out of 13-bit range",
+            params.c2,
+        );
+        // S1 / S2 are 4-bit fields.
+        assert!(
+            (u32::from(params.s1)) < (1u32 << S_BITS),
+            "{label}: frame #{f}: S1 ({}) out of 4-bit range",
+            params.s1,
+        );
+        assert!(
+            (u32::from(params.s2)) < (1u32 << S_BITS),
+            "{label}: frame #{f}: S2 ({}) out of 4-bit range",
+            params.s2,
+        );
+        // GA1 / GA2 are 3-bit fields.
+        assert!(
+            (u32::from(params.ga1)) < (1u32 << GA_BITS),
+            "{label}: frame #{f}: GA1 ({}) out of 3-bit range",
+            params.ga1,
+        );
+        assert!(
+            (u32::from(params.ga2)) < (1u32 << GA_BITS),
+            "{label}: frame #{f}: GA2 ({}) out of 3-bit range",
+            params.ga2,
+        );
+        // GB1 / GB2 are 4-bit fields.
+        assert!(
+            (u32::from(params.gb1)) < (1u32 << GB_BITS),
+            "{label}: frame #{f}: GB1 ({}) out of 4-bit range",
+            params.gb1,
+        );
+        assert!(
+            (u32::from(params.gb2)) < (1u32 << GB_BITS),
+            "{label}: frame #{f}: GB2 ({}) out of 4-bit range",
+            params.gb2,
+        );
+        // P2 is a 5-bit field.
+        assert!(
+            (u32::from(params.p2)) < (1u32 << P2_BITS),
+            "{label}: frame #{f}: P2 ({}) out of 5-bit range",
+            params.p2,
+        );
+        // Cross-check: the round-191 lsp_indices() helper above
+        // unpacks L0..L3 the same way unpack_parameters does — the
+        // two must agree on every frame, with the new function
+        // continuing past bit 18 to the rest of the codewords.
+        let (l0, l1, l2, l3) = lsp_indices(&kind_bits(&kind).expect("active here")[..]);
+        assert_eq!(u32::from(params.l0), l0);
+        assert_eq!(u32::from(params.l1), l1);
+        assert_eq!(u32::from(params.l2), l2);
+        assert_eq!(u32::from(params.l3), l3);
+        active += 1;
+    }
+    active
+}
+
+/// Borrow the bit array from an active FrameKind without taking
+/// ownership. Returns None for an erasure.
+fn kind_bits(k: &FrameKind) -> Option<&[bool; BITS_PER_FRAME]> {
+    match k {
+        FrameKind::Active(b) => Some(b.as_ref()),
+        FrameKind::Erased => None,
+    }
+}
+
+#[test]
+fn unpack_parameters_in_domain_on_full_corpus() {
+    let Some(root) = conformance_root() else {
+        eprintln!("skip: conformance corpus not present");
+        return;
+    };
+    let mut walked = 0usize;
+    for variant in ["g729-core", "g729a"] {
+        let dir = root.join(variant);
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("BIT") {
+                continue;
+            }
+            let bit_bytes = std::fs::read(&path).unwrap();
+            let label = format!("{variant}/{}", path.file_stem().unwrap().to_string_lossy(),);
+            let n = validate_unpack_parameters_in_domain(&label, &bit_bytes);
+            assert!(
+                n > 0
+                    || path
+                        .file_name()
+                        .map(|s| s == "ERASURE.BIT")
+                        .unwrap_or(false),
+                "{label}: no active frames extracted"
+            );
+            walked += 1;
+        }
+    }
+    assert!(walked > 0, "no .BIT files found under conformance root");
+}
+
+/// On the staged `PARITY.BIT` test vector the pitch-parity check
+/// (§3.7.2) is supposed to FAIL for at least one frame — the
+/// vector's name reflects that it is the decoder's dedicated
+/// parity-mismatch exerciser (per the conformance README's
+/// per-sequence purpose column). On `SPEECH.BIT` the parity should
+/// hold for every active frame (encoder-output sequence, no
+/// transmission errors). This test pins both invariants.
+#[test]
+fn pitch_parity_distribution_matches_corpus_intent() {
+    let Some(root) = conformance_root() else {
+        eprintln!("skip: conformance corpus not present");
+        return;
+    };
+    for variant in ["g729-core", "g729a"] {
+        let dir = root.join(variant);
+        if !dir.is_dir() {
+            continue;
+        }
+        // SPEECH.BIT: every active frame's parity should hold.
+        let speech_path = dir.join("SPEECH.BIT");
+        if let Ok(bytes) = std::fs::read(&speech_path) {
+            let n = serial::frame_count(&bytes).unwrap();
+            let mut mismatches = 0usize;
+            let mut active = 0usize;
+            for f in 0..n {
+                let frame = &bytes[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+                let kind = serial::parse_frame(frame).unwrap();
+                let Ok(params) = unpack_parameters(&kind) else {
+                    continue;
+                };
+                active += 1;
+                if !params.pitch_parity_ok() {
+                    mismatches += 1;
+                }
+            }
+            assert!(active > 0, "{variant}/SPEECH: no active frames");
+            assert_eq!(
+                mismatches, 0,
+                "{variant}/SPEECH: pitch-parity mismatches ({mismatches}) on encoder-output \
+                 vector (expected 0)",
+            );
+        }
+        // PARITY.BIT: the dedicated mismatch exerciser should produce
+        // at least one mismatch.
+        let parity_path = dir.join("PARITY.BIT");
+        if let Ok(bytes) = std::fs::read(&parity_path) {
+            let n = serial::frame_count(&bytes).unwrap();
+            let mut mismatches = 0usize;
+            let mut active = 0usize;
+            for f in 0..n {
+                let frame = &bytes[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+                let kind = serial::parse_frame(frame).unwrap();
+                let Ok(params) = unpack_parameters(&kind) else {
+                    continue;
+                };
+                active += 1;
+                if !params.pitch_parity_ok() {
+                    mismatches += 1;
+                }
+            }
+            assert!(active > 0, "{variant}/PARITY: no active frames");
+            assert!(
+                mismatches > 0,
+                "{variant}/PARITY: dedicated mismatch exerciser produced zero pitch-parity \
+                 mismatches (expected at least one)",
+            );
+        }
     }
 }
 

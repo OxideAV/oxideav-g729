@@ -8,6 +8,64 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 225 wires the §4.1 / Table-8 parameter unpacker, splitting
+  the round-191 serial 80-bit payload into the 15 typed codeword
+  indices the §4.1 decode procedure consumes, in a new
+  `oxideav_g729::parameters` module:
+  - `Parameters` — `Copy` struct carrying the per-frame indices
+    `l0` / `l1` / `l2` / `l3` (§3.2.4 LSP VQ), `p1` / `p0` (§3.7
+    / §3.7.2 subframe-1 pitch + parity), `c1` / `s1` (§3.8
+    subframe-1 fixed codebook), `ga1` / `gb1` (§3.9.2 subframe-1
+    conjugate-structure gain VQ), and the matching `2`-suffixed
+    set for subframe 2. Field-width split: 1+7+5+5 + 8+1+13+4+3+4
+    + 5+13+4+3+4 = 18 + 33 + 29 = **80** bits.
+  - `unpack_parameters(&FrameKind) -> Result<Parameters,
+    ParameterError>` — frame-level entry point; rejects
+    `FrameKind::Erased` with `ParameterError::Erased` (the §4.4
+    concealment path applies for an erasure-sentinel frame and
+    consumes no transmitted bits).
+  - `unpack_bit_array(&[bool; 80]) -> Parameters` — lower-level
+    variant taking the 80-bit array directly, useful for
+    unit-testing without spinning the framing layer.
+  - `Parameters::pitch_parity_ok(&self) -> bool` — §3.7.2 /
+    §4.1.2 parity check; the parity-init value is **pinned to 1
+    (odd-parity convention)** based on the staged corpus
+    (every active frame of `SPEECH.BIT` / `g729a/SPEECH.BIT`
+    has `P0 = 1 XOR XOR_reduce(six_MSBs(P1))`).
+  - Per-codeword bit-width constants at the module surface:
+    `P1_BITS = 8`, `P0_BITS = 1`, `C_BITS = 13`, `S_BITS = 4`,
+    `GA_BITS = 3`, `GB_BITS = 4`, `P2_BITS = 5`; aggregate
+    constants `FIXED_CODEBOOK_BITS_PER_FRAME = 34`,
+    `GAIN_QUANT_BITS_PER_FRAME = 14`,
+    `PITCH_BITS_PER_FRAME = 14` express the frame-level
+    grouping (`18 + 34 + 14 + 14 = 80` matches the round-189
+    `LSP_TOTAL_BITS = 18` + the round-225 totals against
+    `BITS_PER_FRAME = 80`).
+  - Per-codeword start offsets `(0, 1, 8, 13, 18, 26, 27, 40,
+    44, 47, 51, 56, 69, 73, 76)` are computed at compile time
+    from the width array and statically asserted to sum to
+    `BITS_PER_FRAME` so the layout can never silently drift.
+  - 9 new unit tests pin the algorithmic invariants: all-zero /
+    all-ones boundary; L1/L2/L3 saturation lands in
+    `NC0`/`NC1`; **per-bit flip** test (each of the 80 array
+    slots changes exactly the codeword whose
+    `[start, start + width)` window contains it — locks
+    MSB-first / Table-8-top-to-bottom against any off-by-one);
+    documented start offsets hold; round-trip pack-then-unpack
+    on a hand-chosen `Parameters` recovers every field
+    bit-exactly; §3.7.2 parity-rule worked checks on three
+    crafted P1 values; erasure rejection; high-level vs
+    low-level entry-point agreement.
+  - 2 new integration tests against the staged conformance
+    corpus walk every `.BIT` file in `g729-core/` + `g729a/`:
+    every active frame's `Parameters` has every field in its
+    spec-stated domain (L1 < NC0, L2/L3 < NC1, C1/C2 < 2^13,
+    signs < 2^4, GA < 2^3, GB < 2^4, P2 < 2^5); `SPEECH.BIT`
+    produces **zero** parity mismatches (clean encoder output);
+    `PARITY.BIT` produces a **non-zero** number of mismatches
+    (the dedicated §4.1.2 concealment-path exerciser, both
+    for `g729-core` and `g729a` corpora).
+
 - Round 218 wires the §3.2.6 LSP-to-LP conversion on top of the
   round-213 per-subframe cosine-domain LSP output, in a new
   `oxideav_g729::lsp_to_lp` module:
