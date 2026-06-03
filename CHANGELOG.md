@@ -8,6 +8,49 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 213 wires the §3.2.5 per-subframe LSP interpolation
+  (spec eq (24)) on top of the round-207 §3.2.4 reconstructor, in
+  a new `oxideav_g729::lsp_interpolate` module:
+  - `omega_to_q(omega: &[f32; 10]) -> [f32; 10]` and
+    `q_to_omega(q: &[f32; 10]) -> [f32; 10]` — the boundary
+    helpers between the LSF domain `ω̂ ∈ [0, π]` and the cosine
+    domain `q_i = cos(ω̂_i)`. `q_to_omega` clamps inputs to
+    `[-1, 1]` before `acos` so float-rounding past the boundary
+    by ~1e-7 cannot produce NaN.
+  - `pub const SUBFRAMES_PER_FRAME: usize = 2` — spec §2.1
+    sub-frame count exposed at the module surface.
+  - `LspInterpolator` — stateful interpolator that carries the
+    previous frame's cosine-domain LSPs `q_i^(previous)`.
+    `new()` initialises `previous_q` to the cosine of the spec
+    §3.2.4 start-up LSFs `ω̂_i = i · π / 11`, matching the
+    round-207 reconstructor's start-up state.
+    `interpolate(&[f32; 10]) -> [[f32; 10]; 2]` applies eq (24):
+    `q^(1)[i] = 0.5 · q^(previous)[i] + 0.5 · q^(current)[i]` and
+    `q^(2)[i] = q^(current)[i]`, then advances
+    `previous_q := current_q`. `interpolate_from_omega(&[f32;
+    10])` is a convenience entry point that wraps the boundary
+    conversions for callers staying in the LSF domain (the actual
+    interpolation is still done in the cosine domain per spec
+    §3.2.5).
+  - 8 new unit tests pin the algorithmic invariants: `omega↔q`
+    round-trip identity on real LSFs (1e-5 tolerance); `acos`
+    boundary clamp on `q = ±(1 + ε)` (`acos(1+ε) ≈ 0`,
+    `acos(-1-ε) ≈ π`); start-up `previous_q` matches
+    `cos((i+1)π/11)` to 1e-6; subframe 2 == current frame's `q`
+    exactly; subframe 1 == per-coordinate midpoint of
+    `(previous, current)` exactly; `previous_q` advances to
+    `current` after each call (steady-state two-frame pass
+    produces sub1 == sub2); `interpolate_from_omega` matches the
+    explicit cosine-domain pipeline; and an end-to-end test that
+    drives the §3.2.5 interpolator from three successive
+    round-207 reconstructed frames `(L0, L1, L2, L3)` ∈ {(0, 0,
+    0, 0), (1, 5, 7, 11), (0, 12, 3, 17)} and verifies subframe-2
+    equals the frame's reconstructed LSF and that subframe-1
+    (after `q_to_omega` inversion) lies between the previous and
+    current frame's LSFs at every coordinate (cos is monotone on
+    `[0, π]`, so the cosine-domain midpoint translates to a
+    *between*-in-omega result).
+
 - Round 207 wires the §3.2.4 LSP-frame reconstruction algorithm
   around the round-195 / round-201 tables, in a new
   `oxideav_g729::lsp_reconstruct` module:

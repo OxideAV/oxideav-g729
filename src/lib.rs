@@ -26,6 +26,14 @@
 //! frame layout (sync + bits-per-frame header + 80 bit-value words)
 //! and [`serial::parse_frame`] for the decoder.
 //!
+//! Round 207 wires the §3.2.4 LSP-frame reconstruction algorithm
+//! around the round-195 / round-201 tables — see
+//! [`lsp_reconstruct`].
+//!
+//! Round 213 chains the §3.2.5 per-subframe LSP interpolation
+//! (spec eq (24), linear interpolation in the cosine domain) on
+//! top of the round-207 LSF output — see [`lsp_interpolate`].
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -53,6 +61,7 @@
 
 use oxideav_core::RuntimeContext;
 
+pub mod lsp_interpolate;
 pub mod lsp_reconstruct;
 pub mod serial;
 pub mod tables;

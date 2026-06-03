@@ -35,7 +35,12 @@ reconstruction algorithm itself on top of those tables — a new
 reconstructed `ω̂^(m)` LSF vector via codebook sum (eq (19)),
 twice-applied rearrangement (`J = 0.0012` then `J = 0.0006`),
 MA-prediction (eq (20)), and the 4-step stability clamp (floor
-0.005, min-gap 0.0391, ceil 3.135).
+0.005, min-gap 0.0391, ceil 3.135); round 213 chains the §3.2.5
+per-subframe LSP interpolation (spec eq (24), `q_i^(1) = ½(q^prev
++ q^curr)`, `q_i^(2) = q^curr` — *linear interpolation in the
+cosine domain*) onto the §3.2.4 output, with `omega_to_q` /
+`q_to_omega` boundary helpers and a stateful `LspInterpolator`
+that advances `previous_q ← current_q` per frame.
 
 All numeric values are compiled at build time by `build.rs` from CSVs
 under `tables/`, themselves byte-for-byte copies of the spec-role-named
