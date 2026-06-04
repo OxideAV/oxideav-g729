@@ -1,0 +1,14 @@
+spec_name: gain-quantizer-codebook-GB-Q14-Q12
+spec_role: §3.9 gain quantization second-stage codebook GB (NCODE2 entries × 2 components; same Q-formats as GA)
+c_identifier: gbk2
+c_type: Word16
+raw_dims: [NCODE2][2]
+resolved_dims: [16, 2]
+element_count: 32
+source_file: g729/c_code/TAB_LD8K.C
+source_sha256: a8d198f94ac0efb7f2c4baea29efce9df3c76f1821ff1b2ff0f3ededbcf4868c
+source_line_start: 444
+source_line_end: 462
+source_url: https://www.itu.int/rec/T-REC-G.729-201206-I/en
+source_zip_sha256: 979680ff3b52b13a5701453178efd32b53e340114638fd330fdb6669eec86620
+extractor: extract.py (pure data extraction; no algorithmic source read)

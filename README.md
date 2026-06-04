@@ -57,7 +57,18 @@ predicate against the corpus — 0 mismatches on every active
 frame of `SPEECH.BIT` (3 750 × 2 variants), non-zero mismatches
 on `PARITY.BIT` (the dedicated §4.1.2 concealment exerciser),
 every codeword in-domain on every active frame of the full
-staged corpus.
+staged corpus; round 231 wires the §3.9.2 / §4.1.5
+conjugate-structure gain-VQ decode-side reconstruction in a new
+`gain_reconstruct` module that maps each transmitted `(GA, GB)`
+index pair into the quantised `(ĝ_p, γ̂)` pair via spec
+eqs (73) / (74) (`ĝ_p = GA[GA][0] + GB[GB][0]` in Q14
+column 0, `γ̂ = GA[GA][1] + GB[GB][1]` in Q12 column 1),
+with the GA (8 × 2 Q14/Q12), GB (16 × 2 Q14/Q12), per-stage
+permutation, inverse permutation, and partial-search-threshold
+tables all landing alongside in `tables`, plus an integration
+test that runs the per-frame reconstruction across every
+active frame of the staged conformance corpus and pins
+`ĝ_p ∈ [0, 2]` and `γ̂ ∈ [0, 11]` end-to-end.
 
 All numeric values are compiled at build time by `build.rs` from CSVs
 under `tables/`, themselves byte-for-byte copies of the spec-role-named
@@ -119,12 +130,20 @@ surface remains green either way.
 | §3.2.4 | `LSP_MA_PREDICTOR_FG_Q15` | `[[[i16; 10]; 4]; 2]` | LSP MA-predictor cube `fg` — outer dim is `L0` predictor mode, middle dim is MA history (`MA_NP = 4`), inner dim is LP order `M = 10`, Q15 |
 | §3.2.4 | `LSP_MA_PREDICTOR_FG_SUM_Q15` | `[[i16; 10]; 2]` | per-mode `(Q15_ONE − Σ_k fg[mode][k][i])` factor, Q15 |
 | §3.2.4 | `LSP_MA_PREDICTOR_FG_SUM_INV_Q12` | `[[i16; 10]; 2]` | per-mode reciprocal of `fg_sum`, Q12 — pre-tabulated reconstruction inputs (spec eq (20a)) |
+| §3.9.2 | `GAIN_QUANT_CODEBOOK_GA_Q14_Q12` | `[[i16; 2]; 8]` | first-stage gain VQ codebook `gbk1` (3-bit GA index; col 0 = `g_p` contribution Q14, col 1 = `γ` contribution Q12) |
+| §3.9.2 | `GAIN_QUANT_CODEBOOK_GB_Q14_Q12` | `[[i16; 2]; 16]` | second-stage gain VQ codebook `gbk2` (4-bit GB index; same column convention) |
+| §3.9.3 | `GAIN_QUANT_GA_PERMUTATION` / `..._INVERSE_PERMUTATION` | `[i16; 8]` each | transmission-side robustness mapping for GA |
+| §3.9.3 | `GAIN_QUANT_GB_PERMUTATION` / `..._INVERSE_PERMUTATION` | `[i16; 16]` each | transmission-side robustness mapping for GB |
+| §3.9.2 | `GAIN_QUANT_GA_THRESHOLDS_Q14` | `[i16; 4]` | encoder-side partial-search thresholds for GA (`NCODE1 − NCAN1`) |
+| §3.9.2 | `GAIN_QUANT_GB_THRESHOLDS_Q15` | `[i16; 8]` | encoder-side partial-search thresholds for GB (`NCODE2 − NCAN2`) |
 
 Helper spec-dimension constants are also exposed:
 `PRM_SIZE = 11`, `BITS_PER_FRAME = 80`, `M = 10` (LP order),
 `L_WINDOW = 240`, `GRID_POINTS = 60`, `NC0 = 128`, `NC1 = 32`,
 `MA_NP = 4`, `L0_BITS = 1`, `L1_BITS = 7`,
-`L2_BITS = L3_BITS = 5`, `LSP_TOTAL_BITS = 18`.
+`L2_BITS = L3_BITS = 5`, `LSP_TOTAL_BITS = 18`,
+`NCODE1 = 8`, `NCODE2 = 16`, `GAIN_VQ_DIM = 2`,
+`GAIN_VQ_COL_GP = 0`, `GAIN_VQ_COL_GC = 1`.
 
 Round-195 lookup helpers (bounds-checked):
 
@@ -144,6 +163,14 @@ Round-201 lookup helpers (bounds-checked):
   per-mode `(Q15_ONE − Σ_k fg[mode][k][i])` Q15 factor row.
 - `lsp_fg_sum_inv(mode: usize) -> &'static [i16; M]` — borrows the
   per-mode Q12 reciprocal of the `fg_sum` row.
+
+Round-231 lookup helpers (bounds-checked):
+
+- `gain_ga_entry(ga: usize) -> &'static [i16; GAIN_VQ_DIM]` —
+  borrows the 2-element `(g_p Q14, γ Q12)` row of the first-stage
+  codebook at the supplied GA index.
+- `gain_gb_entry(gb: usize) -> &'static [i16; GAIN_VQ_DIM]` —
+  borrows the same shape row from the second-stage codebook.
 
 ### Round 195 — LSP-quantiser two-stage VQ codebooks
 
@@ -401,29 +428,98 @@ and the on-wire bit stream is in place: `unpack_parameters`
 yields the `(L0, L1, L2, L3)` tuple that
 `LspReconstructor::reconstruct_frame` consumes directly.
 
+### Round 231 — §3.9.2 conjugate-structure gain-VQ reconstruction
+
+A new `oxideav_g729::gain_reconstruct` module ties the round-225
+parameter unpacker output into the spec §3.9.2 / §4.1.5 decode-side
+gain reconstruction:
+
+- `reconstruct_gains(ga, gb) -> Result<QuantisedGains, _>` evaluates
+  spec eqs (73) / (74): `ĝ_p = GA[GA][0] + GB[GB][0]` (column 0,
+  Q14 in both stages) and `γ̂ = GA[GA][1] + GB[GB][1]` (column 1,
+  Q12 in both stages); the summation runs in `i32` per Q-format and
+  converts to `f32` at the boundary. Out-of-range indices surface
+  as typed `GainReconstructError` variants — `GaOutOfRange { index }`
+  / `GbOutOfRange { index }` — rather than panicking. The
+  transmitted GA / GB codewords (3 + 4 bits) cannot trigger these
+  in a well-formed frame.
+- `reconstruct_frame_gains(&Parameters)` — per-frame wrapper that
+  threads `(GA1, GB1)` into subframe 1 and `(GA2, GB2)` into
+  subframe 2, matching the spec §4.1.5 ordering.
+- `QuantisedGains` — `Copy` struct carrying `g_p_hat` (the
+  quantised adaptive-codebook gain `ĝ_p`, which directly scales
+  the adaptive-codebook vector in eq (75)) and `gamma_hat` (the
+  quantised fixed-codebook gain correction factor `γ̂`). The
+  actual quantised fixed-codebook gain `ĝ_c = γ̂ · g'_c` is left
+  for a follow-up round — `g'_c` is the §3.9.1 4th-order MA
+  prediction output and is stateful, so wiring it cleanly needs
+  its own round.
+
+10 new unit tests pin the algorithmic invariants: per-row CSV
+literal at (0, 0) (`GA[0] = (1, 1516)`, `GB[0] = (826, 2005)` →
+`ĝ_p = (1 + 826) / 2^14`, `γ̂ = (1516 + 2005) / 2^12`); per-row
+literal match at `(NCODE1 - 1, NCODE2 - 1)`; both out-of-range
+variants on each codebook; out-of-range-first-wins error
+precedence (GA error reported when both indices are out of range);
+every (GA, GB) pair in the 8 × 16 domain yields finite gains;
+`ĝ_p` lies in `[0, 2]` and `γ̂` lies in `[0, 11]` across every
+pair (worst-case row pairs reach ≈10.12) — a Q14 / Q12 divisor
+swap would push results well outside this window; per-column
+delta isolation (varying GA at fixed GB moves `ĝ_p` by the
+Q14-scaled column-0 delta and `γ̂` by the Q12-scaled column-1
+delta independently); hand-picked pair `(5, 11)` matches the
+algebra; `reconstruct_frame_gains` correctly threads the per-
+subframe indices into the right codebooks; codebook row width
+matches the published `GAIN_VQ_DIM = 2` constant.
+
+7 new structural tests in `tests/tables_shape.rs` for the staged
+tables (`NCODE1 × GAIN_VQ_DIM` for GA, `NCODE2 × GAIN_VQ_DIM` for
+GB, row counts cross-checked against `1 << GA_BITS == NCODE1` and
+`1 << GB_BITS == NCODE2`; first-row CSV-literal pins; column-
+constant convention; both permutations are complete covers of
+`0..NCODE`; `imap ∘ map == id` inverse-permutation property;
+threshold tables are strictly ascending — the §3.9.2 partial-
+search band-ordering invariant; threshold lengths match
+`NCODE - NCAN`; helper-vs-constant equivalence).
+
+1 new integration test against the staged conformance corpus:
+`gain_reconstruct_in_domain_on_full_corpus` walks every `.BIT`
+file in `g729-core/` + `g729a/`, unpacks every active frame's
+parameters, runs `reconstruct_frame_gains`, and pins that every
+reconstructed pair is finite and lies in the documented
+plausibility envelope (`ĝ_p ∈ [0, 2]`, `γ̂ ∈ [0, 11]`). With the
+round-225 corpus walker this confirms that no transmitted (GA,
+GB) index pair in the ITU conformance corpus ever drives the
+reconstruction off the envelope.
+
 ## What is NOT wired up
 
 Every decode/encode entry point still returns `Error::NotImplemented`.
-The remaining codebook tables (gain GA/GB, postfilter interpolation
-`tab_hup_*`, taming `tab_zone`, Annex B DTX/CNG, LSF↔LSP cos/slope
-tables) are staged under `docs/audio/g729/tables/` but are not yet
-compiled in; the Implementer leaves them out until the docs
-collaborator's specifier pass clarifies the per-clause wire-up
-direction.
+The remaining numeric tables (gain-quantizer coefficient matrix
+`coef` / `L_coef`, postfilter interpolation `tab_hup_*`, taming
+`tab_zone`, Annex B DTX/CNG, LSF↔LSP cos/slope tables) are staged
+under `docs/audio/g729/tables/` but are not yet compiled in; the
+Implementer leaves them out until the docs collaborator's
+specifier pass clarifies the per-clause wire-up direction.
 
-With round 225 the §4.1 / Table-8 parameter unpacker chains the
+With round 231 the §4.1 / Table-8 parameter unpacker chains the
 round-191 framing layer to the §3.2.4 / §3.2.5 / §3.2.6 LSP
-decode chain end-to-end: `serial::parse_frame` →
-`parameters::unpack_parameters` → `(L0, L1, L2, L3)` →
-`LspReconstructor::reconstruct_frame` → `LspInterpolator::interpolate`
-→ `lsp_to_lp` per subframe. The `(P1, P0, P2, C1, S1, GA1, GB1,
-C2, S2, GA2, GB2)` tuple is *available* via the same
-`Parameters` struct but the §3.7 / §3.8 / §3.9 decode-side
-algorithms that consume those indices are not yet wired
-(§3.7 maps `P1` → fractional pitch delay; §3.8 maps `C1` →
-pulse positions; §3.9 maps `GA1` / `GB1` → quantised gain via
-the GA / GB conjugate-structure codebooks). The remaining
-codebook tables (GA / GB gain, postfilter interpolation
+decode chain AND the §3.9.2 / §4.1.5 gain VQ decode chain end-
+to-end: `serial::parse_frame` → `parameters::unpack_parameters`
+→ `(L0, L1, L2, L3)` → `LspReconstructor::reconstruct_frame` →
+`LspInterpolator::interpolate` → `lsp_to_lp` per subframe, with
+`(GA1, GB1, GA2, GB2)` → `gain_reconstruct::reconstruct_frame_gains`
+yielding the per-subframe `(ĝ_p, γ̂)` pairs in parallel. The
+remaining transmitted indices `(P1, P0, P2, C1, S1, C2, S2)` are
+*available* via the same `Parameters` struct but the §3.7 / §3.8
+decode-side algorithms that consume them are not yet wired (§3.7
+maps `P1` → fractional pitch delay; §3.8 maps `C1` → pulse
+positions). The §3.9.1 4th-order MA gain-prediction stage that
+turns `γ̂` into the actual fixed-codebook gain `ĝ_c = γ̂ · g'_c`
+is also pending its own round (the predictor coefficients
+themselves already land in `GAIN_QUANT_MA_PREDICTOR_Q13` from
+round 189). The remaining numeric tables (gain-quantizer
+coefficient matrix `coef` / `L_coef`, postfilter interpolation
 `tab_hup_*`, taming `tab_zone`, Annex B DTX/CNG, LSF↔LSP
 cos/slope tables) are staged under `docs/audio/g729/tables/`
 but not yet compiled in; the Implementer leaves them out until

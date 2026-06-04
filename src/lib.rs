@@ -46,17 +46,26 @@
 //! `C1` / `S1` / `GA1` / `GB1`, `P2`, `C2` / `S2` / `GA2` / `GB2`)
 //! the §4.1 decode procedure consumes — see [`parameters`].
 //!
+//! Round 231 wires the §3.9.2 / §4.1.5 conjugate-structure gain-VQ
+//! reconstruction: the GA (8 × 2 Q14/Q12) / GB (16 × 2 Q14/Q12)
+//! codebooks land in [`tables`] alongside their §3.9.3
+//! transmission-side permutation / inverse-permutation /
+//! partial-search-threshold tables, and a new
+//! [`gain_reconstruct`] module maps each transmitted (GA, GB)
+//! index pair into the quantised `(ĝ_p, γ̂)` pair via spec
+//! eqs (73) / (74).
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
 //!
 //! Every decode/encode entry point still returns
-//! [`Error::NotImplemented`]. The remaining codebook tables (gain
-//! GA/GB, postfilter interpolation, taming, Annex B DTX/CNG, LSF↔LSP
-//! cos/slope tables) are staged under `docs/audio/g729/tables/` but
-//! not yet compiled in; the Implementer leaves them out until the
-//! docs collaborator's specifier pass clarifies the per-clause
-//! wire-up direction.
+//! [`Error::NotImplemented`]. The remaining numeric tables
+//! (gain-quantizer coefficient matrix, postfilter interpolation,
+//! taming, Annex B DTX/CNG, LSF↔LSP cos/slope tables) are staged
+//! under `docs/audio/g729/tables/` but not yet compiled in; the
+//! Implementer leaves them out until the docs collaborator's
+//! specifier pass clarifies the per-clause wire-up direction.
 //!
 //! ## Clean-room provenance
 //!
@@ -73,6 +82,7 @@
 
 use oxideav_core::RuntimeContext;
 
+pub mod gain_reconstruct;
 pub mod lsp_interpolate;
 pub mod lsp_reconstruct;
 pub mod lsp_to_lp;

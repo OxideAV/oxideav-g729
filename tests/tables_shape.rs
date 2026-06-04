@@ -163,6 +163,14 @@ fn all_tables_are_non_empty() {
     assert!(!tables::LSP_MA_PREDICTOR_FG_Q15.is_empty());
     assert!(!tables::LSP_MA_PREDICTOR_FG_SUM_Q15.is_empty());
     assert!(!tables::LSP_MA_PREDICTOR_FG_SUM_INV_Q12.is_empty());
+    assert!(!tables::GAIN_QUANT_CODEBOOK_GA_Q14_Q12.is_empty());
+    assert!(!tables::GAIN_QUANT_CODEBOOK_GB_Q14_Q12.is_empty());
+    assert!(!tables::GAIN_QUANT_GA_PERMUTATION.is_empty());
+    assert!(!tables::GAIN_QUANT_GA_INVERSE_PERMUTATION.is_empty());
+    assert!(!tables::GAIN_QUANT_GA_THRESHOLDS_Q14.is_empty());
+    assert!(!tables::GAIN_QUANT_GB_PERMUTATION.is_empty());
+    assert!(!tables::GAIN_QUANT_GB_INVERSE_PERMUTATION.is_empty());
+    assert!(!tables::GAIN_QUANT_GB_THRESHOLDS_Q15.is_empty());
 }
 
 // ---------------------------------------------------------------------
@@ -709,6 +717,146 @@ fn lsp_fg_sum_and_inv_helpers_match_constants() {
         assert_eq!(
             tables::lsp_fg_sum_inv(mode),
             &tables::LSP_MA_PREDICTOR_FG_SUM_INV_Q12[mode],
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// §3.9.2 / §3.9.3 gain-quantizer conjugate-structure VQ tables (r231).
+// ---------------------------------------------------------------------
+
+/// GA codebook shape (`NCODE1 × GAIN_VQ_DIM`) — 8 rows × 2 columns;
+/// GB codebook shape (`NCODE2 × GAIN_VQ_DIM`) — 16 rows × 2 columns.
+/// `1 << GA_BITS == NCODE1` and `1 << GB_BITS == NCODE2`.
+#[test]
+fn gain_vq_codebook_shapes_match_bit_widths() {
+    assert_eq!(tables::NCODE1, 8);
+    assert_eq!(tables::NCODE2, 16);
+    assert_eq!(tables::GAIN_VQ_DIM, 2);
+    assert_eq!(tables::GAIN_QUANT_CODEBOOK_GA_Q14_Q12.len(), tables::NCODE1);
+    assert_eq!(tables::GAIN_QUANT_CODEBOOK_GB_Q14_Q12.len(), tables::NCODE2);
+    for row in &tables::GAIN_QUANT_CODEBOOK_GA_Q14_Q12 {
+        assert_eq!(row.len(), tables::GAIN_VQ_DIM);
+    }
+    for row in &tables::GAIN_QUANT_CODEBOOK_GB_Q14_Q12 {
+        assert_eq!(row.len(), tables::GAIN_VQ_DIM);
+    }
+    // The bit-allocation contract: GA carries 3 bits per spec Table 8,
+    // GB carries 4. The two codebook row counts must exactly fill the
+    // 3 + 4 = 7 bit index space.
+    assert_eq!(1usize << oxideav_g729::parameters::GA_BITS, tables::NCODE1);
+    assert_eq!(1usize << oxideav_g729::parameters::GB_BITS, tables::NCODE2);
+}
+
+/// Pin the first row of each codebook to the staged CSV literals.
+/// GA[0] = (1, 1516) — Q14 column 0 = 1, Q12 column 1 = 1516;
+/// GB[0] = (826, 2005).
+#[test]
+fn gain_vq_codebook_first_rows_match_csv_literals() {
+    assert_eq!(tables::GAIN_QUANT_CODEBOOK_GA_Q14_Q12[0], [1, 1516]);
+    assert_eq!(tables::GAIN_QUANT_CODEBOOK_GB_Q14_Q12[0], [826, 2005]);
+}
+
+/// Column convention: column 0 is `g_p` (Q14), column 1 is `γ` (Q12).
+/// The constants pin the column indices for downstream reconstruction
+/// code so a future column-order swap trips a test.
+#[test]
+fn gain_vq_column_constants_match_convention() {
+    assert_eq!(tables::GAIN_VQ_COL_GP, 0);
+    assert_eq!(tables::GAIN_VQ_COL_GC, 1);
+}
+
+/// Permutation maps are permutations of `0..NCODE`: each map's
+/// elements must form a complete and unique cover of the index range
+/// (every index appears exactly once).
+#[test]
+fn gain_vq_permutations_are_complete() {
+    let mut seen = [false; 8];
+    for &i in tables::GAIN_QUANT_GA_PERMUTATION.iter() {
+        let idx = usize::try_from(i).unwrap();
+        assert!(idx < seen.len(), "GA perm value {i} out of range");
+        assert!(!seen[idx], "GA perm value {i} repeats");
+        seen[idx] = true;
+    }
+    assert!(seen.iter().all(|v| *v));
+
+    let mut seen = [false; 16];
+    for &i in tables::GAIN_QUANT_GB_PERMUTATION.iter() {
+        let idx = usize::try_from(i).unwrap();
+        assert!(idx < seen.len(), "GB perm value {i} out of range");
+        assert!(!seen[idx], "GB perm value {i} repeats");
+        seen[idx] = true;
+    }
+    assert!(seen.iter().all(|v| *v));
+}
+
+/// Inverse-permutation property: applying the permutation then its
+/// inverse (or vice versa) is the identity. This is a far stronger
+/// drift check than two independent shape tests — a one-element
+/// drift in either array trips this.
+#[test]
+fn gain_vq_permutations_are_inverses() {
+    for i in 0..tables::NCODE1 {
+        let permuted = tables::GAIN_QUANT_GA_PERMUTATION[i] as usize;
+        let restored = tables::GAIN_QUANT_GA_INVERSE_PERMUTATION[permuted] as usize;
+        assert_eq!(restored, i, "imap1 ∘ map1 fails at i = {i}");
+    }
+    for i in 0..tables::NCODE2 {
+        let permuted = tables::GAIN_QUANT_GB_PERMUTATION[i] as usize;
+        let restored = tables::GAIN_QUANT_GB_INVERSE_PERMUTATION[permuted] as usize;
+        assert_eq!(restored, i, "imap2 ∘ map2 fails at i = {i}");
+    }
+}
+
+/// Threshold tables are strictly ascending; that's the partial-search
+/// invariant — each threshold demarcates an additional preselection
+/// band so the bands must be ordered. (A flat or descending sequence
+/// would mean the search bands overlap, breaking the §3.9.2
+/// preselection short-circuit.)
+#[test]
+fn gain_vq_thresholds_are_strictly_ascending() {
+    for w in tables::GAIN_QUANT_GA_THRESHOLDS_Q14.windows(2) {
+        assert!(
+            w[0] < w[1],
+            "GA threshold pair {} {} not strictly ascending",
+            w[0],
+            w[1],
+        );
+    }
+    for w in tables::GAIN_QUANT_GB_THRESHOLDS_Q15.windows(2) {
+        assert!(
+            w[0] < w[1],
+            "GB threshold pair {} {} not strictly ascending",
+            w[0],
+            w[1],
+        );
+    }
+}
+
+/// Threshold tables hold `NCODE - NCAN` entries; the staged CSVs
+/// have 4 GA entries (`NCODE1 - NCAN1 = 8 - 4 = 4`) and 8 GB entries
+/// (`NCODE2 - NCAN2 = 16 - 8 = 8`).
+#[test]
+fn gain_vq_threshold_counts_match_partial_search_capacity() {
+    assert_eq!(tables::GAIN_QUANT_GA_THRESHOLDS_Q14.len(), 4);
+    assert_eq!(tables::GAIN_QUANT_GB_THRESHOLDS_Q15.len(), 8);
+}
+
+/// `gain_ga_entry(ga)` / `gain_gb_entry(gb)` helpers borrow the
+/// underlying codebook rows; pin equivalence on every in-domain
+/// index.
+#[test]
+fn gain_vq_helpers_match_constants() {
+    for ga in 0..tables::NCODE1 {
+        assert_eq!(
+            tables::gain_ga_entry(ga),
+            &tables::GAIN_QUANT_CODEBOOK_GA_Q14_Q12[ga],
+        );
+    }
+    for gb in 0..tables::NCODE2 {
+        assert_eq!(
+            tables::gain_gb_entry(gb),
+            &tables::GAIN_QUANT_CODEBOOK_GB_Q14_Q12[gb],
         );
     }
 }

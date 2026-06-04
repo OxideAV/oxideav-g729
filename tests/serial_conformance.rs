@@ -673,3 +673,74 @@ fn lsp_indices_helper_round_trips_first_active_frame_bits() {
     let (got_l0, got_l1, got_l2, got_l3) = lsp_indices(&bits);
     assert_eq!((got_l0, got_l1, got_l2, got_l3), (l0, l1, l2, l3));
 }
+
+/// Walks every active frame in the staged corpus and runs the
+/// §3.9.2 (GA, GB) → (`ĝ_p`, `γ̂`) reconstruction. Pins that:
+/// (a) every transmitted (GA, GB) pair is in-domain (NCODE1 / NCODE2);
+/// (b) every reconstruction yields finite floats;
+/// (c) every reconstructed `ĝ_p` lies in `0.0..=2.0` and every
+///     reconstructed `γ̂` lies in `0.0..=10.0` — the same plausibility
+///     window the unit-test suite pins on the codebook product.
+#[test]
+fn gain_reconstruct_in_domain_on_full_corpus() {
+    use oxideav_g729::gain_reconstruct::reconstruct_frame_gains;
+    let Some(root) = conformance_root() else {
+        eprintln!("skip: conformance corpus not present");
+        return;
+    };
+    let mut walked = 0usize;
+    let mut active_total = 0usize;
+    for variant in ["g729-core", "g729a"] {
+        let dir = root.join(variant);
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("BIT") {
+                continue;
+            }
+            let bit_bytes = std::fs::read(&path).unwrap();
+            let n = serial::frame_count(&bit_bytes).unwrap();
+            let label = format!("{variant}/{}", path.file_stem().unwrap().to_string_lossy());
+            let mut active = 0usize;
+            for f in 0..n {
+                let frame = &bit_bytes[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+                let kind = serial::parse_frame(frame).unwrap();
+                let Ok(params) = unpack_parameters(&kind) else {
+                    continue;
+                };
+                active += 1;
+                let pairs = reconstruct_frame_gains(&params).unwrap_or_else(|e| {
+                    panic!("{label} frame {f}: gain reconstruct returned error: {e}")
+                });
+                for (i, g) in pairs.iter().enumerate() {
+                    assert!(
+                        g.g_p_hat.is_finite() && g.gamma_hat.is_finite(),
+                        "{label} frame {f} sub{}: non-finite gains {g:?}",
+                        i + 1,
+                    );
+                    assert!(
+                        (0.0..=2.0).contains(&g.g_p_hat),
+                        "{label} frame {f} sub{}: g_p_hat {} out of [0, 2]",
+                        i + 1,
+                        g.g_p_hat,
+                    );
+                    assert!(
+                        (0.0..=11.0).contains(&g.gamma_hat),
+                        "{label} frame {f} sub{}: γ̂ {} out of [0, 11]",
+                        i + 1,
+                        g.gamma_hat,
+                    );
+                }
+            }
+            // Every .BIT file should have at least one active frame
+            // (ERASURE.BIT contains 240/300 active frames, etc.).
+            assert!(active > 0, "{label}: no active frames");
+            active_total += active;
+            walked += 1;
+        }
+    }
+    assert!(walked > 0, "no .BIT files found under conformance root");
+    assert!(active_total > 0, "no active frames processed");
+}

@@ -253,6 +253,49 @@ const TABLES: &[Table] = &[
         stem: "lsp-ma-predictor-fg-sum-inv-Q12",
         shape: Shape::Matrix { rows: 2, cols: 10 },
     },
+    // §3.9.2 gain-quantizer conjugate-structure codebooks (round 231).
+    // GA is the 3-bit first-stage 2-D codebook (8 entries × 2 components:
+    // adaptive-codebook-gain contribution in Q14, fixed-codebook-gain
+    // correction contribution in Q12). GB is the 4-bit second-stage 2-D
+    // codebook (16 entries × 2 components, same per-column Q-formats).
+    // Reconstruction per spec eqs (73)/(74) sums the per-row components
+    // of the two codebooks indexed by GA / GB respectively.
+    Table {
+        stem: "gain-quantizer-codebook-GA-Q14-Q12",
+        shape: Shape::Matrix { rows: 8, cols: 2 },
+    },
+    Table {
+        stem: "gain-quantizer-codebook-GB-Q14-Q12",
+        shape: Shape::Matrix { rows: 16, cols: 2 },
+    },
+    // §3.9.3 transmitted-index permutation + inverse permutation +
+    // partial-search thresholds (the spec's robustness mapping that
+    // reorders GA / GB indices before transmission so a single-bit
+    // channel error lands on a perceptually-close codebook entry).
+    Table {
+        stem: "gain-quantizer-codebook-GA-permutation",
+        shape: Shape::Flat { elements: 8 },
+    },
+    Table {
+        stem: "gain-quantizer-codebook-GA-inverse-permutation",
+        shape: Shape::Flat { elements: 8 },
+    },
+    Table {
+        stem: "gain-quantizer-codebook-GA-thresholds-Q14",
+        shape: Shape::Flat { elements: 4 },
+    },
+    Table {
+        stem: "gain-quantizer-codebook-GB-permutation",
+        shape: Shape::Flat { elements: 16 },
+    },
+    Table {
+        stem: "gain-quantizer-codebook-GB-inverse-permutation",
+        shape: Shape::Flat { elements: 16 },
+    },
+    Table {
+        stem: "gain-quantizer-codebook-GB-thresholds-Q15",
+        shape: Shape::Flat { elements: 8 },
+    },
 ];
 
 /// Maps a CSV stem to its Rust-side `pub const` identifier. Kept here
@@ -280,6 +323,14 @@ fn const_ident(stem: &str) -> &'static str {
         "lsp-ma-predictor-fg-Q15" => "LSP_MA_PREDICTOR_FG_Q15",
         "lsp-ma-predictor-fg-sum-Q15" => "LSP_MA_PREDICTOR_FG_SUM_Q15",
         "lsp-ma-predictor-fg-sum-inv-Q12" => "LSP_MA_PREDICTOR_FG_SUM_INV_Q12",
+        "gain-quantizer-codebook-GA-Q14-Q12" => "GAIN_QUANT_CODEBOOK_GA_Q14_Q12",
+        "gain-quantizer-codebook-GB-Q14-Q12" => "GAIN_QUANT_CODEBOOK_GB_Q14_Q12",
+        "gain-quantizer-codebook-GA-permutation" => "GAIN_QUANT_GA_PERMUTATION",
+        "gain-quantizer-codebook-GA-inverse-permutation" => "GAIN_QUANT_GA_INVERSE_PERMUTATION",
+        "gain-quantizer-codebook-GA-thresholds-Q14" => "GAIN_QUANT_GA_THRESHOLDS_Q14",
+        "gain-quantizer-codebook-GB-permutation" => "GAIN_QUANT_GB_PERMUTATION",
+        "gain-quantizer-codebook-GB-inverse-permutation" => "GAIN_QUANT_GB_INVERSE_PERMUTATION",
+        "gain-quantizer-codebook-GB-thresholds-Q15" => "GAIN_QUANT_GB_THRESHOLDS_Q15",
         _ => panic!("unknown table stem: {stem}"),
     }
 }

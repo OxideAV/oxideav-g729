@@ -8,6 +8,85 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 231 wires the §3.9.2 / §4.1.5 conjugate-structure gain-VQ
+  decode-side reconstruction on top of the round-225 §4.1 parameter
+  unpacker, in a new `oxideav_g729::gain_reconstruct` module:
+  - `reconstruct_gains(ga: usize, gb: usize) -> Result<QuantisedGains,
+    GainReconstructError>` evaluates spec eqs (73) / (74):
+    `ĝ_p = GA[GA][0] + GB[GB][0]` (column 0, Q14 in both stages) and
+    `γ̂ = GA[GA][1] + GB[GB][1]` (column 1, Q12 in both stages); the
+    summation runs in `i32` per Q-format and converts to `f32` at the
+    boundary. Out-of-range indices surface as
+    `GaOutOfRange { index }` / `GbOutOfRange { index }` rather than
+    panicking.
+  - `reconstruct_frame_gains(&Parameters) -> Result<[QuantisedGains;
+    2], GainReconstructError>` per-frame wrapper that threads
+    `(GA1, GB1)` into subframe 1 and `(GA2, GB2)` into subframe 2,
+    matching the §4.1.5 ordering.
+  - `QuantisedGains` — `Copy` struct carrying `g_p_hat`
+    (quantised adaptive-codebook gain `ĝ_p`) and `gamma_hat`
+    (quantised fixed-codebook gain correction factor `γ̂`). The
+    actual quantised fixed-codebook gain `ĝ_c = γ̂ · g'_c` is left
+    for a follow-up round: `g'_c` is produced by the §3.9.1 4th-order
+    MA prediction stage which is stateful and not yet wired.
+- Round 231 wires the §3.9.2 / §3.9.3 numeric tables that feed the
+  reconstruction:
+  - `tables::GAIN_QUANT_CODEBOOK_GA_Q14_Q12` — first-stage codebook
+    `gbk1`, shape `[[i16; 2]; NCODE1]` = `[[i16; 2]; 8]`. Column 0
+    is the adaptive-codebook-gain contribution in Q14, column 1 is
+    the fixed-codebook-gain correction contribution in Q12.
+  - `tables::GAIN_QUANT_CODEBOOK_GB_Q14_Q12` — second-stage codebook
+    `gbk2`, shape `[[i16; 2]; NCODE2]` = `[[i16; 2]; 16]`, same
+    per-column Q-formats.
+  - `tables::GAIN_QUANT_GA_PERMUTATION` / `GA_INVERSE_PERMUTATION`
+    (8 entries each) and `GAIN_QUANT_GB_PERMUTATION` /
+    `GB_INVERSE_PERMUTATION` (16 entries each) — the spec §3.9.3
+    transmission-side robustness mapping that reorders GA / GB
+    indices before transmission so a single-bit channel error lands
+    on a perceptually-close codebook entry.
+  - `tables::GAIN_QUANT_GA_THRESHOLDS_Q14` (4 entries) and
+    `GAIN_QUANT_GB_THRESHOLDS_Q15` (8 entries) — encoder-side
+    partial-search thresholds (`NCODE1 - NCAN1 = 4`,
+    `NCODE2 - NCAN2 = 8`); staged here for completeness alongside
+    the codebooks but not consumed by the round-231 decode-side
+    reconstruction.
+  - New spec-dimension constants: `NCODE1 = 8`, `NCODE2 = 16`,
+    `GAIN_VQ_DIM = 2`, `GAIN_VQ_COL_GP = 0`, `GAIN_VQ_COL_GC = 1`.
+  - Bounds-checked lookup helpers `tables::gain_ga_entry(ga)` /
+    `gain_gb_entry(gb)` returning a borrowed 2-element row.
+- 10 new unit tests in `src/gain_reconstruct.rs` pin the algorithmic
+  invariants: per-row CSV-literal match at (0, 0) and (`NCODE1 - 1`,
+  `NCODE2 - 1`); out-of-range GA / GB rejection (each variant);
+  out-of-range-first-wins error precedence; every (GA, GB) pair in
+  the 8 × 16 domain yields finite gains; `ĝ_p` lies in `[0, 2]` and
+  `γ̂` lies in `[0, 11]` for every pair (Q-format-divisor isolation
+  check; worst-case row pairs reach ≈10.12); per-column delta
+  isolation (varying GA at fixed GB moves `ĝ_p` by the Q14-scaled
+  column-0 delta and `γ̂` by the Q12-scaled column-1 delta);
+  hand-picked pair `(5, 11)` matches the algebra; `reconstruct_frame_gains`
+  threads `(GA1, GB1)` and `(GA2, GB2)` into the right subframe;
+  codebook width matches the published `GAIN_VQ_DIM` constant.
+- 7 new structural tests in `tests/tables_shape.rs` for the staged
+  tables: shape (`NCODE1 × GAIN_VQ_DIM` for GA, `NCODE2 × GAIN_VQ_DIM`
+  for GB), with the row counts cross-checked against
+  `1 << GA_BITS == NCODE1` and `1 << GB_BITS == NCODE2`; first-row
+  CSV-literal pins (GA[0] = `[1, 1516]`, GB[0] = `[826, 2005]`);
+  column-constant convention pinned to the (0 = `g_p`, 1 = `γ`)
+  layout; both permutations are complete covers of `0..NCODE`;
+  inverse-permutation property (`imap ∘ map == id`); threshold tables
+  are strictly ascending (the §3.9.2 partial-search band-ordering
+  invariant); threshold lengths match `NCODE - NCAN`; helper-vs-
+  constant equivalence.
+- 1 new integration test against the staged conformance corpus:
+  `gain_reconstruct_in_domain_on_full_corpus` walks every `.BIT`
+  file in `g729-core/` + `g729a/`, unpacks every active frame's
+  parameters, runs `reconstruct_frame_gains`, and pins that every
+  reconstructed pair is finite, every `ĝ_p` lies in `[0, 2]`, and
+  every `γ̂` lies in `[0, 11]`. With the round-225 corpus walker
+  this confirms that no transmitted (GA, GB) index pair in the ITU
+  conformance corpus ever drives the reconstruction off the
+  plausibility envelope.
+
 - Round 225 wires the §4.1 / Table-8 parameter unpacker, splitting
   the round-191 serial 80-bit payload into the 15 typed codeword
   indices the §4.1 decode procedure consumes, in a new

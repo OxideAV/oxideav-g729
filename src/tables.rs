@@ -63,10 +63,39 @@
 //!   order); `L0_BITS == 1` matches the outer-dim count exactly,
 //!   `1 << L0_BITS == 2`.
 //!
+//! Round 231 (gain quantizer two-stage conjugate-structure VQ
+//! codebooks + §3.9.3 robustness mapping inputs):
+//!
+//! * §3.9.2 first-stage codebook (`gbk1`) — [`GAIN_QUANT_CODEBOOK_GA_Q14_Q12`],
+//!   shape `[[i16; 2]; NCODE1]` = `[[i16; 2]; 8]`. Column 0 is the
+//!   adaptive-codebook-gain contribution in Q14, column 1 is the
+//!   fixed-codebook-gain correction contribution in Q12; the same
+//!   per-column Q-format convention is shared with the second-stage
+//!   codebook.
+//! * §3.9.2 second-stage codebook (`gbk2`) — [`GAIN_QUANT_CODEBOOK_GB_Q14_Q12`],
+//!   shape `[[i16; 2]; NCODE2]` = `[[i16; 2]; 16]`.
+//! * §3.9.3 transmission-side permutation maps — [`GAIN_QUANT_GA_PERMUTATION`],
+//!   [`GAIN_QUANT_GA_INVERSE_PERMUTATION`], [`GAIN_QUANT_GB_PERMUTATION`],
+//!   [`GAIN_QUANT_GB_INVERSE_PERMUTATION`]: the spec's robustness
+//!   mapping that reorders GA / GB indices before transmission so a
+//!   single-bit channel error lands on a perceptually-close codebook
+//!   entry.
+//! * §3.9.2 partial-search-threshold tables —
+//!   [`GAIN_QUANT_GA_THRESHOLDS_Q14`] (`NCODE1 - NCAN1 = 4` Q14 entries)
+//!   and [`GAIN_QUANT_GB_THRESHOLDS_Q15`] (`NCODE2 - NCAN2 = 8` Q15
+//!   entries): encoder-side preselection thresholds; staged here for
+//!   completeness alongside the codebooks but not consumed by the
+//!   round-231 decode-side reconstruction.
+//! * New spec-dimension constants: [`NCODE1`] = 8, [`NCODE2`] = 16,
+//!   [`GAIN_VQ_DIM`] = 2, [`GAIN_VQ_COL_GP`] = 0,
+//!   [`GAIN_VQ_COL_GC`] = 1.
+//! * Bounds-checked lookup helpers [`gain_ga_entry`] / [`gain_gb_entry`]
+//!   borrowing a 2-element row from the matching codebook.
+//!
 //! Still NOT compiled (gated on the docs collaborator specifier
-//! pass): gain GA/GB codebooks, postfilter interpolation
-//! (`tab_hup_*`), taming (`tab_zone`), Annex B DTX/CNG,
-//! LSF↔LSP cos/slope tables.
+//! pass): gain-quantizer coefficient matrix (`coef` / `L_coef`),
+//! postfilter interpolation (`tab_hup_*`), taming (`tab_zone`),
+//! Annex B DTX/CNG, LSF↔LSP cos/slope tables.
 //!
 //! ## Q-format convention reminder (G.729 §1.4)
 //!
@@ -122,6 +151,38 @@ include!(concat!(env!("OUT_DIR"), "/lsp-ma-predictor-fg-sum-Q15.rs"));
 include!(concat!(
     env!("OUT_DIR"),
     "/lsp-ma-predictor-fg-sum-inv-Q12.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/gain-quantizer-codebook-GA-Q14-Q12.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/gain-quantizer-codebook-GB-Q14-Q12.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/gain-quantizer-codebook-GA-permutation.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/gain-quantizer-codebook-GA-inverse-permutation.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/gain-quantizer-codebook-GA-thresholds-Q14.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/gain-quantizer-codebook-GB-permutation.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/gain-quantizer-codebook-GB-inverse-permutation.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/gain-quantizer-codebook-GB-thresholds-Q15.rs"
 ));
 
 /// G.729 §4.1 transmitted parameter count per frame (spec `PRM_SIZE`).
@@ -289,4 +350,60 @@ pub fn lsp_fg_sum(mode: usize) -> &'static [i16; M] {
 #[must_use]
 pub fn lsp_fg_sum_inv(mode: usize) -> &'static [i16; M] {
     &LSP_MA_PREDICTOR_FG_SUM_INV_Q12[mode]
+}
+
+/// G.729 §3.9.2 first-stage gain-VQ codebook entry count
+/// (`NCODE1 = 8`); the 3-bit `GA1` / `GA2` index selects one of
+/// these rows from [`GAIN_QUANT_CODEBOOK_GA_Q14_Q12`].
+pub const NCODE1: usize = 8;
+
+/// G.729 §3.9.2 second-stage gain-VQ codebook entry count
+/// (`NCODE2 = 16`); the 4-bit `GB1` / `GB2` index selects one of
+/// these rows from [`GAIN_QUANT_CODEBOOK_GB_Q14_Q12`].
+pub const NCODE2: usize = 16;
+
+/// G.729 §3.9.2 codebook width: each codebook row carries two
+/// components — column 0 is the adaptive-codebook-gain contribution
+/// (`g_p` half) in Q14, column 1 is the fixed-codebook-gain
+/// correction contribution (`γ` half) in Q12. Both stages share the
+/// same per-column Q-format so the reconstruction equation can sum
+/// component-wise across the two stages.
+pub const GAIN_VQ_DIM: usize = 2;
+
+/// G.729 §3.9.2 column index of the adaptive-codebook-gain
+/// contribution (Q14) inside each row of
+/// [`GAIN_QUANT_CODEBOOK_GA_Q14_Q12`] /
+/// [`GAIN_QUANT_CODEBOOK_GB_Q14_Q12`].
+pub const GAIN_VQ_COL_GP: usize = 0;
+
+/// G.729 §3.9.2 column index of the fixed-codebook-gain correction
+/// contribution (Q12) inside each row of
+/// [`GAIN_QUANT_CODEBOOK_GA_Q14_Q12`] /
+/// [`GAIN_QUANT_CODEBOOK_GB_Q14_Q12`].
+pub const GAIN_VQ_COL_GC: usize = 1;
+
+/// Returns the §3.9.2 first-stage gain-VQ codebook row at the
+/// supplied `GA` index — a `[i16; GAIN_VQ_DIM]` slice of `[g_p
+/// contribution (Q14), γ contribution (Q12)]`.
+///
+/// # Panics
+///
+/// Panics if `ga >= NCODE1`. Callers decoding `GA` from a
+/// transmitted frame can rely on masking by `(1 << GA_BITS) - 1`
+/// (where `GA_BITS = 3` per spec Table 8) to keep the index in range.
+#[must_use]
+pub fn gain_ga_entry(ga: usize) -> &'static [i16; GAIN_VQ_DIM] {
+    &GAIN_QUANT_CODEBOOK_GA_Q14_Q12[ga]
+}
+
+/// Returns the §3.9.2 second-stage gain-VQ codebook row at the
+/// supplied `GB` index — a `[i16; GAIN_VQ_DIM]` slice with the
+/// same column convention as [`gain_ga_entry`].
+///
+/// # Panics
+///
+/// Panics if `gb >= NCODE2`.
+#[must_use]
+pub fn gain_gb_entry(gb: usize) -> &'static [i16; GAIN_VQ_DIM] {
+    &GAIN_QUANT_CODEBOOK_GB_Q14_Q12[gb]
 }
