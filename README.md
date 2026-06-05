@@ -68,7 +68,21 @@ permutation, inverse permutation, and partial-search-threshold
 tables all landing alongside in `tables`, plus an integration
 test that runs the per-frame reconstruction across every
 active frame of the staged conformance corpus and pins
-`ĝ_p ∈ [0, 2]` and `γ̂ ∈ [0, 11]` end-to-end.
+`ĝ_p ∈ [0, 2]` and `γ̂ ∈ [0, 11]` end-to-end; round 239
+chains the §3.9.1 4th-order MA gain prediction stage onto
+the round-231 `γ̂` output via a new stateful `gain_predict`
+module that owns the 4-tap history `[Û^(m-1), Û^(m-2),
+Û^(m-3), Û^(m-4)]` initialised per spec Table 9 / §4.3 to
+`(-14, -14, -14, -14)` dB, computes the codevector energy
+`E` (eq (66), `10·log10((1/40)·Σ_{n=0..39} c(n)^2)`), the
+predicted energy `Ẽ^(m)` (eq (69), the 4-tap MA dot product
+`Σ_{i=1..=4} b_i · Û^(m-i)` with `[b1 b2 b3 b4] = [0.68
+0.58 0.34 0.19]` reading from the staged
+`GAIN_QUANT_MA_PREDICTOR_Q13` Q13 table), the predicted
+gain `g'_c` (eq (71), `10^((Ẽ + Ē - E)/20)` with
+`Ē = 30 dB`), and finally the quantised fixed-codebook
+gain `ĝ_c = γ̂ · g'_c` (eq (65)), then advances the history
+per eq (72) decode form `Û^(m) = 20·log10(γ̂)`.
 
 All numeric values are compiled at build time by `build.rs` from CSVs
 under `tables/`, themselves byte-for-byte copies of the spec-role-named
@@ -171,6 +185,16 @@ Round-231 lookup helpers (bounds-checked):
   codebook at the supplied GA index.
 - `gain_gb_entry(gb: usize) -> &'static [i16; GAIN_VQ_DIM]` —
   borrows the same shape row from the second-stage codebook.
+
+Round-239 spec-constant surface:
+
+- `gain_predict::FIXED_CODEBOOK_MEAN_ENERGY_DB = 30.0` — `Ē`
+  per spec §3.9.1 (the mean energy of the fixed-codebook
+  excitation used in eqs (67) / (68) / (71)).
+- `gain_predict::GAIN_PREDICTOR_INIT_DB = -14.0` — `Û^(k)`
+  start-up value per spec Table 9 / §4.3.
+- `gain_predict::CODEVECTOR_LEN = 40` — spec §3.8 / eq (66)
+  codevector length over which the energy is averaged.
 
 ### Round 195 — LSP-quantiser two-stage VQ codebooks
 
@@ -492,6 +516,98 @@ round-225 corpus walker this confirms that no transmitted (GA,
 GB) index pair in the ITU conformance corpus ever drives the
 reconstruction off the envelope.
 
+### Round 239 — §3.9.1 4th-order MA gain prediction
+
+A new `oxideav_g729::gain_predict` module ties the round-231
+correction-factor output `γ̂` into the actual quantised
+fixed-codebook gain `ĝ_c = γ̂ · g'_c` via the spec §3.9.1 4-tap MA
+predictor:
+
+- `GainPredictor::new()` owns the 4-slot history
+  `[Û^(m-1), Û^(m-2), Û^(m-3), Û^(m-4)]` initialised per spec
+  Table 9 / §4.3 to `[-14, -14, -14, -14]` dB. Slot 0 is the
+  most-recent (eq (69) `b_1`-weighted) slot; slot 3 is the
+  oldest (`b_4`-weighted).
+- `GainPredictor::codevector_energy_db(c)` computes spec eq (66)
+  `E = 10·log10((1/40) · Σ_{n=0..39} c(n)^2)` for one 40-sample
+  fixed-codebook contribution. Defends against the all-zero
+  corner case with a `1e-30` `log10` floor so output stays
+  finite.
+- `GainPredictor::predict_only(c)` runs eq (66) + eq (69) +
+  eq (71) without advancing the history; returns a
+  `PredictedGain { e_db, e_tilde_db, g_c_prime }` for inspection.
+  `predict_only_from_energy(e_db)` is the same path with a
+  pre-computed `E` so callers don't have to materialise `c(n)`.
+- `GainPredictor::predict_and_update(c, γ̂)` runs the full
+  per-subframe path: eq (66) energy, eq (69)
+  `Ẽ^(m) = Σ_{i=1..=4} b_i · Û^(m-i)` (Q13 coefficients from
+  the staged `GAIN_QUANT_MA_PREDICTOR_Q13` table converted to
+  `f32` at the boundary), eq (71) `g'_c = 10^((Ẽ + Ē - E)/20)`
+  with `Ē = 30 dB`, eq (65) `ĝ_c = γ̂ · g'_c`, and finally
+  eq (72) decode-form history advance `Û^(m) = 20·log10(γ̂)`.
+  Returns `(ĝ_c, gain_path)`.
+- `GainPredictor::push_quantised_error(γ̂)` is the low-level
+  eq (72) history advance, exposed so callers running custom
+  loops (concealment paths) can drive the predictor explicitly.
+
+13 new unit tests pin the algorithmic invariants:
+
+- Table 9 init: every history slot starts at `-14 dB`;
+- first-subframe `Ẽ^(0) = -14 · (b1 + b2 + b3 + b4)` matches
+  the staged-Q13 dot product to 1e-4 dB;
+- eq (66) matches `-10 dB` for the minimum-energy 4-pulse
+  codevector (4/40 mean square) and stays finite on an
+  all-zero codevector (the `1e-30` floor lands at `-300 dB`);
+- eq (71) unity check: `Ẽ^(m) = E - Ē` exactly cancels the
+  exponent to `g'_c = 1.0` (pins the sign convention of the
+  `(Ẽ + Ē - E) / 20` exponent);
+- eq (72) decode form: `push_quantised_error(γ̂ = 1.0)`
+  produces `Û^(m) = 0 dB` with subsequent slots shifted one
+  step deeper; `γ̂ = 10` produces `Û^(m) = 20 dB`;
+- 20·log10 scaling: `γ̂ = 0.1` produces `Û^(m) = -20 dB`
+  (defends against a missing factor of 20 or a sign flip);
+- non-positive `γ̂` floors to a finite very-negative `Û^(m)`
+  rather than NaN (defensive — well-formed §3.9.2 output is
+  always positive);
+- end-to-end predict-and-update consistency: the
+  return-value `gain_path` matches a side-by-side `predict_only`
+  call on the same predictor state, and `predict_and_update`
+  with `γ̂ = 1.0` yields `ĝ_c = g'_c`;
+- `predict_only` is side-effect-free: history is unchanged
+  after the call (pinned for the encoder-side dry-run use case);
+- steady-state convergence: after `MA_NP` pushes with constant
+  `γ̂`, every history slot equals `20·log10(γ̂)` and `Ẽ^(m)`
+  equals that times the sum of taps;
+- history index 0 is the most-recent slot (the `b_1`-weighted
+  one) — built by pushing four distinct `Û` values and verifying
+  the eq (69) sum weights each slot with the staged
+  `GAIN_QUANT_MA_PREDICTOR_Q13[k]` for `k ∈ 0..4`;
+- eq (65) sweep: with `g'_c` forced to `1.0` via energy cancel,
+  `ĝ_c` equals `γ̂` exactly across the sweep `{0.25, 0.5, 1.0,
+  1.5, 2.5, 4.0}`.
+
+1 new integration test against the staged conformance corpus:
+`gain_predict_finite_on_full_corpus` walks every `.BIT` file in
+`g729-core/` + `g729a/`, runs the round-231
+`reconstruct_frame_gains` per active frame, then drives a fresh
+`GainPredictor` through the resulting `γ̂` sequence with a
+representative §3.8 minimum-energy 4-pulse codevector each
+subframe. Asserts that every `(g'_c, ĝ_c)` pair stays finite,
+that `ĝ_c` lies in the defensive envelope `[0, 1e6]`, and that
+every history slot stays finite after the eq (72) update. The
+envelope is generous because the synthetic codevector understates
+real `E^(m)` (which would dampen `g'_c`); the actual §3.8 decode
+path wiring is left to a follow-up round.
+
+With round 239 the §3.9.1 / §4.1.5 gain-prediction stage chains
+the round-231 `γ̂` output into the actual decoder-side fixed-
+codebook gain. The full decoder gain pipeline is now wired:
+`(GA, GB) → reconstruct_gains → (ĝ_p, γ̂) → gain_predict ·
+predict_and_update(c, γ̂) → (ĝ_c, gain_path) → §3.10 excitation
+`u(n) = ĝ_p · v(n) + ĝ_c · c(n)`. The §3.8 algebraic-codebook
+decode path that produces `c(n)` is the remaining piece needed
+to drive the predictor with real fixed-codebook contributions.
+
 ## What is NOT wired up
 
 Every decode/encode entry point still returns `Error::NotImplemented`.
@@ -502,29 +618,29 @@ under `docs/audio/g729/tables/` but are not yet compiled in; the
 Implementer leaves them out until the docs collaborator's
 specifier pass clarifies the per-clause wire-up direction.
 
-With round 231 the §4.1 / Table-8 parameter unpacker chains the
+With round 239 the §4.1 / Table-8 parameter unpacker chains the
 round-191 framing layer to the §3.2.4 / §3.2.5 / §3.2.6 LSP
-decode chain AND the §3.9.2 / §4.1.5 gain VQ decode chain end-
-to-end: `serial::parse_frame` → `parameters::unpack_parameters`
-→ `(L0, L1, L2, L3)` → `LspReconstructor::reconstruct_frame` →
-`LspInterpolator::interpolate` → `lsp_to_lp` per subframe, with
-`(GA1, GB1, GA2, GB2)` → `gain_reconstruct::reconstruct_frame_gains`
-yielding the per-subframe `(ĝ_p, γ̂)` pairs in parallel. The
-remaining transmitted indices `(P1, P0, P2, C1, S1, C2, S2)` are
-*available* via the same `Parameters` struct but the §3.7 / §3.8
-decode-side algorithms that consume them are not yet wired (§3.7
-maps `P1` → fractional pitch delay; §3.8 maps `C1` → pulse
-positions). The §3.9.1 4th-order MA gain-prediction stage that
-turns `γ̂` into the actual fixed-codebook gain `ĝ_c = γ̂ · g'_c`
-is also pending its own round (the predictor coefficients
-themselves already land in `GAIN_QUANT_MA_PREDICTOR_Q13` from
-round 189). The remaining numeric tables (gain-quantizer
-coefficient matrix `coef` / `L_coef`, postfilter interpolation
-`tab_hup_*`, taming `tab_zone`, Annex B DTX/CNG, LSF↔LSP
-cos/slope tables) are staged under `docs/audio/g729/tables/`
-but not yet compiled in; the Implementer leaves them out until
-the docs collaborator's specifier pass clarifies the per-clause
-wire-up direction.
+decode chain AND the §3.9.2 / §4.1.5 gain VQ decode chain AND
+the §3.9.1 / §4.1.5 gain-prediction stage end-to-end:
+`serial::parse_frame` → `parameters::unpack_parameters` →
+`(L0, L1, L2, L3)` → `LspReconstructor::reconstruct_frame` →
+`LspInterpolator::interpolate` → `lsp_to_lp` per subframe,
+with `(GA1, GB1, GA2, GB2)` →
+`gain_reconstruct::reconstruct_frame_gains` →
+`gain_predict::GainPredictor::predict_and_update` yielding the
+per-subframe `(ĝ_p, ĝ_c)` pairs. The remaining transmitted
+indices `(P1, P0, P2, C1, S1, C2, S2)` are *available* via the
+same `Parameters` struct but the §3.7 / §3.8 decode-side
+algorithms that consume them are not yet wired (§3.7 maps `P1`
+→ fractional pitch delay; §3.8 maps `C1` → pulse positions —
+producing the `c(n)` codevector that the round-239 gain
+predictor's energy step consumes). The remaining numeric
+tables (gain-quantizer coefficient matrix `coef` / `L_coef`,
+postfilter interpolation `tab_hup_*`, taming `tab_zone`,
+Annex B DTX/CNG, LSF↔LSP cos/slope tables) are staged under
+`docs/audio/g729/tables/` but not yet compiled in; the
+Implementer leaves them out until the docs collaborator's
+specifier pass clarifies the per-clause wire-up direction.
 
 ## Clean-room provenance
 

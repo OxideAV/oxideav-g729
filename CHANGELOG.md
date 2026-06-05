@@ -8,6 +8,53 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 239 wires the §3.9.1 / §4.1.5 4th-order MA gain prediction
+  stage on top of the round-231 conjugate-structure gain-VQ output,
+  in a new `oxideav_g729::gain_predict` module:
+  - `GainPredictor::new()` owns the four-slot prediction-error
+    history `[Û^(m-1), Û^(m-2), Û^(m-3), Û^(m-4)]` initialised per
+    spec Table 9 / §4.3 to `[-14, -14, -14, -14]` dB. Slot 0 is the
+    most-recent (eq (69) `b_1`-weighted) slot.
+  - `GainPredictor::codevector_energy_db(c: &[f32; 40]) -> f32` —
+    spec eq (66) `E = 10·log10((1/40)·Σ_{n=0..39} c(n)^2)`, with a
+    `1e-30` `log10` floor so the all-zero corner stays finite.
+  - `GainPredictor::predict_only(c)` /
+    `predict_only_from_energy(e_db)` evaluate eq (69) + eq (71)
+    without advancing the history; return `PredictedGain { e_db,
+    e_tilde_db, g_c_prime }`.
+  - `GainPredictor::predict_and_update(c, gamma_hat)` /
+    `predict_and_update_from_energy(e_db, gamma_hat)` evaluate the
+    full per-subframe path and advance the history per eq (72)
+    decode form `Û^(m) = 20·log10(γ̂)`; return `(ĝ_c =
+    γ̂ · g'_c, PredictedGain)`.
+  - `GainPredictor::push_quantised_error(gamma_hat)` — low-level
+    eq (72) history advance, exposed for callers driving custom
+    loops (concealment paths).
+  - `FIXED_CODEBOOK_MEAN_ENERGY_DB = 30.0` (spec §3.9.1 `Ē`),
+    `GAIN_PREDICTOR_INIT_DB = -14.0` (spec Table 9), and
+    `CODEVECTOR_LEN = 40` (spec §3.8 / eq (66) averaging length)
+    as crate-public constants.
+- 13 new unit tests for the gain-predict path: Table 9 init shape;
+  first-subframe `Ẽ^(0)` matches `-14 · Σ b_i` from the staged Q13
+  coefficients; eq (66) at `-10 dB` for the 4-pulse codevector;
+  eq (66) finite on all-zero input; eq (71) `g'_c = 1` when
+  `Ẽ = E - Ē`; eq (72) decode form decibel scaling
+  (`γ̂ = 1.0 → 0 dB`, `γ̂ = 10 → 20 dB`, `γ̂ = 0.1 → -20 dB`);
+  non-positive `γ̂` floors to finite very-negative `Û^(m)`;
+  predict-and-update consistency vs side-by-side `predict_only`;
+  `predict_only` is side-effect-free; steady-state convergence
+  after `MA_NP` pushes with constant `γ̂`; history index 0 is the
+  most-recent (`b_1`-weighted) slot; eq (65) `ĝ_c = γ̂ · g'_c`
+  sweep across six `γ̂` values.
+- 1 new corpus integration test `gain_predict_finite_on_full_corpus`
+  that walks every `.BIT` file in
+  `docs/audio/g729/conformance/{g729-core,g729a}/`, runs
+  `reconstruct_frame_gains` per active frame, then drives a fresh
+  `GainPredictor` through the resulting `γ̂` sequence with a
+  representative 4-pulse codevector — asserts finite
+  `(g'_c, ĝ_c)` end-to-end, `ĝ_c ∈ [0, 1e6]` (defensive envelope
+  given the synthetic codevector understates real `E`), and finite
+  history slots after the eq (72) update.
 - Round 231 wires the §3.9.2 / §4.1.5 conjugate-structure gain-VQ
   decode-side reconstruction on top of the round-225 §4.1 parameter
   unpacker, in a new `oxideav_g729::gain_reconstruct` module:

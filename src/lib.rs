@@ -55,6 +55,17 @@
 //! index pair into the quantised `(ĝ_p, γ̂)` pair via spec
 //! eqs (73) / (74).
 //!
+//! Round 239 wires the §3.9.1 / §4.1.5 4th-order MA gain prediction
+//! stage that turns the round-231 correction factor `γ̂` into the
+//! actual quantised fixed-codebook gain `ĝ_c = γ̂ · g'_c`. A new
+//! [`gain_predict`] module holds the stateful 4-tap predictor (spec
+//! Table 9 / clause 4.3 init `Û^(k) = -14`), the eq (66) codevector
+//! energy `E = 10·log10((1/40)·Σ_{n=0..39} c(n)^2)`, the eq (69)
+//! 4-tap MA sum `Ẽ^(m) = Σ_{i=1..=4} b_i · Û^(m−i)`, the eq (71)
+//! exponential `g'_c = 10^((Ẽ^(m) + Ē − E)/20)` with `Ē = 30 dB`,
+//! and the eq (72) decode-form history advance
+//! `Û^(m) = 20·log10(γ̂)`.
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -82,6 +93,7 @@
 
 use oxideav_core::RuntimeContext;
 
+pub mod gain_predict;
 pub mod gain_reconstruct;
 pub mod lsp_interpolate;
 pub mod lsp_reconstruct;

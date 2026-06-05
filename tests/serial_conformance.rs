@@ -744,3 +744,98 @@ fn gain_reconstruct_in_domain_on_full_corpus() {
     assert!(walked > 0, "no .BIT files found under conformance root");
     assert!(active_total > 0, "no active frames processed");
 }
+
+/// Walks every `.BIT` file in `g729-core/` + `g729a/`, unpacks each
+/// active frame's parameters, runs `reconstruct_frame_gains` to
+/// obtain `(ĝ_p, γ̂)` for both subframes, and drives a fresh
+/// [`GainPredictor`] through the resulting `γ̂` sequence with a
+/// representative §3.8 4-pulse codevector each subframe. Asserts:
+///
+/// (a) every per-subframe prediction yields a finite `(g'_c, ĝ_c)`;
+/// (b) `ĝ_c` lies in a defensive envelope `0.0..=1.0e6` across the
+///     entire corpus (i.e. it is bounded and not infinity) — note
+///     that the synthetic `-10 dB` codevector understates real
+///     `E^(m)` so the predictor's `g'_c = 10^((Ẽ + Ē − E)/20)` runs
+///     larger than it would with the actual §3.8 codevector; the
+///     envelope is chosen to catch NaN/inf while leaving headroom
+///     for that overshoot;
+/// (c) the predictor's history slots stay finite end-to-end (a NaN /
+///     infinity from the eq (72) update path would propagate
+///     forever).
+///
+/// Note that `c(n)` is **not** decoded here — the §3.8 algebraic-
+/// codebook decode path is a future round. Using the minimum-energy
+/// 4-pulse shape (`E = -10 dB` per eq (66)) gives the predictor a
+/// stable, spec-shaped `E` value for every subframe so the test
+/// exercises the eq (66) → (69) → (71) → (72) chain end-to-end with
+/// realistic eq (69) MA history evolution from the actual decoded
+/// `γ̂` sequence.
+#[test]
+fn gain_predict_finite_on_full_corpus() {
+    use oxideav_g729::gain_predict::{GainPredictor, CODEVECTOR_LEN};
+    use oxideav_g729::gain_reconstruct::reconstruct_frame_gains;
+    let Some(root) = conformance_root() else {
+        eprintln!("skip: conformance corpus not present");
+        return;
+    };
+    // §3.8 minimum-energy 4-pulse codevector shape: four ±1 pulses
+    // placed on the spec Table 7 tracks. `E = 10·log10(4/40) = -10 dB`
+    // per eq (66).
+    let mut representative_c = [0.0_f32; CODEVECTOR_LEN];
+    representative_c[0] = 1.0;
+    representative_c[6] = -1.0;
+    representative_c[17] = 1.0;
+    representative_c[34] = -1.0;
+
+    let mut walked = 0usize;
+    let mut subframes_total = 0usize;
+    for variant in ["g729-core", "g729a"] {
+        let dir = root.join(variant);
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("BIT") {
+                continue;
+            }
+            let bit_bytes = std::fs::read(&path).unwrap();
+            let n = serial::frame_count(&bit_bytes).unwrap();
+            let label = format!("{variant}/{}", path.file_stem().unwrap().to_string_lossy());
+            let mut predictor = GainPredictor::new();
+            for f in 0..n {
+                let frame = &bit_bytes[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+                let kind = serial::parse_frame(frame).unwrap();
+                let Ok(params) = unpack_parameters(&kind) else {
+                    continue;
+                };
+                let pairs = reconstruct_frame_gains(&params).unwrap();
+                for (i, g) in pairs.iter().enumerate() {
+                    let (g_c_hat, path_pred) =
+                        predictor.predict_and_update(&representative_c, g.gamma_hat);
+                    assert!(
+                        g_c_hat.is_finite() && path_pred.g_c_prime.is_finite(),
+                        "{label} frame {f} sub{}: non-finite ĝ_c = {g_c_hat}",
+                        i + 1,
+                    );
+                    assert!(
+                        (0.0..=1.0e6).contains(&g_c_hat),
+                        "{label} frame {f} sub{}: ĝ_c = {g_c_hat} out of [0, 1e6]",
+                        i + 1,
+                    );
+                    for (k, slot) in predictor.history_db().iter().enumerate() {
+                        assert!(
+                            slot.is_finite(),
+                            "{label} frame {f} sub{}: history slot {k} non-finite ({slot})",
+                            i + 1,
+                        );
+                    }
+                    subframes_total += 1;
+                }
+            }
+            walked += 1;
+        }
+    }
+    assert!(walked > 0, "no .BIT files found under conformance root");
+    assert!(subframes_total > 0, "no subframes processed");
+}
