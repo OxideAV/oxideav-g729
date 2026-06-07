@@ -66,6 +66,21 @@
 //! and the eq (72) decode-form history advance
 //! `Û^(m) = 20·log10(γ̂)`.
 //!
+//! Round 249 wires the §3.9.3 gain-quantiser codeword-mapping layer
+//! that sits between the round-225 transmitted indices and the
+//! round-231 codebook lookup. A new [`gain_index_map`] module exposes
+//! [`gain_index_map::demap_ga`] / [`gain_index_map::demap_gb`] (the
+//! decode-side `imap1` / `imap2` inverse-permutation primitives that
+//! map the on-wire GA / GB indices back into the `0..NCODE1` /
+//! `0..NCODE2` codebook domain), the symmetric encode-side
+//! [`gain_index_map::map_ga`] / [`gain_index_map::map_gb`] forward
+//! permutations, and the per-frame [`gain_index_map::demap_frame`]
+//! wrapper that yields the four codebook indices in one call. The
+//! existing [`gain_reconstruct::reconstruct_frame_gains`] entry
+//! point now chains the demap step before the §3.9.2 lookup so the
+//! `(GA, GB) → (ĝ_p, γ̂)` pipeline is spec-conformant end-to-end
+//! from the on-wire bits.
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -93,6 +108,7 @@
 
 use oxideav_core::RuntimeContext;
 
+pub mod gain_index_map;
 pub mod gain_predict;
 pub mod gain_reconstruct;
 pub mod lsp_interpolate;

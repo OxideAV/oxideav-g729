@@ -8,6 +8,58 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 249 wires the §3.9.3 gain-quantiser codeword-mapping layer
+  between the round-225 transmitted-index unpacker and the round-231
+  conjugate-structure codebook lookup, in a new
+  `oxideav_g729::gain_index_map` module:
+  - `demap_ga(transmitted: usize) -> Result<usize, _>` and
+    `demap_gb(transmitted: usize) -> Result<usize, _>` — decoder-side
+    `imap1` / `imap2` inverse-permutation primitives that map the
+    on-wire GA / GB indices back into the codebook-index domain
+    (`0..NCODE1` and `0..NCODE2`).
+  - `map_ga(codebook: usize) -> Result<usize, _>` and
+    `map_gb(codebook: usize) -> Result<usize, _>` — encoder-side
+    `map1` / `map2` forward permutations, symmetric to the demap
+    primitives.
+  - `demap_frame(&Parameters) -> Result<DemappedGainIndices, _>` —
+    per-frame wrapper that demaps all four transmitted gain indices
+    in one call. `DemappedGainIndices` is a `Copy` struct carrying
+    `(ga1, gb1, ga2, gb2)` in the codebook-index domain.
+  - `GainIndexMapError` — typed surface for out-of-range inputs,
+    with `GaOutOfRange { index }` / `GbOutOfRange { index }`
+    variants. Implements `Display` + `std::error::Error`.
+- The existing `gain_reconstruct::reconstruct_frame_gains` entry
+  point now applies the §3.9.3 inverse permutation internally before
+  the §3.9.2 codebook lookup, so the `(GA, GB) → (ĝ_p, γ̂)` pipeline
+  is spec-conformant end-to-end from the on-wire bits. A new
+  `gain_reconstruct::reconstruct_gains_from_transmitted(t_ga, t_gb)`
+  helper exposes the same demap-then-reconstruct path as a per-pair
+  primitive for callers working off bare integers.
+- `gain_reconstruct::GainReconstructError` gains an
+  `IndexMap(GainIndexMapError)` variant + `From<GainIndexMapError>`
+  conversion, so demap failures from the per-frame / per-pair
+  wrappers surface through the existing error type without bypassing
+  it.
+- 17 new unit tests in the `gain_index_map` module: forward / inverse
+  round-trip on both stages and both compositions
+  (`map ∘ demap == id`, `demap ∘ map == id`); codebook-domain
+  containment of the demap output; bijection check on each demap;
+  out-of-range boundary on every entry point; non-identity assertion
+  on both demaps (locks against a CSV regression that emits the
+  identity table); per-frame wrapper threads the right indices into
+  the right stages; per-stage zero-index pin against the staged
+  `imap1[0]` / `imap2[0]` literals.
+- 3 new unit tests in `gain_reconstruct`: round-249 demap-before-
+  lookup property (the frame wrapper's output matches
+  `reconstruct_gains(demap_ga(t_ga), demap_gb(t_gb))` and explicitly
+  does not match the bare `reconstruct_gains(t_ga, t_gb)` when the
+  permutation is non-trivial); `reconstruct_gains_from_transmitted`
+  agrees with the hand-composed pipeline over the full transmitted
+  domain; out-of-range inputs surface through the `IndexMap` error
+  variant. The pre-existing `frame_wrapper_threads_per_subframe_indices`
+  test is updated to compose `demap_ga` / `demap_gb` in its expected-
+  value computation so it stays semantically correct.
+
 - Round 239 wires the §3.9.1 / §4.1.5 4th-order MA gain prediction
   stage on top of the round-231 conjugate-structure gain-VQ output,
   in a new `oxideav_g729::gain_predict` module:

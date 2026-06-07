@@ -48,6 +48,7 @@
 //! well inside `i32` range, the same for the GC column), so the
 //! summation cannot overflow.
 
+use crate::gain_index_map::{demap_frame, demap_ga, demap_gb, GainIndexMapError};
 use crate::parameters::Parameters;
 use crate::tables::{gain_ga_entry, gain_gb_entry, GAIN_VQ_COL_GC, GAIN_VQ_COL_GP, NCODE1, NCODE2};
 
@@ -98,12 +99,24 @@ pub enum GainReconstructError {
     /// well-formed frame cannot produce this error; it surfaces when
     /// callers pass a fabricated `Parameters` struct outside the
     /// spec-stated domain.
-    GaOutOfRange { index: usize },
+    GaOutOfRange {
+        /// The offending GA index.
+        index: usize,
+    },
     /// The supplied GB index does not fit in the
     /// [`crate::tables::NCODE2`]-row second-stage codebook. The
     /// transmitted GB codeword is only 4 bits per spec Table 8 so
     /// the same well-formed-frame guarantee applies.
-    GbOutOfRange { index: usize },
+    GbOutOfRange {
+        /// The offending GB index.
+        index: usize,
+    },
+    /// The §3.9.3 index-mapping step rejected an input index. Only
+    /// surfaced by [`reconstruct_frame_gains`] and any caller routing
+    /// transmitted-domain indices through the demap layer; the
+    /// codebook-domain [`reconstruct_gains`] never returns this
+    /// variant.
+    IndexMap(GainIndexMapError),
 }
 
 impl core::fmt::Display for GainReconstructError {
@@ -117,11 +130,18 @@ impl core::fmt::Display for GainReconstructError {
                 f,
                 "g729 §3.9.2 gain-VQ: GB index {index} >= NCODE2 = {NCODE2}",
             ),
+            Self::IndexMap(inner) => write!(f, "g729 §3.9.2 gain-VQ: {inner}"),
         }
     }
 }
 
 impl std::error::Error for GainReconstructError {}
+
+impl From<GainIndexMapError> for GainReconstructError {
+    fn from(err: GainIndexMapError) -> Self {
+        Self::IndexMap(err)
+    }
+}
 
 /// Reconstructs the quantised `(ĝ_p, γ̂)` pair from a (GA, GB)
 /// codebook-index pair per spec eqs (73) / (74).
@@ -164,25 +184,61 @@ pub fn reconstruct_gains(ga: usize, gb: usize) -> Result<QuantisedGains, GainRec
 /// for one frame straight from the typed [`Parameters`] struct
 /// returned by [`crate::parameters::unpack_parameters`].
 ///
+/// The four GA / GB fields of [`Parameters`] are **transmitted-domain**
+/// indices (raw bits off the wire). Per spec §3.9.3 the codebook
+/// indices are mapped through the `map1` / `map2` permutations before
+/// transmission, so the decode path must apply the inverse
+/// permutations (`imap1` / `imap2`, via
+/// [`crate::gain_index_map::demap_frame`]) before indexing the
+/// §3.9.2 codebooks. This wrapper performs that demap step internally,
+/// so callers can hand the unpacker output straight in and receive
+/// spec-conformant `(ĝ_p, γ̂)` pairs.
+///
 /// Returns a `[QuantisedGains; 2]` with index 0 = subframe 1 (from
 /// `GA1` / `GB1`) and index 1 = subframe 2 (from `GA2` / `GB2`),
 /// matching the spec §4.1.5 ordering. The GA / GB indices in
 /// `Parameters` are 3 / 4 bits respectively so the reconstruction
-/// cannot return a `GaOutOfRange` / `GbOutOfRange` error in
-/// practice; the return type still threads the error variant so
-/// callers handing in synthetic `Parameters` get the typed surface
-/// rather than a panic.
+/// cannot return a `GaOutOfRange` / `GbOutOfRange` / `IndexMap`
+/// error in practice; the return type still threads the error
+/// variant so callers handing in synthetic `Parameters` get the
+/// typed surface rather than a panic.
 ///
 /// # Errors
 ///
 /// Surfaces any [`GainReconstructError`] from the per-subframe
-/// [`reconstruct_gains`] call.
+/// demap-then-reconstruct call. Demap failures route through the
+/// [`GainReconstructError::IndexMap`] variant.
 pub fn reconstruct_frame_gains(
     params: &Parameters,
 ) -> Result<[QuantisedGains; 2], GainReconstructError> {
-    let sub1 = reconstruct_gains(usize::from(params.ga1), usize::from(params.gb1))?;
-    let sub2 = reconstruct_gains(usize::from(params.ga2), usize::from(params.gb2))?;
+    let demapped = demap_frame(params)?;
+    let sub1 = reconstruct_gains(demapped.ga1, demapped.gb1)?;
+    let sub2 = reconstruct_gains(demapped.ga2, demapped.gb2)?;
     Ok([sub1, sub2])
+}
+
+/// Decoder-side primitive that takes one **transmitted** (GA, GB)
+/// index pair, applies the §3.9.3 inverse permutation, and returns
+/// the §3.9.2 quantised `(ĝ_p, γ̂)` pair.
+///
+/// Equivalent to `demap_ga(transmitted_ga).and_then(|ga| demap_gb(...)
+/// .and_then(|gb| reconstruct_gains(ga, gb)))`, but the typed
+/// signature makes the call site self-document the domain of the
+/// inputs (transmitted, not codebook).
+///
+/// # Errors
+///
+/// Returns [`GainReconstructError::IndexMap`] if either input is
+/// outside the per-stage transmitted-index domain. The 3 / 4 bit
+/// codeword widths in spec Table 8 guarantee a well-formed frame
+/// cannot trigger this.
+pub fn reconstruct_gains_from_transmitted(
+    transmitted_ga: usize,
+    transmitted_gb: usize,
+) -> Result<QuantisedGains, GainReconstructError> {
+    let ga = demap_ga(transmitted_ga)?;
+    let gb = demap_gb(transmitted_gb)?;
+    reconstruct_gains(ga, gb)
 }
 
 #[cfg(test)]
@@ -322,8 +378,16 @@ mod tests {
     /// `(GA2, GB2)`. Crafted `Parameters` with distinct indices per
     /// subframe ensures the wrapper doesn't accidentally reuse
     /// subframe-1 values for subframe 2.
+    ///
+    /// The transmitted indices in `Parameters` go through the §3.9.3
+    /// inverse permutation before indexing the codebooks (round-249
+    /// wire-up); the expected per-subframe pairs are computed by
+    /// re-applying `demap_ga` / `demap_gb` so the test does not bake
+    /// in particular values of the staged permutation tables.
     #[test]
     fn frame_wrapper_threads_per_subframe_indices() {
+        use crate::gain_index_map::{demap_ga, demap_gb};
+
         let params = Parameters {
             l0: 0,
             l1: 0,
@@ -342,10 +406,115 @@ mod tests {
             gb2: 13,
         };
         let [sub1, sub2] = reconstruct_frame_gains(&params).unwrap();
-        let expected_sub1 = reconstruct_gains(1, 2).unwrap();
-        let expected_sub2 = reconstruct_gains(6, 13).unwrap();
+        let expected_sub1 = reconstruct_gains(
+            demap_ga(1).expect("in range"),
+            demap_gb(2).expect("in range"),
+        )
+        .unwrap();
+        let expected_sub2 = reconstruct_gains(
+            demap_ga(6).expect("in range"),
+            demap_gb(13).expect("in range"),
+        )
+        .unwrap();
         assert_eq!(sub1, expected_sub1);
         assert_eq!(sub2, expected_sub2);
+    }
+
+    /// Round-249 wire-up: `reconstruct_frame_gains` now applies the
+    /// §3.9.3 inverse permutation before the §3.9.2 codebook lookup.
+    /// A transmitted-index pair `(t_ga, t_gb)` therefore matches the
+    /// codebook-index reconstruction at `(imap1[t_ga], imap2[t_gb])`,
+    /// and explicitly does NOT match the bare `(t_ga, t_gb)` lookup
+    /// when the permutation is non-trivial.
+    #[test]
+    fn frame_wrapper_demaps_before_codebook_lookup() {
+        use crate::gain_index_map::{demap_ga, demap_gb};
+
+        // pick a transmitted-domain pair where the §3.9.3 inverse
+        // permutation maps to a different codebook-domain pair.
+        let mut transmitted: Option<(u8, u8)> = None;
+        for t_ga in 0..NCODE1 {
+            for t_gb in 0..NCODE2 {
+                let c_ga = demap_ga(t_ga).unwrap();
+                let c_gb = demap_gb(t_gb).unwrap();
+                if (c_ga, c_gb) != (t_ga, t_gb) {
+                    transmitted = Some((t_ga as u8, t_gb as u8));
+                    break;
+                }
+            }
+            if transmitted.is_some() {
+                break;
+            }
+        }
+        let (t_ga, t_gb) = transmitted.expect("non-identity permutation");
+
+        let params = Parameters {
+            l0: 0,
+            l1: 0,
+            l2: 0,
+            l3: 0,
+            p1: 0,
+            p0: 0,
+            c1: 0,
+            s1: 0,
+            ga1: t_ga,
+            gb1: t_gb,
+            p2: 0,
+            c2: 0,
+            s2: 0,
+            ga2: t_ga,
+            gb2: t_gb,
+        };
+        let [sub1, _] = reconstruct_frame_gains(&params).unwrap();
+        let codebook_pair = reconstruct_gains(
+            demap_ga(usize::from(t_ga)).unwrap(),
+            demap_gb(usize::from(t_gb)).unwrap(),
+        )
+        .unwrap();
+        let transmitted_pair = reconstruct_gains(usize::from(t_ga), usize::from(t_gb)).unwrap();
+        assert_eq!(sub1, codebook_pair);
+        assert_ne!(sub1, transmitted_pair);
+    }
+
+    /// `reconstruct_gains_from_transmitted` is the explicit
+    /// transmitted-domain entry point: it must agree with the
+    /// hand-composed `reconstruct_gains(demap_ga(t)?, demap_gb(t)?)`
+    /// pipeline for every (GA, GB) pair in the transmitted domain.
+    #[test]
+    fn reconstruct_from_transmitted_matches_manual_pipeline() {
+        use crate::gain_index_map::{demap_ga, demap_gb};
+
+        for t_ga in 0..NCODE1 {
+            for t_gb in 0..NCODE2 {
+                let via_helper = reconstruct_gains_from_transmitted(t_ga, t_gb).unwrap();
+                let via_pipeline =
+                    reconstruct_gains(demap_ga(t_ga).unwrap(), demap_gb(t_gb).unwrap()).unwrap();
+                assert_eq!(via_helper, via_pipeline, "mismatch at ({t_ga}, {t_gb})");
+            }
+        }
+    }
+
+    /// Out-of-range transmitted GA index surfaces through the
+    /// [`GainReconstructError::IndexMap`] variant. The 3-bit GA
+    /// codeword guarantees a well-formed frame never hits this.
+    #[test]
+    fn reconstruct_from_transmitted_rejects_out_of_range_ga() {
+        let err = reconstruct_gains_from_transmitted(NCODE1, 0).unwrap_err();
+        assert_eq!(
+            err,
+            GainReconstructError::IndexMap(GainIndexMapError::GaOutOfRange { index: NCODE1 }),
+        );
+    }
+
+    /// Out-of-range transmitted GB index surfaces through the
+    /// [`GainReconstructError::IndexMap`] variant.
+    #[test]
+    fn reconstruct_from_transmitted_rejects_out_of_range_gb() {
+        let err = reconstruct_gains_from_transmitted(0, NCODE2).unwrap_err();
+        assert_eq!(
+            err,
+            GainReconstructError::IndexMap(GainIndexMapError::GbOutOfRange { index: NCODE2 }),
+        );
     }
 
     /// Column convention: column 0 (`GAIN_VQ_COL_GP`) is Q14 and is

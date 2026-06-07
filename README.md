@@ -82,7 +82,21 @@ predicted energy `Ẽ^(m)` (eq (69), the 4-tap MA dot product
 gain `g'_c` (eq (71), `10^((Ẽ + Ē - E)/20)` with
 `Ē = 30 dB`), and finally the quantised fixed-codebook
 gain `ĝ_c = γ̂ · g'_c` (eq (65)), then advances the history
-per eq (72) decode form `Û^(m) = 20·log10(γ̂)`.
+per eq (72) decode form `Û^(m) = 20·log10(γ̂)`; round 249
+ties the round-225 transmitted-index unpacker to the round-231
+codebook lookup by way of the §3.9.3 codeword-mapping layer —
+a new `gain_index_map` module exposes `demap_ga` / `demap_gb`
+(the `imap1` / `imap2` inverse permutations that turn on-wire
+indices into codebook-domain indices), `map_ga` / `map_gb`
+(the symmetric encoder-side forward permutations), and
+`demap_frame` (the per-frame wrapper that demaps all four
+gain indices in one call); the existing
+`gain_reconstruct::reconstruct_frame_gains` is wired through
+this layer so the decode chain is spec-conformant from the
+on-wire bits, and a new
+`gain_reconstruct::reconstruct_gains_from_transmitted` helper
+exposes the same demap-then-reconstruct path as a per-pair
+primitive.
 
 All numeric values are compiled at build time by `build.rs` from CSVs
 under `tables/`, themselves byte-for-byte copies of the spec-role-named
@@ -608,6 +622,105 @@ predict_and_update(c, γ̂) → (ĝ_c, gain_path) → §3.10 excitation
 decode path that produces `c(n)` is the remaining piece needed
 to drive the predictor with real fixed-codebook contributions.
 
+### Round 249 — §3.9.3 gain-quantiser codeword mapping
+
+A new `oxideav_g729::gain_index_map` module ties the round-225
+transmitted-index unpacker output to the round-231 codebook lookup
+via the spec §3.9.3 robustness mapping. Per clause 3.9.3:
+
+> "The codewords GA and GB for the gain quantizer are obtained from
+> the indices corresponding to the best choice. To reduce the impact
+> of single bit errors the codebook indices are mapped."
+
+The spec prose stops there; the actual permutation is given by the
+staged `map1` / `map2` (encoder-side, codebook→transmitted) and
+`imap1` / `imap2` (decoder-side, transmitted→codebook) tables, whose
+mutual-inverse property is pinned by the `tables_shape` integration
+test.
+
+- `demap_ga(transmitted: usize) -> Result<usize, _>` and
+  `demap_gb(transmitted: usize) -> Result<usize, _>` — decoder-side
+  primitives that index `GAIN_QUANT_GA_INVERSE_PERMUTATION` /
+  `GAIN_QUANT_GB_INVERSE_PERMUTATION` with bounds-checked input;
+  out-of-range surfaces as `GainIndexMapError::{GaOutOfRange,
+  GbOutOfRange}` rather than panicking.
+- `map_ga(codebook: usize) -> Result<usize, _>` and
+  `map_gb(codebook: usize) -> Result<usize, _>` — the symmetric
+  encoder-side forward permutations. Round-tripping
+  `demap_ga(map_ga(i)?) == Ok(i)` (and the reverse composition) is
+  pinned by the unit tests across the full per-stage domain.
+- `demap_frame(&Parameters) -> Result<DemappedGainIndices, _>` —
+  per-frame wrapper that demaps the four gain indices in one call.
+  `DemappedGainIndices` is a `Copy` struct carrying
+  `(ga1, gb1, ga2, gb2)` in the codebook-index domain, ready to
+  feed `gain_reconstruct::reconstruct_gains`.
+
+The existing `gain_reconstruct::reconstruct_frame_gains` is now
+wired through `demap_frame` before the §3.9.2 codebook lookup, so
+the on-wire `(GA, GB) → (ĝ_p, γ̂)` pipeline is spec-conformant
+end-to-end. A new
+`gain_reconstruct::reconstruct_gains_from_transmitted(t_ga, t_gb)`
+helper exposes the same demap-then-reconstruct path as a per-pair
+primitive for callers working off bare integers. The
+`GainReconstructError` enum gains an `IndexMap(GainIndexMapError)`
+variant + `From<GainIndexMapError>` conversion so demap failures
+surface through the existing error type without bypassing it.
+
+17 new unit tests in the `gain_index_map` module pin the algorithmic
+invariants:
+
+- forward / inverse round-trip on both stages and both compositions
+  (`map ∘ demap == id` and `demap ∘ map == id` across the full
+  per-stage domain);
+- codebook-domain containment of every demap output;
+- bijection check on each demap (cover of the codebook domain);
+- out-of-range boundary on every entry point;
+- non-identity assertion on both demaps (locks against a CSV
+  regression that emits `[0, 1, ...]` for either `imap` table);
+- per-frame wrapper threads the right transmitted indices into the
+  right stages without swapping `(ga, gb)` columns or reusing
+  subframe-1 values in subframe 2;
+- per-stage zero-index match against the staged `imap1[0]` /
+  `imap2[0]` literals (ties the function contract directly to the
+  staged table rather than baking the literal in the test).
+
+3 new unit tests in `gain_reconstruct` pin the round-249 wire-up:
+
+- `frame_wrapper_demaps_before_codebook_lookup` finds a
+  transmitted-domain pair `(t_ga, t_gb)` where the §3.9.3 inverse
+  permutation maps to a different codebook-domain pair, then asserts
+  the frame wrapper's output matches `reconstruct_gains(demap_ga(t_ga),
+  demap_gb(t_gb))` and explicitly does NOT match the bare
+  `reconstruct_gains(t_ga, t_gb)`;
+- `reconstruct_from_transmitted_matches_manual_pipeline` agrees with
+  the hand-composed `reconstruct_gains(demap_ga(t)?, demap_gb(t)?)`
+  pipeline for every `(GA, GB)` pair in the transmitted domain;
+- `reconstruct_from_transmitted_rejects_out_of_range_{ga,gb}` —
+  out-of-range inputs surface through the `IndexMap` error variant.
+
+The pre-existing `frame_wrapper_threads_per_subframe_indices` test
+is updated to compose `demap_ga` / `demap_gb` in its expected-value
+computation so it stays semantically correct under the new wiring.
+
+The staged `gain_predict_finite_on_full_corpus` /
+`gain_reconstruct_in_domain_on_full_corpus` integration tests
+continue to pass with no envelope change: every (GA, GB) pair stays
+inside the `ĝ_p ∈ [0, 2]` / `γ̂ ∈ [0, 11]` window regardless of
+which permutation is applied to its row labels, so the corpus
+walker was insensitive to the missing demap step. The bit-exact
+match against the ITU conformance corpus's expected reconstructed-
+gain trace is the cross-check that surfaces the demap correctness
+itself; that integration is left for a follow-up round once the
+§3.7 + §3.8 decode paths land and a full subframe-level decode
+trace can be compared.
+
+With round 249 the §4.1.5 gain decode is spec-conformant from the
+on-wire bits forward: `serial::parse_frame` →
+`parameters::unpack_parameters` → `(transmitted GA, GB)` →
+`gain_index_map::demap_frame` → `(codebook GA, GB)` →
+`gain_reconstruct::reconstruct_gains` → `(ĝ_p, γ̂)` →
+`gain_predict::predict_and_update` → `(ĝ_p, ĝ_c)`.
+
 ## What is NOT wired up
 
 Every decode/encode entry point still returns `Error::NotImplemented`.
@@ -618,14 +731,16 @@ under `docs/audio/g729/tables/` but are not yet compiled in; the
 Implementer leaves them out until the docs collaborator's
 specifier pass clarifies the per-clause wire-up direction.
 
-With round 239 the §4.1 / Table-8 parameter unpacker chains the
+With round 249 the §4.1 / Table-8 parameter unpacker chains the
 round-191 framing layer to the §3.2.4 / §3.2.5 / §3.2.6 LSP
 decode chain AND the §3.9.2 / §4.1.5 gain VQ decode chain AND
-the §3.9.1 / §4.1.5 gain-prediction stage end-to-end:
+the §3.9.1 / §4.1.5 gain-prediction stage AND the §3.9.3
+codeword-mapping robustness layer end-to-end:
 `serial::parse_frame` → `parameters::unpack_parameters` →
 `(L0, L1, L2, L3)` → `LspReconstructor::reconstruct_frame` →
 `LspInterpolator::interpolate` → `lsp_to_lp` per subframe,
-with `(GA1, GB1, GA2, GB2)` →
+with `(transmitted GA1, GB1, GA2, GB2)` →
+`gain_index_map::demap_frame` → `(codebook GA, GB)` →
 `gain_reconstruct::reconstruct_frame_gains` →
 `gain_predict::GainPredictor::predict_and_update` yielding the
 per-subframe `(ĝ_p, ĝ_c)` pairs. The remaining transmitted
