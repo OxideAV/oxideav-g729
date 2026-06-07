@@ -839,3 +839,161 @@ fn gain_predict_finite_on_full_corpus() {
     assert!(walked > 0, "no .BIT files found under conformance root");
     assert!(subframes_total > 0, "no subframes processed");
 }
+
+/// Walks every `.BIT` file in `g729-core/` + `g729a/`, unpacks each
+/// active frame's parameters, and runs the round-255 §4.1.3 pitch
+/// decode on the resulting `(P1, P2)` indices. Asserts that every
+/// decoded pitch delay lies in the spec-stated domain:
+///
+/// (a) `T1`: `int(T1) ∈ [20, 143]` and `frac ∈ {-1, 0, 1}` per spec
+///     §3.7 / §4.1.3 image `f0027-01.jpg`;
+/// (b) `T2`: `int(T2) ∈ [t_min − 1, t_min + 10]` (the
+///     fractional-extreme rounding pushes the integer one step past
+///     the integer-window edge) and `frac ∈ {-1, 0, 1}` per spec
+///     image `f0027-03.jpg`;
+/// (c) `t_min ∈ [20, 134]` (the §3.7 search-window envelope).
+///
+/// Per spec §3.7 the 8-bit `P1` field covers `0..256` exactly and the
+/// 5-bit `P2` field covers `0..32` exactly, so a domain mismatch on
+/// any active frame would surface here. The minimum-coverage assertion
+/// at the bottom guards against a future regression that quietly stops
+/// walking the corpus.
+#[test]
+fn pitch_decode_in_domain_on_full_corpus() {
+    use oxideav_g729::pitch_decode::{decode_frame, T_MAX_CEIL, T_MIN_FLOOR, T_WINDOW};
+    let Some(root) = conformance_root() else {
+        eprintln!("skip: conformance corpus not present");
+        return;
+    };
+    let mut walked = 0usize;
+    let mut active_total = 0usize;
+    for variant in ["g729-core", "g729a"] {
+        let dir = root.join(variant);
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("BIT") {
+                continue;
+            }
+            let bit_bytes = std::fs::read(&path).unwrap();
+            let n = serial::frame_count(&bit_bytes).unwrap();
+            let label = format!("{variant}/{}", path.file_stem().unwrap().to_string_lossy());
+            let mut active = 0usize;
+            for f in 0..n {
+                let frame = &bit_bytes[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+                let kind = serial::parse_frame(frame).unwrap();
+                let Ok(params) = unpack_parameters(&kind) else {
+                    continue;
+                };
+                active += 1;
+                let pd = decode_frame(&params);
+                assert!(
+                    (19..=143).contains(&pd.t1.int_t),
+                    "{label} frame {f}: int(T1)={} outside spec [19, 143]",
+                    pd.t1.int_t,
+                );
+                assert!(
+                    (-1..=1).contains(&pd.t1.frac),
+                    "{label} frame {f}: T1 frac={} outside spec {{-1, 0, 1}}",
+                    pd.t1.frac,
+                );
+                assert!(
+                    (T_MIN_FLOOR..=(T_MAX_CEIL - T_WINDOW)).contains(&pd.t_min),
+                    "{label} frame {f}: t_min={} outside spec [20, 134]",
+                    pd.t_min,
+                );
+                assert!(
+                    (pd.t_min - 1..=pd.t_min + T_WINDOW + 1).contains(&pd.t2.int_t),
+                    "{label} frame {f}: int(T2)={} outside spec [t_min-1={}, t_min+10={}]",
+                    pd.t2.int_t,
+                    pd.t_min - 1,
+                    pd.t_min + T_WINDOW + 1,
+                );
+                assert!(
+                    (-1..=1).contains(&pd.t2.frac),
+                    "{label} frame {f}: T2 frac={} outside spec {{-1, 0, 1}}",
+                    pd.t2.frac,
+                );
+            }
+            assert!(active > 0, "{label}: no active frames");
+            active_total += active;
+            walked += 1;
+        }
+    }
+    assert!(walked > 0, "no .BIT files found under conformance root");
+    assert!(active_total > 0, "no active frames processed");
+}
+
+/// Walks the staged `PITCH.BIT` sequence (the ITU `READMETV.txt`
+/// self-documents this as the pitch-delay exerciser) for both the
+/// `g729-core/` base codec and the `g729a/` Annex-A corpus, runs the
+/// §4.1.3 decode on every active frame, and pins that the **encode
+/// inverse** of every decoded `(T1, T2)` round-trips to the original
+/// `(P1, P2)` codewords exactly. This is the strongest in-corpus
+/// guarantee available without a known-good reference output: the
+/// only way for a frame to fail is for the eq (78a) / eq (79) /
+/// eq (80) decode recipe to disagree with the eq (41) / eq (42)
+/// encode recipe on a real ITU-encoded frame.
+#[test]
+fn pitch_decode_round_trips_pitch_corpus() {
+    use oxideav_g729::pitch_decode::{decode_frame, encode_p1, encode_p2};
+    let Some(root) = conformance_root() else {
+        eprintln!("skip: conformance corpus not present");
+        return;
+    };
+    let mut variants_walked = 0usize;
+    let mut active_total = 0usize;
+    for variant in ["g729-core", "g729a"] {
+        let path = root.join(variant).join("PITCH.BIT");
+        if !path.is_file() {
+            continue;
+        }
+        let bit_bytes = std::fs::read(&path).unwrap();
+        let n = serial::frame_count(&bit_bytes).unwrap();
+        let mut active = 0usize;
+        for f in 0..n {
+            let frame = &bit_bytes[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+            let kind = serial::parse_frame(frame).unwrap();
+            let Ok(params) = unpack_parameters(&kind) else {
+                continue;
+            };
+            active += 1;
+            let pd = decode_frame(&params);
+            let re_p1 = encode_p1(pd.t1).unwrap_or_else(|| {
+                panic!(
+                    "{variant}/PITCH frame {f}: encode_p1 rejected decoded T1={:?}",
+                    pd.t1
+                )
+            });
+            assert_eq!(
+                re_p1, params.p1,
+                "{variant}/PITCH frame {f}: P1 round-trip mismatch (decoded T1={:?})",
+                pd.t1,
+            );
+            let re_p2 = encode_p2(pd.t2, pd.t_min).unwrap_or_else(|| {
+                panic!(
+                    "{variant}/PITCH frame {f}: encode_p2 rejected decoded T2={:?} t_min={}",
+                    pd.t2, pd.t_min,
+                )
+            });
+            assert_eq!(
+                re_p2, params.p2,
+                "{variant}/PITCH frame {f}: P2 round-trip mismatch (decoded T2={:?} t_min={})",
+                pd.t2, pd.t_min,
+            );
+        }
+        assert!(
+            active > 0,
+            "{variant}/PITCH: no active frames in corpus walker",
+        );
+        active_total += active;
+        variants_walked += 1;
+    }
+    assert!(
+        variants_walked > 0,
+        "PITCH.BIT not present under conformance root",
+    );
+    assert!(active_total > 0, "no active frames processed");
+}

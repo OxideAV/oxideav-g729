@@ -81,6 +81,21 @@
 //! `(GA, GB) → (ĝ_p, γ̂)` pipeline is spec-conformant end-to-end
 //! from the on-wire bits.
 //!
+//! Round 255 wires the §4.1.3 pitch-delay decode that maps the
+//! transmitted `(P1, P2)` indices into per-subframe fractional
+//! pitch delays `(T1, T2)`. A new [`pitch_decode`] module exposes
+//! [`pitch_decode::decode_t1_from_p1`] (spec image `f0027-01.jpg`
+//! — `if P1 < 197: int(T1) = (P1+2)/3 + 19`, `frac = P1 −
+//! 3·int(T1) + 58`, else `int(T1) = P1 − 112`, `frac = 0`),
+//! [`pitch_decode::derive_t_min`] (spec image `f0027-02.jpg` —
+//! the ±5 / [20, 143] subframe-2 search-window derivation),
+//! [`pitch_decode::decode_t2_from_p2`] (spec image `f0027-03.jpg`
+//! — `int(T2) = (P2+2)/3 − 1 + t_min`, `frac = P2 − 2 −
+//! 3·((P2+2)/3 − 1)`), and the per-frame
+//! [`pitch_decode::decode_frame`] wrapper that chains them in
+//! spec §4.1.3 order against the round-225
+//! [`parameters::Parameters`] struct.
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -115,6 +130,7 @@ pub mod lsp_interpolate;
 pub mod lsp_reconstruct;
 pub mod lsp_to_lp;
 pub mod parameters;
+pub mod pitch_decode;
 pub mod serial;
 pub mod tables;
 

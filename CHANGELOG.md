@@ -8,6 +8,83 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 255 wires the §4.1.3 pitch-delay decode that maps the
+  transmitted `(P1, P2)` indices into per-subframe fractional pitch
+  delays `(T1, T2)`, in a new `oxideav_g729::pitch_decode` module:
+  - `decode_t1_from_p1(p1: u8) -> PitchDelay` evaluates spec image
+    `f0027-01.jpg` (clause 4.1.3): `if P1 < 197 then int(T1) =
+    (P1 + 2) / 3 + 19`, `frac = P1 − 3·int(T1) + 58`; `else
+    int(T1) = P1 − 112`, `frac = 0`. Total spec coverage of the
+    8-bit `P1` field is the union of a fractional branch (1/3
+    resolution over `T1 ∈ [19⅓, 85]`) and an integer-only branch
+    (over `T1 ∈ [86, 143]`).
+  - `derive_t_min(int_t1: i32) -> i32` evaluates spec image
+    `f0027-02.jpg`: `t_min = int(T1) − 5`, floor at `20`, ceiling
+    at `t_max = 143` then `t_min = t_max − 9`. The output is in
+    `[20, 134]` across the full `int(T1) ∈ [19, 143]` decode
+    range.
+  - `decode_t2_from_p2(p2: u8, t_min: i32) -> PitchDelay`
+    evaluates spec image `f0027-03.jpg`: `int(T2) = (P2 + 2) / 3
+    − 1 + t_min`, `frac = P2 − 2 − 3·((P2 + 2) / 3 − 1)`. The
+    5-bit `P2` field covers the 1/3-resolution `T2 ∈
+    [t_min − 1/3, t_max + 1/3]` window exactly.
+  - `decode_frame(&Parameters) -> FramePitchDelays` — per-frame
+    wrapper that chains `decode_t1_from_p1` → `derive_t_min` →
+    `decode_t2_from_p2` in the spec §4.1.3 order. The returned
+    `FramePitchDelays` is a `Copy` struct carrying `t1`, `t2`,
+    and the spec `t_min` (preserved for callers driving the
+    §4.1.2 parity-concealment path).
+  - `encode_p1(delay) -> Option<u8>` and `encode_p2(delay, t_min)
+    -> Option<u8>` — the spec §3.7 encode-side forward mappings
+    (eqs (41) / (42), spec images `eq41.jpg` / `eq42.jpg`)
+    exposed publicly so callers (encoders, fixture builders) can
+    round-trip the pair without re-deriving the algebra. They
+    return `None` for out-of-domain `(int_t, frac)` pairs.
+  - `PitchDelay` — `Copy` struct carrying `int_t` (the integer
+    part of the fractional pitch delay) and `frac ∈ {-1, 0, 1}`
+    (the spec §3.7 1/3-resolution fractional component). The
+    full-precision pitch delay is `int_t + frac/3`.
+  - `FramePitchDelays`, `T_MIN_FLOOR = 20`, `T_MAX_CEIL = 143`,
+    `T_WINDOW = 9`, `P1_DOMAIN = 256`, `P2_DOMAIN = 32`,
+    `P1_FRACTIONAL_LIMIT = 197` — public surface constants.
+- 13 new unit tests in `src/pitch_decode.rs`: spec-image worked
+  examples on `decode_t1_from_p1` boundaries (`P1 ∈ {0, 1, 196,
+  197, 255}`), full-domain envelope check on `decode_t1_from_p1`
+  (every `P1 ∈ 0..256` lands in `int(T1) ∈ [19, 143]`, `frac ∈
+  {-1, 0, 1}`); spec-image worked examples on `derive_t_min`
+  (mid-range, floor edge, ceiling edge), full-domain envelope
+  check on `derive_t_min` (the entire 9-step subframe-2 search
+  window fits inside `[20, 143]` for every `int(T1) ∈ [19, 143]`);
+  spec-image worked examples on `decode_t2_from_p2` (`P2 ∈ {0, 2,
+  31}` at `t_min = 50`), full-domain envelope check (`P2 ∈ 0..32`
+  × `t_min ∈ [20, 134]` always lands in `int(T2) ∈ [t_min − 1,
+  t_min + 10]`, `frac ∈ {-1, 0, 1}`); encode↔decode round-trip
+  over the **full `P1 ∈ 0..256` domain** (pins both the eq (78a)
+  decode and the eq (41) encode simultaneously); same over the
+  full `P2 ∈ 0..32` × `t_min ∈ [20, 134]` domain; encode-side
+  out-of-domain rejection on both `P1` and `P2`;
+  `decode_frame` threads the right field into the right subframe
+  (P1↔P2 swap detection); constants match the documented spec
+  values.
+- 2 new integration tests in `tests/serial_conformance.rs` against
+  the staged conformance corpus:
+  - `pitch_decode_in_domain_on_full_corpus` walks every `.BIT`
+    file in `g729-core/` + `g729a/`, unpacks each active frame's
+    `Parameters`, runs `decode_frame`, and pins that every decoded
+    `(T1, T2, t_min)` lies in the spec-stated domain: `int(T1) ∈
+    [19, 143]`, `t_min ∈ [20, 134]`, `int(T2) ∈ [t_min − 1,
+    t_min + 10]`, and both `frac` components in `{-1, 0, 1}`.
+  - `pitch_decode_round_trips_pitch_corpus` walks the staged
+    `PITCH.BIT` sequence (the ITU `READMETV.txt` self-documents
+    this as the pitch-delay exerciser) for both the `g729-core/`
+    base codec and the `g729a/` Annex-A corpus, runs `decode_frame`
+    on every active frame, and pins that `encode_p1(t1) == params.p1`
+    and `encode_p2(t2, t_min) == params.p2` exactly. This is the
+    strongest in-corpus guarantee available without a known-good
+    reference output: the only way a frame can fail is for the
+    eq (78a) / eq (79) / eq (80) decode recipe to disagree with
+    the eq (41) / eq (42) encode recipe on an ITU-encoded frame.
+
 - Round 249 wires the §3.9.3 gain-quantiser codeword-mapping layer
   between the round-225 transmitted-index unpacker and the round-231
   conjugate-structure codebook lookup, in a new

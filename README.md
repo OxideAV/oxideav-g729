@@ -96,7 +96,19 @@ this layer so the decode chain is spec-conformant from the
 on-wire bits, and a new
 `gain_reconstruct::reconstruct_gains_from_transmitted` helper
 exposes the same demap-then-reconstruct path as a per-pair
-primitive.
+primitive; round 255 wires the §4.1.3 pitch-delay decode in a
+new `pitch_decode` module that maps the transmitted `(P1, P2)`
+indices into per-subframe fractional pitch delays via
+`decode_t1_from_p1` (spec image `f0027-01.jpg` — `if P1 < 197:
+int(T1) = (P1+2)/3 + 19`, `frac = P1 − 3·int(T1) + 58`, else
+`int(T1) = P1 − 112`, `frac = 0`), `derive_t_min` (spec image
+`f0027-02.jpg` — the `±5 / [20, 143]` subframe-2 search-window
+derivation), `decode_t2_from_p2` (spec image `f0027-03.jpg` —
+`int(T2) = (P2+2)/3 − 1 + t_min`, `frac = P2 − 2 − 3·((P2+2)/3
+− 1)`), and the per-frame `decode_frame` wrapper that chains
+them in spec §4.1.3 order, with the symmetric `encode_p1` /
+`encode_p2` forward mappings (spec eqs (41) / (42)) exposed for
+encoder wire-up and the corpus-walking round-trip test.
 
 All numeric values are compiled at build time by `build.rs` from CSVs
 under `tables/`, themselves byte-for-byte copies of the spec-role-named
@@ -721,6 +733,97 @@ on-wire bits forward: `serial::parse_frame` →
 `gain_reconstruct::reconstruct_gains` → `(ĝ_p, γ̂)` →
 `gain_predict::predict_and_update` → `(ĝ_p, ĝ_c)`.
 
+### Round 255 — §4.1.3 pitch-delay decode
+
+A new `oxideav_g729::pitch_decode` module ties the round-225
+unpacker's transmitted `P1` / `P2` codewords into the per-subframe
+fractional pitch delays `(T1, T2)` that the §3.7 eq (40) `b_30`
+adaptive-codebook interpolator consumes:
+
+- `decode_t1_from_p1(p1: u8) -> PitchDelay` evaluates spec image
+  `f0027-01.jpg` (clause 4.1.3): the union of a fractional branch
+  (`P1 < 197`, 1/3-resolution `T1 ∈ [19⅓, 85]`) and an
+  integer-only branch (`P1 ≥ 197`, `T1 ∈ [86, 143]`). Every
+  `P1 ∈ 0..256` codeword maps to a unique `(int_t, frac)` pair.
+- `derive_t_min(int_t1: i32) -> i32` evaluates spec image
+  `f0027-02.jpg`: clamps the subframe-2 search window's lower
+  bound into `[T_MIN_FLOOR = 20, T_MAX_CEIL − T_WINDOW = 134]`
+  per the spec recipe (`t_min = int(T1) − 5`, floor at 20,
+  pulled down by `t_max = 143` − 9 if `int(T1)` is near the
+  ceiling).
+- `decode_t2_from_p2(p2: u8, t_min: i32) -> PitchDelay` evaluates
+  spec image `f0027-03.jpg`: every `P2 ∈ 0..32` codeword maps to
+  a unique `(int_t, frac)` pair inside `int(T2) ∈ [t_min − 1,
+  t_min + 10]`, `frac ∈ {-1, 0, 1}`.
+- `decode_frame(&Parameters) -> FramePitchDelays` — per-frame
+  wrapper that chains the three steps in spec §4.1.3 order.
+  Returns the per-subframe pitch delays AND the spec-derived
+  `t_min` (preserved for callers driving the §4.1.2
+  parity-concealment path).
+- `encode_p1(delay) -> Option<u8>` and `encode_p2(delay, t_min)
+  -> Option<u8>` — the spec §3.7 encode-side forward mappings
+  (eqs (41) / (42) per spec images `eq41.jpg` / `eq42.jpg`)
+  exposed publicly. The unit-test suite uses them for full-domain
+  round-trip; encoder wire-up will use them in a future round.
+
+13 unit tests pin the algorithmic invariants:
+
+- Spec-image worked examples on `decode_t1_from_p1` (every
+  branch boundary `P1 ∈ {0, 1, 196, 197, 255}` pinned literally);
+- full-domain envelope on `decode_t1_from_p1` (every `P1 ∈
+  0..256` lands in `int(T1) ∈ [19, 143]`, `frac ∈ {-1, 0, 1}`);
+- spec-image worked examples on `derive_t_min` (mid-range, floor
+  edge, ceiling edge);
+- full-domain envelope on `derive_t_min` (the entire 9-step
+  subframe-2 search window fits inside `[20, 143]` for every
+  `int(T1) ∈ [19, 143]`);
+- spec-image worked examples on `decode_t2_from_p2` (`P2 ∈ {0,
+  2, 31}` at `t_min = 50`);
+- full-domain envelope on `decode_t2_from_p2` (`P2 ∈ 0..32` ×
+  `t_min ∈ [20, 134]` always lands inside the spec-stated
+  `(int_t, frac)` window);
+- **encode↔decode round-trip across the full `P1 ∈ 0..256`
+  domain** — pins both the eq (78a) decode and the eq (41)
+  encode recipes simultaneously; any sign / off-by-one drift
+  in either direction trips the round-trip;
+- **encode↔decode round-trip across the full `P2 ∈ 0..32` ×
+  `t_min ∈ [20, 134]` domain** — same property for the
+  subframe-2 differential mapping;
+- encode-side out-of-domain rejection on both `encode_p1` and
+  `encode_p2`;
+- `decode_frame` threads the right field into the right
+  subframe (P1↔P2 swap detection);
+- constants surface (`T_MIN_FLOOR = 20`, `T_MAX_CEIL = 143`,
+  `T_WINDOW = 9`, `P1_DOMAIN = 256`, `P2_DOMAIN = 32`,
+  `P1_FRACTIONAL_LIMIT = 197`) matches the documented spec
+  values.
+
+2 integration tests against the staged conformance corpus:
+
+- `pitch_decode_in_domain_on_full_corpus` walks every `.BIT`
+  file in `g729-core/` + `g729a/`, unpacks each active frame's
+  `Parameters`, runs `decode_frame`, and pins that every decoded
+  `(T1, T2, t_min)` lies in the spec-stated domain.
+- `pitch_decode_round_trips_pitch_corpus` walks the staged
+  `PITCH.BIT` sequence (the ITU `READMETV.txt` self-documents
+  this as the pitch-delay exerciser) for both `g729-core/` and
+  `g729a/`, runs `decode_frame` on every active frame, and pins
+  that `encode_p1(t1) == params.p1` and `encode_p2(t2, t_min) ==
+  params.p2` exactly. This is the strongest in-corpus guarantee
+  available without a known-good reference output: a single
+  frame failing means the decode and encode recipes disagree on
+  an ITU-encoded frame.
+
+With round 255 the §4.1 decode chain extends another link from the
+on-wire bits: `serial::parse_frame` →
+`parameters::unpack_parameters` → `(P1, P2)` →
+`pitch_decode::decode_frame` → `(T1, T2, t_min)`. The remaining
+§4.1.4 path (`C` / `S` → pulse positions + signs → `c(n)`) and the
+§3.7 eq (40) `b_30` interpolator (`(int(T), frac, past
+excitation) → v(n)`) are the next links the decoder chain needs
+before the per-subframe excitation `u(n) = ĝ_p · v(n) + ĝ_c ·
+c(n)` (spec eq (75)) can be evaluated.
+
 ## What is NOT wired up
 
 Every decode/encode entry point still returns `Error::NotImplemented`.
@@ -731,11 +834,12 @@ under `docs/audio/g729/tables/` but are not yet compiled in; the
 Implementer leaves them out until the docs collaborator's
 specifier pass clarifies the per-clause wire-up direction.
 
-With round 249 the §4.1 / Table-8 parameter unpacker chains the
+With round 255 the §4.1 / Table-8 parameter unpacker chains the
 round-191 framing layer to the §3.2.4 / §3.2.5 / §3.2.6 LSP
 decode chain AND the §3.9.2 / §4.1.5 gain VQ decode chain AND
 the §3.9.1 / §4.1.5 gain-prediction stage AND the §3.9.3
-codeword-mapping robustness layer end-to-end:
+codeword-mapping robustness layer AND the §4.1.3 pitch-delay
+decode end-to-end:
 `serial::parse_frame` → `parameters::unpack_parameters` →
 `(L0, L1, L2, L3)` → `LspReconstructor::reconstruct_frame` →
 `LspInterpolator::interpolate` → `lsp_to_lp` per subframe,
@@ -743,19 +847,22 @@ with `(transmitted GA1, GB1, GA2, GB2)` →
 `gain_index_map::demap_frame` → `(codebook GA, GB)` →
 `gain_reconstruct::reconstruct_frame_gains` →
 `gain_predict::GainPredictor::predict_and_update` yielding the
-per-subframe `(ĝ_p, ĝ_c)` pairs. The remaining transmitted
-indices `(P1, P0, P2, C1, S1, C2, S2)` are *available* via the
-same `Parameters` struct but the §3.7 / §3.8 decode-side
-algorithms that consume them are not yet wired (§3.7 maps `P1`
-→ fractional pitch delay; §3.8 maps `C1` → pulse positions —
-producing the `c(n)` codevector that the round-239 gain
-predictor's energy step consumes). The remaining numeric
-tables (gain-quantizer coefficient matrix `coef` / `L_coef`,
-postfilter interpolation `tab_hup_*`, taming `tab_zone`,
-Annex B DTX/CNG, LSF↔LSP cos/slope tables) are staged under
-`docs/audio/g729/tables/` but not yet compiled in; the
-Implementer leaves them out until the docs collaborator's
-specifier pass clarifies the per-clause wire-up direction.
+per-subframe `(ĝ_p, ĝ_c)` pairs, and `(P1, P2)` →
+`pitch_decode::decode_frame` → per-subframe `(T1, T2, t_min)`
+fractional pitch delays. The remaining transmitted indices
+`(C1, S1, C2, S2)` are *available* via the same `Parameters`
+struct but the §3.8 / §4.1.4 decode-side algorithm that
+consumes them is not yet wired (§3.8 maps `C` → 4 pulse
+positions, `S` → 4 signs → `c(n)` codevector that the round-239
+gain predictor's energy step consumes; §3.7 eq (40) maps
+`(int(T), frac, past excitation) → v(n)` adaptive-codebook
+vector). The remaining numeric tables (gain-quantizer
+coefficient matrix `coef` / `L_coef`, postfilter interpolation
+`tab_hup_*`, taming `tab_zone`, Annex B DTX/CNG, LSF↔LSP
+cos/slope tables) are staged under `docs/audio/g729/tables/`
+but not yet compiled in; the Implementer leaves them out until
+the docs collaborator's specifier pass clarifies the per-clause
+wire-up direction.
 
 ## Clean-room provenance
 
