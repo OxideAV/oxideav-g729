@@ -997,3 +997,211 @@ fn pitch_decode_round_trips_pitch_corpus() {
     );
     assert!(active_total > 0, "no active frames processed");
 }
+
+/// Walks every `.BIT` file in `g729-core/` + `g729a/`, unpacks each
+/// active frame's parameters, and runs the round-266 §4.1.4 fixed-
+/// codebook decode on the resulting `(C1, S1)` and `(C2, S2)` codeword
+/// pairs. Asserts that every decoded codevector lies in the spec-stated
+/// domain:
+///
+/// (a) every pulse position is in `[0, 40)` and on its spec Table-7
+///     track residue (`m_k mod 5 == k` for `k ∈ {0, 1, 2}`,
+///     `m_3 mod 5 ∈ {3, 4}`);
+/// (b) every pulse sign is exactly `+1` or `-1` per spec eq (45);
+/// (c) the four pulses sit on distinct positions (the tracks are
+///     disjoint modulo 5, so a collision would be a decode bug);
+/// (d) the codevector energy `Σ_n c(n)²` equals exactly `4` (the
+///     count of non-zero ±1 samples) per spec eq (45);
+/// (e) `jx ∈ {0, 1}` per spec eq (62).
+///
+/// Per spec §3.8 the 13-bit `C` field covers `0..8192` exactly and the
+/// 4-bit `S` field covers `0..16` exactly, so a domain mismatch on any
+/// active frame would surface here. The minimum-coverage assertion at
+/// the bottom guards against a future regression that quietly stops
+/// walking the corpus.
+#[test]
+fn fixed_codebook_in_domain_on_full_corpus() {
+    use oxideav_g729::fixed_codebook::{
+        build_codevector, decode_frame, NUM_PULSES, SUBFRAME_SIZE, TRACK_STRIDE,
+    };
+    let Some(root) = conformance_root() else {
+        eprintln!("skip: conformance corpus not present");
+        return;
+    };
+    let mut walked = 0usize;
+    let mut active_total = 0usize;
+    for variant in ["g729-core", "g729a"] {
+        let dir = root.join(variant);
+        if !dir.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("BIT") {
+                continue;
+            }
+            let bit_bytes = std::fs::read(&path).unwrap();
+            let n = serial::frame_count(&bit_bytes).unwrap();
+            let label = format!("{variant}/{}", path.file_stem().unwrap().to_string_lossy());
+            let mut active = 0usize;
+            for f in 0..n {
+                let frame = &bit_bytes[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+                let kind = serial::parse_frame(frame).unwrap();
+                let Ok(params) = unpack_parameters(&kind) else {
+                    continue;
+                };
+                active += 1;
+                let fcb = decode_frame(&params).unwrap_or_else(|e| {
+                    panic!("{label} frame {f}: fixed-codebook decode returned error: {e}")
+                });
+                for (sub_idx, sub) in [&fcb.subframe_1, &fcb.subframe_2].into_iter().enumerate() {
+                    assert!(
+                        sub.jx <= 1,
+                        "{label} frame {f} sub{}: jx={}",
+                        sub_idx + 1,
+                        sub.jx
+                    );
+                    // Distinct positions invariant.
+                    let mut positions = sub.pulses.map(|p| p.position);
+                    positions.sort_unstable();
+                    for w in positions.windows(2) {
+                        assert!(
+                            w[0] != w[1],
+                            "{label} frame {f} sub{}: pulse collision at position {}",
+                            sub_idx + 1,
+                            w[0],
+                        );
+                    }
+                    // Per-track residue invariant.
+                    for (k, p) in sub.pulses.iter().enumerate() {
+                        assert!(
+                            (p.position as usize) < SUBFRAME_SIZE,
+                            "{label} frame {f} sub{}: pulse {k} position {} out of range",
+                            sub_idx + 1,
+                            p.position,
+                        );
+                        assert!(
+                            p.sign == 1 || p.sign == -1,
+                            "{label} frame {f} sub{}: pulse {k} sign {} not in {{-1, +1}}",
+                            sub_idx + 1,
+                            p.sign,
+                        );
+                        let resid = (p.position as usize) % TRACK_STRIDE;
+                        let expected_resid = if k == 3 { 3 + (sub.jx as usize) } else { k };
+                        assert_eq!(
+                            resid,
+                            expected_resid,
+                            "{label} frame {f} sub{}: pulse {k} pos {} off-track (resid={resid}, expected={expected_resid})",
+                            sub_idx + 1,
+                            p.position,
+                        );
+                    }
+                    // Codevector energy invariant — exactly NUM_PULSES.
+                    let cv = build_codevector(sub);
+                    assert_eq!(cv.len(), SUBFRAME_SIZE);
+                    let energy: i32 = cv.iter().map(|x| i32::from(*x) * i32::from(*x)).sum();
+                    assert_eq!(
+                        energy,
+                        NUM_PULSES as i32,
+                        "{label} frame {f} sub{}: codevector energy {} ≠ NUM_PULSES",
+                        sub_idx + 1,
+                        energy,
+                    );
+                }
+            }
+            assert!(active > 0, "{label}: no active frames");
+            active_total += active;
+            walked += 1;
+        }
+    }
+    assert!(walked > 0, "no .BIT files found under conformance root");
+    assert!(active_total > 0, "no active frames processed");
+}
+
+/// Walks the staged `FIXED.BIT` sequence (the ITU `READMETV.txt`
+/// self-documents this as the fixed-codebook search exerciser) for both
+/// the `g729-core/` base codec and the `g729a/` Annex-A corpus, runs
+/// the §4.1.4 decode on every active frame, and pins that the **encode
+/// inverse** of every decoded `(positions, signs)` round-trips to the
+/// original `(C, S)` codewords exactly. This is the strongest in-corpus
+/// guarantee available without a known-good reference output: the only
+/// way for a frame to fail is for the eq (62) / (61) decode recipe to
+/// disagree with the spec eq (62) / (61) encode recipe on a real
+/// ITU-encoded frame.
+#[test]
+fn fixed_codebook_round_trips_fixed_corpus() {
+    use oxideav_g729::fixed_codebook::{decode_frame, encode_positions, encode_signs};
+    let Some(root) = conformance_root() else {
+        eprintln!("skip: conformance corpus not present");
+        return;
+    };
+    let mut variants_walked = 0usize;
+    let mut active_total = 0usize;
+    for variant in ["g729-core", "g729a"] {
+        let path = root.join(variant).join("FIXED.BIT");
+        if !path.is_file() {
+            continue;
+        }
+        let bit_bytes = std::fs::read(&path).unwrap();
+        let n = serial::frame_count(&bit_bytes).unwrap();
+        let mut active = 0usize;
+        for f in 0..n {
+            let frame = &bit_bytes[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+            let kind = serial::parse_frame(frame).unwrap();
+            let Ok(params) = unpack_parameters(&kind) else {
+                continue;
+            };
+            active += 1;
+            let fcb = decode_frame(&params).unwrap();
+            // Subframe 1 round-trip.
+            let positions_1 = fcb.subframe_1.pulses.map(|p| p.position);
+            let signs_1 = fcb.subframe_1.pulses.map(|p| p.sign);
+            let re_c1 = encode_positions(&positions_1).unwrap_or_else(|| {
+                panic!(
+                    "{variant}/FIXED frame {f}: encode_positions rejected sub-1 positions {positions_1:?}",
+                )
+            });
+            assert_eq!(
+                re_c1, params.c1,
+                "{variant}/FIXED frame {f}: C1 round-trip mismatch (positions {positions_1:?})",
+            );
+            let re_s1 = encode_signs(&signs_1).unwrap_or_else(|| {
+                panic!("{variant}/FIXED frame {f}: encode_signs rejected sub-1 signs {signs_1:?}",)
+            });
+            assert_eq!(
+                re_s1, params.s1,
+                "{variant}/FIXED frame {f}: S1 round-trip mismatch (signs {signs_1:?})",
+            );
+            // Subframe 2 round-trip.
+            let positions_2 = fcb.subframe_2.pulses.map(|p| p.position);
+            let signs_2 = fcb.subframe_2.pulses.map(|p| p.sign);
+            let re_c2 = encode_positions(&positions_2).unwrap_or_else(|| {
+                panic!(
+                    "{variant}/FIXED frame {f}: encode_positions rejected sub-2 positions {positions_2:?}",
+                )
+            });
+            assert_eq!(
+                re_c2, params.c2,
+                "{variant}/FIXED frame {f}: C2 round-trip mismatch (positions {positions_2:?})",
+            );
+            let re_s2 = encode_signs(&signs_2).unwrap_or_else(|| {
+                panic!("{variant}/FIXED frame {f}: encode_signs rejected sub-2 signs {signs_2:?}",)
+            });
+            assert_eq!(
+                re_s2, params.s2,
+                "{variant}/FIXED frame {f}: S2 round-trip mismatch (signs {signs_2:?})",
+            );
+        }
+        assert!(
+            active > 0,
+            "{variant}/FIXED: no active frames in corpus walker",
+        );
+        active_total += active;
+        variants_walked += 1;
+    }
+    assert!(
+        variants_walked > 0,
+        "FIXED.BIT not present under conformance root",
+    );
+    assert!(active_total > 0, "no active frames processed");
+}

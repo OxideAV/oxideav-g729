@@ -108,7 +108,22 @@ derivation), `decode_t2_from_p2` (spec image `f0027-03.jpg` —
 − 1)`), and the per-frame `decode_frame` wrapper that chains
 them in spec §4.1.3 order, with the symmetric `encode_p1` /
 `encode_p2` forward mappings (spec eqs (41) / (42)) exposed for
-encoder wire-up and the corpus-walking round-trip test.
+encoder wire-up and the corpus-walking round-trip test;
+round 266 wires the §3.8 / §4.1.4 fixed (algebraic) codebook
+decode in a new `fixed_codebook` module that maps the
+transmitted `(C, S)` codewords into the four `(position,
+sign)` pulses of spec eq (45) — `decode_positions` (spec
+eq (62) — the 13-bit `C` field splits as 3+3+3+4 with track 3
+carrying `2·(m_3/5) + jx` in 4 bits; track residues per spec
+Table 7 are `(0, 1, 2, 3+jx) mod 5`), `decode_signs` (spec
+eq (61) — `S = s_0 + 2·s_1 + 4·s_2 + 8·s_3` with `s_k = 1`
+⇔ positive), `build_codevector` (spec eq (45) — four signed
+unit impulses on the 40-sample subframe), `decode_pulses`
+(per-subframe wrapper), and `decode_frame` (per-frame wrapper
+threading `(C1, S1)` and `(C2, S2)` into their subframes),
+with the symmetric `encode_positions` / `encode_signs`
+forward mappings exposed for encoder wire-up and the
+corpus-walking round-trip test against `FIXED.BIT`.
 
 All numeric values are compiled at build time by `build.rs` from CSVs
 under `tables/`, themselves byte-for-byte copies of the spec-role-named
@@ -824,6 +839,103 @@ excitation) → v(n)`) are the next links the decoder chain needs
 before the per-subframe excitation `u(n) = ĝ_p · v(n) + ĝ_c ·
 c(n)` (spec eq (75)) can be evaluated.
 
+### Round 266 — §3.8 / §4.1.4 fixed (algebraic) codebook decode
+
+A new `oxideav_g729::fixed_codebook` module ties the round-225
+parameter unpacker's `(C1, S1, C2, S2)` codewords into the
+per-subframe pulse layout that spec eq (45) builds into the
+40-sample codevector `c(n)`:
+
+- `decode_positions(c: u16) -> Result<([u8; 4], u8), _>` evaluates
+  the inverse of spec eq (62): `C = (m_0/5) + 8·(m_1/5) +
+  64·(m_2/5) + 512·(2·(m_3/5) + jx)`. The 13-bit field splits as
+  3 + 3 + 3 + 4 bits across the four Table-7 tracks (LSB-first
+  per track); the 4-bit track-3 field carries the 3-bit `m_3/5`
+  position index in its upper 3 bits and the `jx` track-selector
+  bit in its LSB. Returns the `[m_0, m_1, m_2, m_3]` positions
+  in spec `(i_0, i_1, i_2, i_3)` order together with the
+  decoded `jx ∈ {0, 1}`.
+- `decode_signs(s: u8) -> Result<[i8; 4], _>` evaluates the
+  inverse of spec eq (61): `S = s_0 + 2·s_1 + 4·s_2 + 8·s_3`.
+  Bit `k` of `S` carries `s_k = 1` ⇔ positive sign per the
+  clause-3.8.2 prose; the returned `i8` is `+1` for `s_k = 1`
+  and `-1` for `s_k = 0`, matching spec eq (45)'s `s_k ∈ {-1, +1}`
+  amplitude convention.
+- `decode_pulses(c, s) -> Result<FixedCodebookPulses, _>` ties
+  the position and sign primitives together — the per-subframe
+  §4.1.4 entry point.
+- `build_codevector(&FixedCodebookPulses) -> [i8; 40]` constructs
+  spec eq (45) — four signed unit impulses placed on the 40-sample
+  codevector, zeros elsewhere. The energy of the result is exactly
+  `4` per the unit invariant.
+- `decode_frame(&Parameters) -> Result<FrameFixedCodebook, _>` —
+  per-frame wrapper that threads `(C1, S1)` into subframe 1 and
+  `(C2, S2)` into subframe 2 per spec §4.1.5.
+- `encode_positions(&[u8; 4]) -> Option<u16>` and
+  `encode_signs(&[i8; 4]) -> Option<u8>` — the symmetric encode-
+  side forward mappings (spec eqs (62) / (61)) exposed publicly
+  for round-trip property tests and encoder wire-up.
+
+12 new unit tests pin the algorithmic invariants:
+
+- spec eq (61) worked examples on `decode_signs` (`S = 0b0000` /
+  `0b1111` / `0b0001` / `0b1000` / `0b0101`);
+- spec eq (62) worked examples on `decode_positions` (`C = 0` /
+  `1` / `512` (`jx = 1, m_3 = 4`) / `0x1FFF` (full saturation,
+  `m = [35, 36, 37, 39]`, `jx = 1`));
+- out-of-domain rejection on both decode primitives (`S` with
+  bit 4 set, `C` with bit 13 set);
+- full-domain envelope on `decode_positions` (every `C ∈
+  0..8192` produces 4 positions on the spec Table-7 tracks
+  with the correct per-track residue);
+- full-domain encode↔decode round-trip on `S` (every `S ∈
+  0..16`) AND on `C` (every `C ∈ 0..8192`) — pins both the
+  decode and encode recipes simultaneously;
+- `encode_positions` rejects off-track inputs (track-0 position
+  at track-1 residue, track-3 at residue {0, 1, 2}, position ≥ 40);
+- `encode_signs` rejects non-`±1` inputs (`0`, `2`);
+- `decode_pulses` threads positions + signs in spec order;
+- `build_codevector` constructs eq (45) — exactly 4 non-zero
+  ±1 samples;
+- codevector energy is exactly `NUM_PULSES = 4` across a sweep
+  of representative `(C, S)` pairs;
+- the four pulses occupy distinct positions across the full `C`
+  domain (the Table-7 tracks are disjoint modulo 5);
+- `decode_frame` threads `(C1, S1)` and `(C2, S2)` into the
+  right subframes (no swap detection).
+
+2 new integration tests against the staged conformance corpus
+(in `tests/serial_conformance.rs`):
+
+- `fixed_codebook_in_domain_on_full_corpus` walks every `.BIT`
+  file in `g729-core/` + `g729a/`, runs `decode_frame` on every
+  active frame, and pins per-subframe invariants:
+  every pulse position is in `[0, 40)` and on its spec Table-7
+  track residue; every pulse sign is `±1`; the four pulses sit
+  on distinct positions; the codevector energy `Σ_n c(n)²`
+  equals exactly `4`; `jx ∈ {0, 1}`;
+- `fixed_codebook_round_trips_fixed_corpus` walks the staged
+  `FIXED.BIT` sequence (the ITU `READMETV.txt` self-documents
+  this as the fixed-codebook search exerciser) for both
+  `g729-core/` and `g729a/`, runs `decode_frame` on every active
+  frame, and pins that `encode_positions(positions) == params.c1`
+  / `c2` and `encode_signs(signs) == params.s1` / `s2` exactly.
+  This is the strongest in-corpus guarantee available without a
+  known-good reference output: a single frame failing means the
+  eq (61) / (62) decode and encode recipes disagree on an
+  ITU-encoded frame.
+
+With round 266 the §4.1.4 decode-side fixed-codebook stage
+chains the round-225 transmitted `(C, S)` codewords into the
+spec eq (45) codevector `c(n)` that the round-239 gain
+predictor's eq (66) energy step ultimately consumes. The
+spec §3.8 eq (48) / (48a) pitch sharpening (applied when the
+integer pitch delay `int(T) < 40`) needs the round-255
+pitch delay AND the previous subframe's quantised
+adaptive-codebook gain `β`, and is deferred to a follow-up
+round; it modifies the codevector in place after `build_codevector`
+but does not change the per-pulse layout this round wires.
+
 ## What is NOT wired up
 
 Every decode/encode entry point still returns `Error::NotImplemented`.
@@ -834,12 +946,12 @@ under `docs/audio/g729/tables/` but are not yet compiled in; the
 Implementer leaves them out until the docs collaborator's
 specifier pass clarifies the per-clause wire-up direction.
 
-With round 255 the §4.1 / Table-8 parameter unpacker chains the
+With round 266 the §4.1 / Table-8 parameter unpacker chains the
 round-191 framing layer to the §3.2.4 / §3.2.5 / §3.2.6 LSP
 decode chain AND the §3.9.2 / §4.1.5 gain VQ decode chain AND
 the §3.9.1 / §4.1.5 gain-prediction stage AND the §3.9.3
 codeword-mapping robustness layer AND the §4.1.3 pitch-delay
-decode end-to-end:
+decode AND the §3.8 / §4.1.4 fixed-codebook decode end-to-end:
 `serial::parse_frame` → `parameters::unpack_parameters` →
 `(L0, L1, L2, L3)` → `LspReconstructor::reconstruct_frame` →
 `LspInterpolator::interpolate` → `lsp_to_lp` per subframe,
@@ -847,22 +959,23 @@ with `(transmitted GA1, GB1, GA2, GB2)` →
 `gain_index_map::demap_frame` → `(codebook GA, GB)` →
 `gain_reconstruct::reconstruct_frame_gains` →
 `gain_predict::GainPredictor::predict_and_update` yielding the
-per-subframe `(ĝ_p, ĝ_c)` pairs, and `(P1, P2)` →
+per-subframe `(ĝ_p, ĝ_c)` pairs, `(P1, P2)` →
 `pitch_decode::decode_frame` → per-subframe `(T1, T2, t_min)`
-fractional pitch delays. The remaining transmitted indices
-`(C1, S1, C2, S2)` are *available* via the same `Parameters`
-struct but the §3.8 / §4.1.4 decode-side algorithm that
-consumes them is not yet wired (§3.8 maps `C` → 4 pulse
-positions, `S` → 4 signs → `c(n)` codevector that the round-239
-gain predictor's energy step consumes; §3.7 eq (40) maps
-`(int(T), frac, past excitation) → v(n)` adaptive-codebook
-vector). The remaining numeric tables (gain-quantizer
-coefficient matrix `coef` / `L_coef`, postfilter interpolation
-`tab_hup_*`, taming `tab_zone`, Annex B DTX/CNG, LSF↔LSP
-cos/slope tables) are staged under `docs/audio/g729/tables/`
-but not yet compiled in; the Implementer leaves them out until
-the docs collaborator's specifier pass clarifies the per-clause
-wire-up direction.
+fractional pitch delays, AND `(C1, S1, C2, S2)` →
+`fixed_codebook::decode_frame` → per-subframe pulse layout +
+`build_codevector` → `c(n)` codevector. The remaining decode-
+side glue is the §3.7 eq (40) `b_30` past-excitation
+interpolator that turns `(int(T), frac, past excitation)` into
+the adaptive-codebook vector `v(n)`, the §3.8 eq (48) pitch
+sharpening of `c(n)` when `int(T) < 40`, the §3.10 / §4.1.6
+per-subframe excitation `u(n) = ĝ_p · v(n) + ĝ_c · c(n)` build
++ `1/Â(z)` synthesis, and the §4.2 post-processing cascade. The
+remaining numeric tables (gain-quantizer coefficient matrix
+`coef` / `L_coef`, postfilter interpolation `tab_hup_*`, taming
+`tab_zone`, Annex B DTX/CNG, LSF↔LSP cos/slope tables) are
+staged under `docs/audio/g729/tables/` but not yet compiled in;
+the Implementer leaves them out until the docs collaborator's
+specifier pass clarifies the per-clause wire-up direction.
 
 ## Clean-room provenance
 

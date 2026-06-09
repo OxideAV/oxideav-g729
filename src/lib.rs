@@ -96,6 +96,22 @@
 //! spec §4.1.3 order against the round-225
 //! [`parameters::Parameters`] struct.
 //!
+//! Round 266 wires the §3.8 / §4.1.4 fixed (algebraic) codebook
+//! decode that maps the transmitted `(C, S)` codewords into the
+//! per-subframe pulse positions, signs, and the 40-sample
+//! codevector `c(n)`. A new [`fixed_codebook`] module exposes
+//! [`fixed_codebook::decode_positions`] (spec eq (62) — the
+//! 13-bit `C` codeword splits as 3+3+3+4 across the four Table-7
+//! tracks, with the 4-bit track-3 field carrying `2·(m_3/5) + jx`),
+//! [`fixed_codebook::decode_signs`] (spec eq (61) — the 4-bit `S`
+//! codeword carries one sign bit per pulse, `s_k = 1` ⇔ positive),
+//! [`fixed_codebook::build_codevector`] (spec eq (45) — four signed
+//! unit impulses on the 40-sample subframe), and the per-frame
+//! [`fixed_codebook::decode_frame`] wrapper. The §3.8 eq (48)
+//! pitch sharpening (when `int(T) < 40`) needs the round-255
+//! pitch delay AND the previous subframe's quantised
+//! adaptive-codebook gain and is deferred to a follow-up round.
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -123,6 +139,7 @@
 
 use oxideav_core::RuntimeContext;
 
+pub mod fixed_codebook;
 pub mod gain_index_map;
 pub mod gain_predict;
 pub mod gain_reconstruct;

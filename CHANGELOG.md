@@ -8,6 +8,74 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 266 wires the §3.8 / §4.1.4 fixed (algebraic) codebook
+  decode that maps the transmitted `(C, S)` codewords into the
+  per-subframe pulse layout and the 40-sample codevector `c(n)`,
+  in a new `oxideav_g729::fixed_codebook` module:
+  - `decode_positions(c: u16) -> Result<([u8; 4], u8), _>` inverts
+    spec eq (62) — the 13-bit `C` codeword splits as 3+3+3+4 bits
+    across the four Table-7 tracks; the 4-bit track-3 field
+    carries `2·(m_3/5) + jx` so `jx` is the LSB and the upper 3
+    bits are `m_3/5`. Returns the `[m_0, m_1, m_2, m_3]` positions
+    in spec order alongside `jx ∈ {0, 1}`. Returns
+    `FixedCodebookError::CTooWide` on a 14+-bit input.
+  - `decode_signs(s: u8) -> Result<[i8; 4], _>` inverts spec
+    eq (61) — `S = s_0 + 2·s_1 + 4·s_2 + 8·s_3`; bit `k` carries
+    `s_k = 1` for a positive sign (clause 3.8.2 prose). Returns
+    `±1` per pulse to match spec eq (45). Returns
+    `FixedCodebookError::STooWide` on a 5+-bit input.
+  - `decode_pulses(c, s) -> Result<FixedCodebookPulses, _>` —
+    per-subframe wrapper that ties positions + signs into one
+    `Copy` struct.
+  - `build_codevector(&FixedCodebookPulses) -> [i8; 40]`
+    constructs spec eq (45) — four signed unit impulses at the
+    decoded pulse positions, zero elsewhere. The energy is
+    exactly `4` (one ±1 contribution per pulse).
+  - `decode_frame(&Parameters) -> Result<FrameFixedCodebook, _>`
+    — per-frame entry point. Threads `(C1, S1)` into subframe 1
+    and `(C2, S2)` into subframe 2 per spec §4.1.5.
+  - `encode_positions(&[u8; 4]) -> Option<u16>` and
+    `encode_signs(&[i8; 4]) -> Option<u8>` — encoder-side
+    forward mappings (spec eqs (62) / (61)) exposed publicly
+    for round-trip property tests and encoder wire-up.
+- 12 new unit tests in `src/fixed_codebook.rs` pin the
+  algorithmic invariants: spec eq (61) worked examples (`S =
+  0b0000` / `0b1111` / `0b0001` / `0b1000` / `0b0101`), spec
+  eq (62) worked examples (`C = 0` / `1` / `512` (`jx = 1,
+  m_3 = 4`) / `0x1FFF` (full saturation, `m = [35, 36, 37, 39]`)),
+  out-of-domain rejection on both decode primitives, full-domain
+  Table-7 track-residue envelope on `decode_positions` (every
+  `C ∈ 0..8192`), full-domain encode↔decode round-trip on `S`
+  AND `C` (pinning both decode and encode recipes
+  simultaneously), `encode_positions` off-track rejection,
+  `encode_signs` non-±1 rejection, `decode_pulses` ordering,
+  `build_codevector` eq (45) construction, codevector energy
+  invariant `= 4` across a representative sweep, distinct-
+  positions invariant across the full `C` domain, and
+  `decode_frame` per-subframe thread-through.
+- 2 new integration tests in `tests/serial_conformance.rs`:
+  `fixed_codebook_in_domain_on_full_corpus` walks every `.BIT`
+  file in `g729-core/` + `g729a/` and pins per-frame /
+  per-subframe invariants (Table-7 track residue, ±1 signs,
+  distinct positions, energy = 4, `jx ∈ {0, 1}`);
+  `fixed_codebook_round_trips_fixed_corpus` walks the staged
+  `FIXED.BIT` corpus (the ITU `READMETV.txt`-documented
+  fixed-codebook exerciser) and pins
+  `encode_positions(decoded) == params.c1 / c2` and
+  `encode_signs(decoded) == params.s1 / s2` exactly on every
+  active frame.
+- `oxideav_g729::fixed_codebook` is exposed at the crate root
+  via `pub mod fixed_codebook;`; the crate-level rustdoc is
+  extended with the round-266 surface.
+- Spec gap (unchanged from previous rounds): clause 3.8
+  eq (48) / (48a) pitch sharpening of `c(n)` when `int(T) < 40`
+  needs the round-255 pitch-delay output AND the previous
+  subframe's quantised adaptive-codebook gain `β`. Per clause
+  4.1.4: "If the integer part of the pitch delay *T* is less
+  than the subframe size 40, *c*(*n*) is modified according to
+  equation (48)." This step is left for a follow-up round; it
+  modifies the codevector in place after `build_codevector`.
+
 - Round 255 wires the §4.1.3 pitch-delay decode that maps the
   transmitted `(P1, P2)` indices into per-subframe fractional pitch
   delays `(T1, T2)`, in a new `oxideav_g729::pitch_decode` module:
