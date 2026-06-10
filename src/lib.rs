@@ -112,6 +112,20 @@
 //! pitch delay AND the previous subframe's quantised
 //! adaptive-codebook gain and is deferred to a follow-up round.
 //!
+//! Round 274 lands that deferred §3.8 / §4.1.4 **pitch sharpening**
+//! step. A new [`pitch_sharpen`] module exposes
+//! [`pitch_sharpen::clamp_beta`] (spec eq (47) — `β = ĝ_p^(m−1)`
+//! clamped to `[0.2, 0.8]`, the previous subframe's quantised
+//! adaptive-codebook gain) and [`pitch_sharpen::sharpen`] (spec
+//! eq (48) — the in-place recurrence `c(n) += β·c(n − T)` for
+//! `n = T … 39`, applied only when the current subframe's integer
+//! pitch delay `int(T) < 40`, realising the §3.8 adaptive
+//! pre-filter `P(z) = 1/(1 − β·z^−T)` on the round-266
+//! algebraic codevector). The recurrence reads the already-modified
+//! `c(n − T)` in a forward sweep so the geometric pitch echo
+//! propagates correctly; [`pitch_sharpen::codevector_energy`] reads
+//! the post-sharpening `Σ c(n)²`.
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -148,6 +162,7 @@ pub mod lsp_reconstruct;
 pub mod lsp_to_lp;
 pub mod parameters;
 pub mod pitch_decode;
+pub mod pitch_sharpen;
 pub mod serial;
 pub mod tables;
 

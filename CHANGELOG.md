@@ -8,6 +8,38 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 274 lands the §3.8 / §4.1.4 **pitch sharpening** step that
+  the round-266 fixed-codebook decode had deferred, in a new
+  `oxideav_g729::pitch_sharpen` module:
+  - `clamp_beta(g_p_prev: f32) -> f32` applies spec eq (47) —
+    `β = ĝ_p^(m−1)` bounded by `0.2 ≤ β ≤ 0.8`, i.e. the previous
+    subframe's quantised adaptive-codebook gain clamped to the
+    closed `[0.2, 0.8]` pitch-gain interval (`NaN` → `0.2` floor so
+    the recurrence stays finite).
+  - `sharpen(c: &[i8; 40], int_t: i32, g_p_prev: f32) -> [f32; 40]`
+    applies spec eq (48) — `c(n) += β·c(n − T)` for `n = T … 39`,
+    realising the §3.8 adaptive pre-filter `P(z) = 1/(1 − β·z^−T)`.
+    The forward in-place sweep reads the already-modified
+    `c(n − T)`, so the recursive pole is realised exactly and the
+    geometric pitch echo (`β`, `β²`, … at `m + T`, `m + 2T`, …)
+    propagates correctly. The modification is applied **only** when
+    the current subframe's integer pitch delay `int(T) < 40`
+    (clause 4.1.4 "less than the subframe size 40"); for
+    `int(T) ≥ 40` (or a non-positive delay) the codevector is
+    returned unchanged, promoted to `f32`. The eq (47) clamp is
+    applied internally so callers pass the raw previous-subframe
+    `ĝ_p` directly.
+  - `codevector_energy(&[f32; 40]) -> f32` reads the
+    post-sharpening `Σ c(n)²` (the unmodified four-pulse codevector
+    has energy exactly `4.0`); exposed for the §3.9.1 eq (66)
+    energy term and the unit tests.
+  - Tests pin the eq (47) clamp at its boundaries, the eq (48)
+    geometric-train recurrence (single seed pulse → taps at
+    `0, T, 2T, 3T` with weights `1, β, β², β³`), the recursive
+    interaction of overlapping pulses (reading the modified
+    `c(n − T)`), the `int(T) ≥ 40` / non-positive no-op guards, and
+    the head-preservation + tail-echo structure on a real decoded
+    codevector.
 - Round 266 wires the §3.8 / §4.1.4 fixed (algebraic) codebook
   decode that maps the transmitted `(C, S)` codewords into the
   per-subframe pulse layout and the 40-sample codevector `c(n)`,
