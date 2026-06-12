@@ -126,6 +126,30 @@
 //! propagates correctly; [`pitch_sharpen::codevector_energy`] reads
 //! the post-sharpening `Σ c(n)²`.
 //!
+//! Round 282 wires the §4.1 **per-frame decode parameter chain**
+//! that glues every piece above into one stateful call. A new
+//! [`decode_chain`] module exposes
+//! [`decode_chain::FrameDecoder`] (owning the §3.2.4 LSP MA
+//! history, the §3.2.5 interpolation memory, the §3.9.1 gain-
+//! predictor history, the eq (47) `β` source — Table 9 init `0.8`
+//! — and the previous frame's `int(T2)` for §4.1.2 parity
+//! concealment) with three entry points:
+//! [`decode_chain::FrameDecoder::decode_serial_frame`] (164-byte
+//! ITU serial frame in),
+//! [`decode_chain::FrameDecoder::decode_frame_kind`] (parsed
+//! [`serial::FrameKind`] in), and
+//! [`decode_chain::FrameDecoder::decode_parameters`] (unpacked
+//! Table-8 codewords in). Each call runs the clause-4.1 order —
+//! §4.1.1 LSP→LP per subframe, §4.1.2 parity check (with the
+//! "T1 := previous frame's int(T2)" concealment substitution on
+//! mismatch), §4.1.3 pitch delays, §4.1.4 fixed codebook + eq (48)
+//! sharpening, §4.1.5 gains (`ĝ_p`, `γ̂`, `ĝ_c = γ̂·g′_c`) — and
+//! returns a fully-typed [`decode_chain::DecodedFrame`] /
+//! [`decode_chain::SubframeDecode`] pair of structs. §4.1.6 LP
+//! synthesis, §4.2 post-processing, and §4.4 erasure concealment
+//! remain unwired (an erasure sentinel returns
+//! [`decode_chain::FrameDecodeError::Erased`]).
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -153,6 +177,7 @@
 
 use oxideav_core::RuntimeContext;
 
+pub mod decode_chain;
 pub mod fixed_codebook;
 pub mod gain_index_map;
 pub mod gain_predict;

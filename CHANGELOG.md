@@ -8,6 +8,53 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 282 wires the §4.1 **per-frame decode parameter chain** in a
+  new `oxideav_g729::decode_chain` module — the glue that turns one
+  ITU serial frame into fully-typed parameter structs through every
+  decode piece already landed:
+  - `FrameDecoder` (stateful) owns the §3.2.4 LSP MA history, the
+    §3.2.5 interpolation memory, the §3.9.1 4-tap gain-predictor
+    history, the eq (47) `β = ĝ_p^(m−1)` source (clause 4.3 /
+    Table 9 init `0.8`, exposed as `BETA_INIT`), and the previous
+    frame's `int(T2)` for the §4.1.2 parity concealment (clause-4.3
+    zero default).
+  - Three entry points: `decode_serial_frame` (one 164-byte ITU
+    serial frame), `decode_frame_kind(&FrameKind)`, and
+    `decode_parameters(&Parameters)`, each running the clause-4.1
+    order: §4.1.1 `L0..L3` → `ω̂` → per-subframe interpolated LSPs →
+    LP coefficients; §4.1.2 parity recompute with the spec
+    substitution on mismatch ("the delay value T1 is set to the
+    integer part of the delay value T2 of the previous frame", T2
+    then re-derived per §4.1.3 from that T1); §4.1.3 `(P1, P2)` →
+    `(T1, T2, t_min)`; §4.1.4 `(C, S)` → pulses → eq (45)
+    codevector → eq (48) sharpening with β threaded from the
+    previous subframe's `ĝ_p`; §4.1.5 `(GA, GB)` → §3.9.3 demap →
+    eqs (73)/(74) `(ĝ_p, γ̂)` → `ĝ_c = γ̂·g′_c` with the eq (66)
+    energy computed over the harmonic-enhanced `c(n)` (§3.10) and
+    the eq (72) history advance.
+  - Typed outputs `DecodedFrame` (raw codewords, parity outcome,
+    `ω̂`, `t_min`, two subframes) and `SubframeDecode` (interpolated
+    LSPs, LP coefficients, pitch delay, pulses, β, post-eq (48)
+    codevector, `(ĝ_p, γ̂)`, §3.9.1 prediction path, `ĝ_c`); typed
+    `FrameDecodeError` (Serial / Erased / Lsp / FixedCodebook /
+    Gain). §4.1.6 synthesis, §4.2 post-processing, and §4.4 erasure
+    concealment remain unwired — an erasure sentinel returns
+    `FrameDecodeError::Erased` without advancing state.
+  - 8 unit tests (Table-9 start-up state, hand-sequenced
+    piece-equivalence across both subframes, §4.1.2 substitution
+    incl. first-frame zero-default, erasure rejection without state
+    advance, typed out-of-domain errors on hand-built codewords,
+    serial↔parameter entry-point equality, eq (47) β clamp under GA
+    sweeps) plus a new `tests/decode_chain_conformance.rs` harness
+    that decodes 18 222 active frames across all 19 staged
+    base-codec + Annex-A `.BIT` vectors, pinning the §3.2.4
+    stability-clamp envelope, §4.1.3 delay windows, Table-7 track
+    residues, gain/LP finiteness, exactly 60/300 §4.1.2 concealment
+    activations on `PARITY.BIT` (each substituting exactly the
+    previous frame's `int(T2)`), erasure-sentinel rejection inside
+    `ERASURE.BIT` / `OVERFLOW.BIT`, and frame-by-frame determinism
+    of two independent chains.
+
 - Round 274 lands the §3.8 / §4.1.4 **pitch sharpening** step that
   the round-266 fixed-codebook decode had deferred, in a new
   `oxideav_g729::pitch_sharpen` module:

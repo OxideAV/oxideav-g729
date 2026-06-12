@@ -936,6 +936,54 @@ adaptive-codebook gain `β`, and is deferred to a follow-up
 round; it modifies the codevector in place after `build_codevector`
 but does not change the per-pulse layout this round wires.
 
+### Round 282 — §4.1 per-frame decode parameter chain
+
+Round 274 had landed the deferred §3.8 / §4.1.4 pitch sharpening
+(`pitch_sharpen::clamp_beta` for eq (47), `pitch_sharpen::sharpen`
+for the eq (48) recursive in-place modification when
+`int(T) < 40`). Round 282 glues **everything above into one
+stateful per-frame call** — a new `decode_chain` module whose
+`FrameDecoder` owns all four cross-frame state pieces with their
+clause 4.3 / Table 9 start-up values:
+
+| state | role | init (Table 9) |
+|---|---|---|
+| `LspReconstructor` | §3.2.4 4-frame MA residual history | `î_i = iπ/11` |
+| `LspInterpolator` | §3.2.5 previous-frame LSPs | `q_i = cos(iπ/11)` |
+| `GainPredictor` | §3.9.1 4-tap `Û` history | `−14 dB` |
+| `g_p_prev` | eq (47) `β = ĝ_p^(m−1)` source | `0.8` |
+
+plus the previous frame's `int(T2)` (clause-4.3 zero default) for
+the §4.1.2 parity concealment ("if a parity error occurs on P1,
+the delay value T1 is set to the integer part of the delay value
+T2 of the previous frame; the value T2 is derived with the
+procedure outlined in clause 4.1.3, using this new value of T1" —
+now wired). Three entry points: `decode_serial_frame` (164-byte
+ITU serial frame), `decode_frame_kind` (parsed `FrameKind`), and
+`decode_parameters` (unpacked Table-8 codewords). Each call runs
+the clause-4.1 order — §4.1.1 LSP→LP per subframe, §4.1.2 parity
+check + concealment substitution, §4.1.3 pitch delays, §4.1.4
+fixed codebook + eq (48) sharpening (β threaded from the previous
+subframe's `ĝ_p`), §4.1.5 gains (`ĝ_p`, `γ̂`, `ĝ_c = γ̂·g′_c`
+with the eq (66) energy taken over the harmonic-enhanced `c(n)`
+per §3.10) — and returns fully-typed `DecodedFrame` /
+`SubframeDecode` structs. Erasure sentinels return
+`FrameDecodeError::Erased` (§4.4 concealment is a future round).
+
+8 new unit tests (Table-9 start-up state, hand-sequenced
+piece-by-piece equivalence, §4.1.2 substitution incl. the
+first-frame zero-default, erasure rejection without state
+advance, typed out-of-domain errors, serial↔parameter entry-point
+equality, eq (47) β clamp under gain sweeps) and a new
+`tests/decode_chain_conformance.rs` integration harness that runs
+the chain over **every** active frame of the staged base + Annex-A
+corpus — 18 222 frames across 19 `.BIT` vectors — pinning the
+§3.2.4 stability-clamp envelope on `ω̂`, the §4.1.3 delay windows,
+the Table-7 track residues, finiteness of every gain/LP output,
+exactly 60/300 §4.1.2 concealment activations on `PARITY.BIT`
+(each substituting exactly the previous frame's `int(T2)`), and
+frame-by-frame determinism of two independent chains.
+
 ## What is NOT wired up
 
 Every decode/encode entry point still returns `Error::NotImplemented`.
@@ -963,13 +1011,15 @@ per-subframe `(ĝ_p, ĝ_c)` pairs, `(P1, P2)` →
 `pitch_decode::decode_frame` → per-subframe `(T1, T2, t_min)`
 fractional pitch delays, AND `(C1, S1, C2, S2)` →
 `fixed_codebook::decode_frame` → per-subframe pulse layout +
-`build_codevector` → `c(n)` codevector. The remaining decode-
-side glue is the §3.7 eq (40) `b_30` past-excitation
+`build_codevector` → `c(n)` codevector → `pitch_sharpen::sharpen`
+(round 274) — and round 282's `decode_chain::FrameDecoder` now
+sequences all of it as one stateful per-frame call. The remaining
+decode-side work is the §3.7 eq (40) `b_30` past-excitation
 interpolator that turns `(int(T), frac, past excitation)` into
-the adaptive-codebook vector `v(n)`, the §3.8 eq (48) pitch
-sharpening of `c(n)` when `int(T) < 40`, the §3.10 / §4.1.6
+the adaptive-codebook vector `v(n)`, the §3.10 / §4.1.6
 per-subframe excitation `u(n) = ĝ_p · v(n) + ĝ_c · c(n)` build
-+ `1/Â(z)` synthesis, and the §4.2 post-processing cascade. The
++ `1/Â(z)` synthesis, the §4.2 post-processing cascade, and the
+§4.4 frame-erasure concealment. The
 remaining numeric tables (gain-quantizer coefficient matrix
 `coef` / `L_coef`, postfilter interpolation `tab_hup_*`, taming
 `tab_zone`, Annex B DTX/CNG, LSF↔LSP cos/slope tables) are
