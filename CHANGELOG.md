@@ -8,6 +8,40 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 290 wires the §4.1.6 **LP synthesis** stage in a new
+  `oxideav_g729::lp_synthesis` module — the first decoder stage to
+  emit reconstructed-speech PCM:
+  - `Synthesizer` (stateful) owns the two cross-subframe state pieces
+    listed in clause 4.3 as zero-initialised: the eq (40)
+    past-excitation buffer (`EXC_HISTORY` = 153 samples — the deepest
+    eq (40) access `u(n − k − i)` with `n = 0`, `k = 143`, `i = 9` is
+    index `−152`) and the eq (77) 10th-order `1/Â(z)` synthesis-filter
+    memory.
+  - `synthesize_frame(&DecodedFrame)` runs the spec §4.1.3 → §3.10 →
+    §4.1.6 order per subframe: eq (40) interpolates the past
+    excitation through the 31-tap `b_30`
+    (`PITCH_INTERP_FILTER_SYNTHESIS_Q15`) at the decoded `(int_t,
+    frac)` delay — mapped onto the `(k, t)` / `t ∈ {0,1,2}` fraction
+    convention of eq (39)/(40) — to build the adaptive vector `v(n)`;
+    eq (75) forms `u(n) = ĝ_p·v(n) + ĝ_c·c(n)` (with `c(n)` the
+    post-eq (48) harmonic-enhanced codevector); eq (77) filters the
+    excitation through `ŝ(n) = u(n) − Σ_{i=1}^{10} â_i·ŝ(n − i)`. The
+    `v(n)`/`u(n)` computation interleaves per sample so short delays
+    (`T < 40`) fold correctly onto the already-built current
+    excitation; both state buffers advance after every subframe.
+  - Typed outputs `SynthesizedFrame` (two subframes + `speech()` →
+    the 80 time-ordered samples) and `SynthesizedSubframe` (the
+    `adaptive` `v(n)`, `excitation` `u(n)`, and `speech` `ŝ(n)`
+    40-sample vectors).
+  - 10 unit tests (eq (40)/(75)/(77) algebra, the fraction-convention
+    mapping, state advance, short-delay folding, determinism) plus a
+    new `tests/lp_synthesis_conformance.rs` harness asserting every
+    `v(n)`/`u(n)`/`ŝ(n)` stays finite across all active frames of the
+    base-codec + Annex-A `.BIT` corpus (> 7 500 frames).
+  - §4.2 post-processing (postfilter cascade, output high-pass, ×2
+    upscaling) remains a follow-up round; this stage emits the raw
+    §4.1.6 `ŝ(n)` that feeds it.
+
 - Round 282 wires the §4.1 **per-frame decode parameter chain** in a
   new `oxideav_g729::decode_chain` module — the glue that turns one
   ITU serial frame into fully-typed parameter structs through every

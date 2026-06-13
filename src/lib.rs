@@ -150,6 +150,26 @@
 //! remain unwired (an erasure sentinel returns
 //! [`decode_chain::FrameDecodeError::Erased`]).
 //!
+//! Round 290 wires the §4.1.6 **LP synthesis** stage — the first
+//! decoder stage to emit reconstructed-speech PCM. A new
+//! [`lp_synthesis`] module holds the stateful
+//! [`lp_synthesis::Synthesizer`], which owns the two cross-subframe
+//! state pieces (the eq (40) past-excitation buffer
+//! [`lp_synthesis::EXC_HISTORY`] = 153 samples, and the eq (77)
+//! 10th-order `1/Â(z)` filter memory), both zero-initialised per
+//! clause 4.3. [`lp_synthesis::Synthesizer::synthesize_frame`]
+//! consumes one round-282 [`decode_chain::DecodedFrame`] and runs the
+//! spec §4.1.3 → §3.10 → §4.1.6 chain per subframe: eq (40) builds the
+//! adaptive-codebook vector `v(n)` by interpolating the past
+//! excitation through the 31-tap `b_30`
+//! ([`tables::PITCH_INTERP_FILTER_SYNTHESIS_Q15`]) at the decoded
+//! fractional pitch delay; eq (75) forms the excitation
+//! `u(n) = ĝ_p·v(n) + ĝ_c·c(n)`; eq (77) filters it through the
+//! synthesis filter `ŝ(n) = u(n) − Σ_{i=1}^{10} â_i·ŝ(n−i)`. Both
+//! state buffers advance after every subframe so `v(n)` for the next
+//! subframe references the just-built excitation. §4.2
+//! post-processing remains a follow-up round.
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -182,6 +202,7 @@ pub mod fixed_codebook;
 pub mod gain_index_map;
 pub mod gain_predict;
 pub mod gain_reconstruct;
+pub mod lp_synthesis;
 pub mod lsp_interpolate;
 pub mod lsp_reconstruct;
 pub mod lsp_to_lp;

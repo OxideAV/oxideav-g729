@@ -984,6 +984,40 @@ exactly 60/300 §4.1.2 concealment activations on `PARITY.BIT`
 (each substituting exactly the previous frame's `int(T2)`), and
 frame-by-frame determinism of two independent chains.
 
+Round 290 lands the **first decoder stage to emit reconstructed
+speech** — the §4.1.6 LP synthesis path, in a new `lp_synthesis`
+module. A stateful `Synthesizer` owns the two cross-subframe state
+pieces clause 4.3 lists as zero-initialised: the eq (40)
+past-excitation buffer (`EXC_HISTORY` = 153 samples — the deepest
+eq (40) tap `u(n − k − i)` with `n = 0`, the §3.7 maximum integer
+delay `k = 143`, `i = 9` lands at index `−152`) and the eq (77)
+10th-order `1/Â(z)` synthesis-filter memory.
+`synthesize_frame(&DecodedFrame)` consumes one round-282 decoded
+frame and runs the spec §4.1.3 → §3.10 → §4.1.6 order per subframe:
+
+- **eq (40)** interpolates the past excitation through the 31-tap
+  `b_30` (`PITCH_INTERP_FILTER_SYNTHESIS_Q15`) at the decoded
+  fractional pitch delay, mapping the decoder's `(int(T), frac)`
+  (`frac ∈ {−1,0,1}`) onto the eq (39)/(40) `(k, t)` form
+  (`t ∈ {0,1,2}` for fractions 0, 1/3, 2/3) to build `v(n)`;
+- **eq (75)** forms the excitation `u(n) = ĝ_p·v(n) + ĝ_c·c(n)`
+  (with `c(n)` the post-eq (48) harmonic-enhanced codevector);
+- **eq (77)** filters it through the synthesis filter
+  `ŝ(n) = u(n) − Σ_{i=1}^{10} â_i·ŝ(n − i)`.
+
+The `v(n)`/`u(n)` build interleaves per sample so short delays
+(`T < 40`) fold correctly onto the already-built current
+excitation; both state buffers advance after every subframe.
+Typed outputs `SynthesizedFrame` (two subframes + `speech()` →
+the 80 time-ordered samples) and `SynthesizedSubframe` (the
+`adaptive` `v(n)`, `excitation` `u(n)`, and `speech` `ŝ(n)`
+40-sample vectors). 10 new unit tests pin the eq (40)/(75)/(77)
+algebra, the fraction-convention mapping, the state advance, the
+short-delay fold, and determinism; a new
+`tests/lp_synthesis_conformance.rs` harness asserts every
+`v(n)`/`u(n)`/`ŝ(n)` stays finite across all active frames of the
+base + Annex-A corpus.
+
 ## What is NOT wired up
 
 Every decode/encode entry point still returns `Error::NotImplemented`.
@@ -1012,14 +1046,16 @@ per-subframe `(ĝ_p, ĝ_c)` pairs, `(P1, P2)` →
 fractional pitch delays, AND `(C1, S1, C2, S2)` →
 `fixed_codebook::decode_frame` → per-subframe pulse layout +
 `build_codevector` → `c(n)` codevector → `pitch_sharpen::sharpen`
-(round 274) — and round 282's `decode_chain::FrameDecoder` now
-sequences all of it as one stateful per-frame call. The remaining
-decode-side work is the §3.7 eq (40) `b_30` past-excitation
-interpolator that turns `(int(T), frac, past excitation)` into
-the adaptive-codebook vector `v(n)`, the §3.10 / §4.1.6
-per-subframe excitation `u(n) = ĝ_p · v(n) + ĝ_c · c(n)` build
-+ `1/Â(z)` synthesis, the §4.2 post-processing cascade, and the
-§4.4 frame-erasure concealment. The
+(round 274) — and round 282's `decode_chain::FrameDecoder`
+sequences all of it as one stateful per-frame call, whose output
+round 290's `lp_synthesis::Synthesizer` turns into reconstructed
+speech `ŝ(n)` via the §3.7 eq (40) `b_30` past-excitation
+interpolator (`v(n)`), the §3.10 / §4.1.6 per-subframe excitation
+`u(n) = ĝ_p · v(n) + ĝ_c · c(n)` build, and the eq (77) `1/Â(z)`
+synthesis. The remaining decode-side work is the §4.2
+post-processing cascade (long-/short-term postfilter, tilt
+compensation, adaptive gain control, output high-pass + ×2
+upscaling) and the §4.4 frame-erasure concealment. The
 remaining numeric tables (gain-quantizer coefficient matrix
 `coef` / `L_coef`, postfilter interpolation `tab_hup_*`, taming
 `tab_zone`, Annex B DTX/CNG, LSF↔LSP cos/slope tables) are
