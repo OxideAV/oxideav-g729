@@ -170,6 +170,19 @@
 //! subframe references the just-built excitation. §4.2
 //! post-processing remains a follow-up round.
 //!
+//! Round 298 lands the **tail of the §4.2 post-processing cascade** —
+//! the §4.2.5 output high-pass filter + ×2 upscaling, in a new
+//! [`post_process`] module. A stateful [`post_process::OutputHighPass`]
+//! realises the eq (91) 2nd-order IIR `H_h2(z)` (100 Hz cut-off) from
+//! the compiled Q13 coefficient tables
+//! ([`tables::HPF_PREPROC_100HZ_B_Q13`] /
+//! [`tables::HPF_PREPROC_100HZ_A_Q13`]) and folds in the clause-4.2.5
+//! "×2 to restore the input signal level" upscaling. Its four state
+//! taps start zeroed per clause 4.3. The four front stages of the
+//! cascade (long-/short-term postfilter, tilt compensation, adaptive
+//! gain control) remain follow-up rounds; they slot in front of this
+//! tail unchanged.
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -209,6 +222,7 @@ pub mod lsp_to_lp;
 pub mod parameters;
 pub mod pitch_decode;
 pub mod pitch_sharpen;
+pub mod post_process;
 pub mod serial;
 pub mod tables;
 

@@ -1018,6 +1018,62 @@ short-delay fold, and determinism; a new
 `v(n)`/`u(n)`/`ŝ(n)` stays finite across all active frames of the
 base + Annex-A corpus.
 
+### Round 298 — §4.2.5 output high-pass + ×2 upscaling
+
+Round 298 lands the **tail of the §4.2 post-processing cascade** in a
+new `oxideav_g729::post_process` module. The full cascade is
+(clause 4.2): long-term postfilter `H_p(z)` (4.2.1) → short-term
+postfilter `H_f(z)` (4.2.2) → tilt compensation `H_t(z)` (4.2.3) →
+adaptive gain control (4.2.4) → **output high-pass + ×2 upscaling
+(4.2.5)**. The four front stages are follow-up rounds; this round
+wires the one stage that is both fully self-contained (a fixed
+2nd-order IIR plus a constant scale) and already table-backed.
+
+`OutputHighPass` (stateful) realises spec eq (91)
+
+```text
+           0.93980581 − 1.8795834·z⁻¹ + 0.93980581·z⁻²
+H_h2(z) = ─────────────────────────────────────────────
+           1 − 1.9330735·z⁻¹ + 0.93589199·z⁻²
+```
+
+from the already-compiled Q13 coefficient tables
+`HPF_PREPROC_100HZ_B_Q13` (`{7699, −15398, 7699}`) and
+`HPF_PREPROC_100HZ_A_Q13` (`{8192, 15836, −7667}`), with the
+clause-4.2.5 "multiplied by a factor 2 to restore the input signal
+level" upscaling folded into each returned sample. The Q13 `a`-table
+stores the feedback gains **sign-arranged for an additive recursion**
+(`a[1] = +1.933105` is the `y(n−1)` gain, `a[2] = −0.935791` the
+`y(n−2)` gain), so the difference equation
+`y(n) = b0·x(n) + b1·x(n−1) + b2·x(n−2) + a1·y(n−1) + a2·y(n−2)`
+reproduces the eq (91) denominator within the Q13 rounding step. The
+four state taps (two input, two output) start zeroed per clause 4.3.
+
+`filter_sample` (per-sample), `filter_in_place` (in-place slice), and
+`filter` (allocating) all carry state across calls so a stream can be
+fed in arbitrary chunks; `b_coeffs` / `a_coeffs` expose the
+real-valued coefficients.
+
+10 unit tests pin the algorithmic invariants: clause-4.3 zero state +
+table-sourced coefficients; eq (91) decimal match within one Q13 step;
+the ×2 first-sample gain `2·b0·x(0)`; the exact DC zero
+`b0 + b1 + b2 = 0` (the defining high-pass property and a `b1`
+sign-error tripwire); DC rejection on a long constant input; a
+hand-worked impulse-response recursion pinning the additive-feedback
+sign; batch-vs-per-sample API equivalence (output AND state);
+cross-call state continuity (whole-stream == split-stream); BIBO
+stability on a ±8000 square wave over 10 000 samples; determinism.
+
+1 new integration harness `tests/post_process_conformance.rs` chains
+decode → §4.1.6 synthesis → eq (91) output filter over **every** active
+frame of the base-codec + Annex-A `.BIT` corpus (> 7 500 frames),
+asserting every output sample stays finite (the 2nd-order IIR never
+diverges on real decoded-speech excursions with state carried
+frame-to-frame), plus a determinism check on `ALGTHM.BIT`. As with the
+round-290 synthesis harness, the four un-wired front cascade stages
+mean this is a finiteness/stability guarantee, not a PCM bit-exact
+comparison against the reference `.PST` / `.OUT` outputs.
+
 ## What is NOT wired up
 
 Every decode/encode entry point still returns `Error::NotImplemented`.
@@ -1052,10 +1108,12 @@ round 290's `lp_synthesis::Synthesizer` turns into reconstructed
 speech `ŝ(n)` via the §3.7 eq (40) `b_30` past-excitation
 interpolator (`v(n)`), the §3.10 / §4.1.6 per-subframe excitation
 `u(n) = ĝ_p · v(n) + ĝ_c · c(n)` build, and the eq (77) `1/Â(z)`
-synthesis. The remaining decode-side work is the §4.2
-post-processing cascade (long-/short-term postfilter, tilt
-compensation, adaptive gain control, output high-pass + ×2
-upscaling) and the §4.4 frame-erasure concealment. The
+synthesis, whose output round 298's `post_process::OutputHighPass`
+runs through the §4.2.5 eq (91) output high-pass + ×2 upscaling
+(the tail of the §4.2 cascade). The remaining decode-side work is
+the four front §4.2 post-processing stages (long-/short-term
+postfilter, tilt compensation, adaptive gain control) and the §4.4
+frame-erasure concealment. The
 remaining numeric tables (gain-quantizer coefficient matrix
 `coef` / `L_coef`, postfilter interpolation `tab_hup_*`, taming
 `tab_zone`, Annex B DTX/CNG, LSF↔LSP cos/slope tables) are

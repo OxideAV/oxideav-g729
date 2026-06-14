@@ -8,6 +8,37 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 298 wires the **tail of the §4.2 post-processing cascade** —
+  the §4.2.5 output high-pass filter + ×2 upscaling — in a new
+  `oxideav_g729::post_process` module:
+  - `OutputHighPass` (stateful) realises the eq (91) 2nd-order IIR
+    `H_h2(z)` (100 Hz cut-off) from the already-compiled Q13 coefficient
+    tables `HPF_PREPROC_100HZ_B_Q13` (`{7699, −15398, 7699}`) and
+    `HPF_PREPROC_100HZ_A_Q13` (`{8192, 15836, −7667}`), with the
+    clause-4.2.5 "×2 to restore the input signal level" upscaling folded
+    into each output sample. The Q13 `a`-table stores the feedback gains
+    sign-arranged for an additive recursion, so the difference equation
+    is `y(n) = b0·x(n) + b1·x(n−1) + b2·x(n−2) + a1·y(n−1) + a2·y(n−2)`,
+    reproducing the eq (91) denominator `1 − 1.9330735·z⁻¹ +
+    0.93589199·z⁻²`. The four state taps (two input, two output) start
+    zeroed per clause 4.3.
+  - `filter_sample` (per-sample), `filter_in_place` (in-place slice),
+    and `filter` (allocating) entry points all carry state across calls
+    so a stream can be fed in arbitrary chunks; `b_coeffs` / `a_coeffs`
+    expose the real-valued coefficients for inspection.
+  - 10 unit tests (clause-4.3 zero state + table-sourced coefficients,
+    eq (91) decimal match within one Q13 step, ×2 first-sample gain,
+    exact DC zero `b0+b1+b2=0`, DC rejection, hand-worked impulse-
+    response recursion pinning the additive-feedback sign, batch/per-
+    sample API equivalence, cross-call state continuity, BIBO stability
+    on bounded input, determinism) plus a new
+    `tests/post_process_conformance.rs` harness asserting every
+    output sample stays finite across decode → synthesis → eq (91) over
+    all active frames of the base-codec + Annex-A `.BIT` corpus
+    (> 7 500 frames), with a determinism check on `ALGTHM.BIT`.
+  - The four front stages of the §4.2 cascade (long-/short-term
+    postfilter, tilt compensation, adaptive gain control) remain
+    follow-up rounds; they slot in front of this tail unchanged.
 - Round 290 wires the §4.1.6 **LP synthesis** stage in a new
   `oxideav_g729::lp_synthesis` module — the first decoder stage to
   emit reconstructed-speech PCM:
