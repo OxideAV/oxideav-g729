@@ -8,6 +8,47 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 319 wires the **§4.2.3 tilt compensation** and **§4.2.4
+  adaptive gain control** stages of the §4.2 post-processing cascade —
+  the two filters that sit between the round-313 short-term postfilter
+  and the round-298 output high-pass:
+  - New `oxideav_g729::tilt_compensation` module. `TiltCoefficients`
+    derives the eq (87) tilt factor `k1' = −r_h(1)/r_h(0)` (the first
+    reflection coefficient of the short-term postfilter impulse response
+    `h_f(n)`, with `r_h(i) = Σ_{j=0}^{19−i} h_f(j)·h_f(j+i)`), selects
+    `γ_t = 0.9` when `k1' < 0` else `0.2` (`GAMMA_T_NEG` / `GAMMA_T_POS`),
+    and the gain term `g_t = 1 − |γ_t·k1'|`. Stateful
+    `TiltCompensation` realises the eq (86) first-order FIR
+    `H_t(z) = (1/g_t)·(1 + γ_t·k1'·z⁻¹)` per subframe
+    (`sf(n) = (1/g_t)·(t(n) + γ_t·k1'·t(n−1))`), carrying the single
+    input tap `t(n−1)` across subframes (zero-init per clause 4.3);
+    `filter_subframe` derives the coefficients from the subframe `â_i`,
+    `filter_subframe_with` takes pre-derived coefficients.
+  - New `oxideav_g729::adaptive_gain_control` module. Stateful
+    `AdaptiveGainControl` realises the eq (88) per-subframe energy ratio
+    `G = Σ|ŝ(n)| / Σ|sf(n)|`, the eq (90) sample-by-sample gain
+    smoothing `g(n) = 0.85·g(n−1) + 0.15·G` (`AGC_PREV_WEIGHT` /
+    `AGC_TARGET_WEIGHT`), and the eq (89) scaling `sf′(n) = g(n)·sf(n)`,
+    with the Table 9 start-up gain `g(−1) = 1.0` (`G_INIT`) carried
+    across subframes (`g(−1) := g(39)`, clause 4.2.4). A silent
+    postfiltered subframe (`Σ|sf| = 0`) holds the previous gain rather
+    than dividing by zero.
+  - New `impulse_response` helper on `ShortTermPostfilter` exposing the
+    first 20 samples of the un-normalised `Â(z/γ_n)/Â(z/γ_d)` impulse
+    response `h_f(n)` (the same response `gain_term` now sums for `g_f`,
+    and the source of the §4.2.3 tilt factor's autocorrelation).
+  - 23 new unit tests: tilt-factor hand computations (negative-`k1'` ⇒
+    `γ_t = 0.9` and positive-`k1'` ⇒ `γ_t = 0.2`, both with hand-derived
+    `g_t`), eq (86) FIR hand recursion, cross-subframe state continuity,
+    flat-filter identity, determinism, finiteness; AGC eq (88) ratio,
+    eq (90) smoothing hand recursion, fixed-point convergence to a
+    constant `G`, silent-subframe gain-hold, cross-subframe carry,
+    determinism; plus two `impulse_response`/`gain_term` consistency
+    tests on `ShortTermPostfilter`.
+  - The §4.2.1 long-term postfilter (its residual-domain two-pass pitch
+    search, with `g_l` bounded by 1 and zeroed below a 3 dB long-term
+    prediction gain, `γ_p = 0.5`) is now the **only** unwired §4.2 stage.
+
 - Round 313 wires the **§4.2.2 short-term postfilter `H_f(z)`** — the
   spectral-shaping stage of the §4.2 cascade (between the §4.2.1
   long-term postfilter and the §4.2.3 tilt compensation) — in a new

@@ -203,6 +203,28 @@
 //! tilt-compensation / adaptive-gain-control stages remain follow-up
 //! rounds; they slot around this module unchanged.
 //!
+//! Round 319 lands the **§4.2.3 tilt compensation** and **§4.2.4
+//! adaptive gain control** stages — the two §4.2 cascade filters that
+//! sit between the round-313 short-term postfilter and the round-298
+//! output high-pass. A new [`tilt_compensation`] module holds the
+//! stateful [`tilt_compensation::TiltCompensation`], which realises the
+//! eq (86) first-order FIR `H_t(z) = (1/g_t)·(1 + γ_t·k1'·z⁻¹)`: per
+//! subframe it derives the tilt factor `k1' = −r_h(1)/r_h(0)` (eq (87))
+//! from the autocorrelation of the short-term postfilter impulse
+//! response `h_f(n)` (the new
+//! [`short_term_postfilter::ShortTermPostfilter::impulse_response`]),
+//! selects `γ_t = 0.9` when `k1' < 0` else `0.2`, and normalises by
+//! `g_t = 1 − |γ_t·k1'|`, carrying the single FIR input tap `t(n−1)`
+//! across subframes. A new [`adaptive_gain_control`] module holds the
+//! stateful [`adaptive_gain_control::AdaptiveGainControl`], which
+//! realises the eq (88) per-subframe energy ratio
+//! `G = Σ|ŝ(n)| / Σ|sf(n)|`, the eq (90) sample-by-sample gain
+//! smoothing `g(n) = 0.85·g(n−1) + 0.15·G`, and the eq (89) scaling
+//! `sf′(n) = g(n)·sf(n)`, with the Table 9 start-up gain `g(−1) = 1.0`
+//! carried across subframes (`g(−1) := g(39)` of the previous subframe,
+//! clause 4.2.4). The §4.2.1 long-term postfilter remains the last
+//! unwired §4.2 stage.
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -230,6 +252,7 @@
 
 use oxideav_core::RuntimeContext;
 
+pub mod adaptive_gain_control;
 pub mod decode_chain;
 pub mod fixed_codebook;
 pub mod gain_index_map;
@@ -246,6 +269,7 @@ pub mod post_process;
 pub mod serial;
 pub mod short_term_postfilter;
 pub mod tables;
+pub mod tilt_compensation;
 
 /// Crate-local error type. Until decode + encode are wired up, every
 /// public codec entry point returns [`Error::NotImplemented`].

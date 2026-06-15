@@ -77,9 +77,10 @@
 //!
 //! It is the §4.2.2 stage only. The §4.2.1 long-term (harmonic)
 //! postfilter that precedes it (its residual-domain two-pass pitch
-//! search) and the §4.2.3 tilt compensation / §4.2.4 adaptive gain
-//! control that follow it are separate follow-up rounds; they slot
-//! around this module unchanged. Until §4.2.1 lands, the input to this
+//! search) is a separate follow-up round. The §4.2.3 tilt compensation
+//! that follows it consumes this stage's [`Self::impulse_response`]
+//! (its first reflection coefficient `k1'`, eq (87)); see
+//! [`crate::tilt_compensation`]. Until §4.2.1 lands, the input to this
 //! stage is the raw §4.1.6 reconstructed speech `ŝ(n)` from
 //! [`crate::lp_synthesis`] rather than the long-term-postfiltered
 //! residual the full cascade would feed in.
@@ -167,24 +168,26 @@ impl ShortTermPostfilter {
         w
     }
 
-    /// eq (85) gain term `g_f = Σ_{n=0}^{19} |h_f(n)|`, where `h_f(n)`
-    /// is the impulse response of the un-normalised filter
-    /// `Â(z/γ_n)/Â(z/γ_d)` (numerator over denominator, no `1/g_f`).
+    /// The first [`GF_IMPULSE_LEN`] samples of the impulse response
+    /// `h_f(n)` of the un-normalised filter `Â(z/γ_n)/Â(z/γ_d)`
+    /// (numerator over denominator, no `1/g_f`).
     ///
     /// Computed by driving a *local, zero-state* copy of the
     /// numerator-then-denominator filter with a unit impulse for
-    /// [`GF_IMPULSE_LEN`] samples and summing the absolute outputs. This
-    /// never touches the carried-over [`Self::x_hist`] / [`Self::y_hist`]
-    /// state — `g_f` is a property of the coefficients alone.
+    /// [`GF_IMPULSE_LEN`] samples. This never touches the carried-over
+    /// [`Self::x_hist`] / [`Self::y_hist`] state — `h_f(n)` is a property
+    /// of the coefficients alone. It is the same response whose absolute
+    /// values eq (85) sums for `g_f`, and whose autocorrelation eq (87)
+    /// uses for the §4.2.3 tilt factor `k1'`.
     #[must_use]
-    pub fn gain_term(a: &[f32; M]) -> f32 {
+    pub fn impulse_response(a: &[f32; M]) -> [f32; GF_IMPULSE_LEN] {
         let wn = Self::weighted_num(a);
         let wd = Self::weighted_den(a);
         // Local zero-state impulse response of Â(z/γ_n)/Â(z/γ_d).
         let mut xh = [0.0f32; M]; // numerator input history
         let mut yh = [0.0f32; M]; // denominator output history
-        let mut sum = 0.0f32;
-        for n in 0..GF_IMPULSE_LEN {
+        let mut h = [0.0f32; GF_IMPULSE_LEN];
+        for (n, hn) in h.iter_mut().enumerate() {
             let x = if n == 0 { 1.0 } else { 0.0 };
             // Numerator: r = x + Σ wn[i]·x(n−1−i).
             let mut r = x;
@@ -196,7 +199,7 @@ impl ShortTermPostfilter {
             for (&w, &yv) in wd.iter().zip(yh.iter()) {
                 y -= w * yv;
             }
-            sum += y.abs();
+            *hn = y;
             // Advance local histories (most-recent at index 0).
             for i in (1..M).rev() {
                 xh[i] = xh[i - 1];
@@ -205,7 +208,18 @@ impl ShortTermPostfilter {
             xh[0] = x;
             yh[0] = y;
         }
-        sum
+        h
+    }
+
+    /// eq (85) gain term `g_f = Σ_{n=0}^{19} |h_f(n)|`, where `h_f(n)`
+    /// is the impulse response of the un-normalised filter
+    /// `Â(z/γ_n)/Â(z/γ_d)` (numerator over denominator, no `1/g_f`).
+    ///
+    /// `g_f` is a property of the coefficients alone — it never touches
+    /// the carried-over [`Self::x_hist`] / [`Self::y_hist`] state.
+    #[must_use]
+    pub fn gain_term(a: &[f32; M]) -> f32 {
+        Self::impulse_response(a).iter().map(|v| v.abs()).sum()
     }
 
     /// Filter one 40-sample subframe `x(n)` through `H_f(z)` (eq (84))
@@ -330,6 +344,34 @@ mod tests {
             expected += h.abs();
         }
         assert!((gf - expected).abs() < 1e-5, "got {gf}, want {expected}");
+    }
+
+    /// `gain_term` is the sum of `|h_f(n)|` over the impulse response, so
+    /// the two helpers stay consistent: `g_f = Σ |impulse_response|`.
+    #[test]
+    fn gain_term_is_sum_of_impulse_magnitudes() {
+        let mut a = [0.0f32; M];
+        a[0] = 0.7;
+        a[1] = -0.25;
+        a[5] = 0.1;
+        let h = ShortTermPostfilter::impulse_response(&a);
+        let sum: f32 = h.iter().map(|v| v.abs()).sum();
+        assert!((sum - ShortTermPostfilter::gain_term(&a)).abs() < 1e-6);
+        // h_f(0) of Â(z/γ_n)/Â(z/γ_d) is the unit impulse passed through
+        // both an FIR with leading 1 and an all-pole with leading 1 → 1.
+        assert!((h[0] - 1.0).abs() < 1e-6);
+    }
+
+    /// `h_f(1)` of the single-tap filter `(1 + γ_n·z⁻¹)/(1 + γ_d·z⁻¹)` is
+    /// `γ_n − γ_d` (the order-1 step of the recursion in the gain-term
+    /// hand check above), pinning the impulse-response sign convention.
+    #[test]
+    fn impulse_response_single_tap_first_sample() {
+        let mut a = [0.0f32; M];
+        a[0] = 1.0;
+        let h = ShortTermPostfilter::impulse_response(&a);
+        assert!((h[0] - 1.0).abs() < 1e-6);
+        assert!((h[1] - (GAMMA_N - GAMMA_D)).abs() < 1e-6);
     }
 
     /// `g_f` depends only on the coefficients, not on the carried state:

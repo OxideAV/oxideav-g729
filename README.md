@@ -48,14 +48,24 @@ by `decode_chain::FrameDecoder` as one stateful per-frame call:
   the eq (84) weighted pole/zero pair `Â(z/γ_n)/Â(z/γ_d)` (γ_n = 0.55,
   γ_d = 0.70) with the eq (85) impulse-response gain normalisation
   `g_f = Σ_{n=0}^{19} |h_f(n)|`, per-subframe `â_i`, continuous memory.
+- **§4.2.3 tilt compensation `H_t(z)`** (`tilt_compensation`) — the
+  eq (86) first-order FIR `H_t(z) = (1/g_t)·(1 + γ_t·k1'·z⁻¹)`, with
+  the eq (87) tilt factor `k1' = −r_h(1)/r_h(0)` taken from the
+  autocorrelation of the short-term postfilter impulse response
+  `h_f(n)`, the sign-selected `γ_t` (0.9 / 0.2), and the gain term
+  `g_t = 1 − |γ_t·k1'|`.
+- **§4.2.4 adaptive gain control** (`adaptive_gain_control`) — the
+  eq (88) energy ratio `G = Σ|ŝ(n)|/Σ|sf(n)|`, the eq (90) gain
+  smoothing `g(n) = 0.85·g(n−1) + 0.15·G`, and the eq (89) scaling
+  `sf′(n) = g(n)·sf(n)`, with the Table 9 init `g(−1) = 1.0`.
 - **§4.2.5 output high-pass + ×2 upscaling** (`post_process`) — the
   tail of the §4.2 post-processing cascade.
 
 ### What is NOT yet wired up
 
-- The remaining §4.2 post-processing stages (§4.2.1 long-term
-  postfilter, §4.2.3 tilt compensation, §4.2.4 adaptive gain control)
-  and §4.4 frame-erasure concealment.
+- The §4.2.1 long-term postfilter (its residual-domain two-pass pitch
+  search) — the only remaining §4.2 post-processing stage — and §4.4
+  frame-erasure concealment.
 - The full encoder.
 - Registry-side codec factory wiring (the codec entry point returns
   `NotImplemented`).
