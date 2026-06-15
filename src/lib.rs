@@ -183,6 +183,26 @@
 //! gain control) remain follow-up rounds; they slot in front of this
 //! tail unchanged.
 //!
+//! Round 313 lands the **§4.2.2 short-term postfilter `H_f(z)`** — the
+//! spectral-shaping stage of the §4.2 cascade that sits between the
+//! §4.2.1 long-term postfilter and the §4.2.3 tilt compensation. A new
+//! [`short_term_postfilter`] module holds the stateful
+//! [`short_term_postfilter::ShortTermPostfilter`], which realises the
+//! eq (84) transfer function `H_f(z) = (1/g_f)·Â(z/γ_n)/Â(z/γ_d)` from
+//! the per-subframe quantised LP coefficients `â_i` and the two
+//! constant weight factors [`short_term_postfilter::GAMMA_N`] (0.55)
+//! and [`short_term_postfilter::GAMMA_D`] (0.70). Per subframe it
+//! filters the input through the all-zero numerator `Â(z/γ_n)`
+//! (`r(n) = x(n) + Σ γ_n^i·â_i·x(n−i)` — the same residual clause 4.2.1
+//! names) then the all-pole denominator `1/Â(z/γ_d)`
+//! (`y(n) = r(n) − Σ γ_d^i·â_i·y(n−i)`), and scales by the eq (85)
+//! gain term `g_f = Σ_{n=0}^{19} |h_f(n)|` recomputed from the current
+//! `â_i`. Both 10-tap filter memories start zeroed per clause 4.3 and
+//! carry across subframes. The §4.2.1 long-term postfilter (its
+//! residual-domain two-pass pitch search) and the §4.2.3/§4.2.4
+//! tilt-compensation / adaptive-gain-control stages remain follow-up
+//! rounds; they slot around this module unchanged.
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
@@ -224,6 +244,7 @@ pub mod pitch_decode;
 pub mod pitch_sharpen;
 pub mod post_process;
 pub mod serial;
+pub mod short_term_postfilter;
 pub mod tables;
 
 /// Crate-local error type. Until decode + encode are wired up, every

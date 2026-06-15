@@ -8,6 +8,42 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 313 wires the **§4.2.2 short-term postfilter `H_f(z)`** — the
+  spectral-shaping stage of the §4.2 cascade (between the §4.2.1
+  long-term postfilter and the §4.2.3 tilt compensation) — in a new
+  `oxideav_g729::short_term_postfilter` module:
+  - `ShortTermPostfilter` (stateful) realises the eq (84) transfer
+    function `H_f(z) = (1/g_f)·Â(z/γ_n)/Â(z/γ_d)` from the per-subframe
+    quantised LP coefficients `â_i` and the two constant weight factors
+    `GAMMA_N` (0.55) and `GAMMA_D` (0.70) (Table 5 / clause 4.2.2). Each
+    subframe is filtered through the all-zero numerator `Â(z/γ_n)`
+    (`r(n) = x(n) + Σ_{i=1}^{10} γ_n^i·â_i·x(n−i)` — the same residual
+    clause 4.2.1 names) then the all-pole denominator `1/Â(z/γ_d)`
+    (`y(n) = r(n) − Σ_{i=1}^{10} γ_d^i·â_i·y(n−i)`), and scaled by the
+    eq (85) gain term `g_f = Σ_{n=0}^{19} |h_f(n)|` (the magnitude sum
+    of the first 20 impulse-response samples of the un-normalised
+    `Â(z/γ_n)/Â(z/γ_d)`), recomputed from the current `â_i` each call.
+  - `filter_subframe` (one 40-sample subframe with its `â_i`) carries
+    both 10-tap filter memories across subframes (zero-init per
+    clause 4.3); `gain_term` (static, state-independent), `x_hist` /
+    `y_hist` (inspection), and the `GF_IMPULSE_LEN` (20) constant round
+    out the surface.
+  - 9 unit tests (flat-filter identity + `g_f = 1`, clause-4.3 zero
+    state, spec weight factors, `γ^i·â_i` weighting, `g_f` matched
+    against an independent single-tap hand recursion, `g_f`
+    state-independence, cross-subframe state continuity vs a continuous
+    reference recursion, determinism, finiteness on a realistic
+    coefficient set) plus a new
+    `tests/short_term_postfilter_conformance.rs` harness asserting every
+    output sample and every per-subframe `g_f` stays finite/positive
+    across decode → synthesis → eq (84)/(85) over all active frames of
+    the base-codec + Annex-A `.BIT` corpus (> 7 500 frames), with a
+    determinism check on `ALGTHM.BIT`.
+  - The §4.2.1 long-term postfilter (its residual-domain two-pass pitch
+    search) and the §4.2.3/§4.2.4 tilt-compensation / adaptive-gain-
+    control stages remain follow-up rounds; they slot around this module
+    unchanged.
+
 - Round 298 wires the **tail of the §4.2 post-processing cascade** —
   the §4.2.5 output high-pass filter + ×2 upscaling — in a new
   `oxideav_g729::post_process` module:

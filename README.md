@@ -44,14 +44,18 @@ by `decode_chain::FrameDecoder` as one stateful per-frame call:
 - **§3.7 / §3.10 / §4.1.6 LP synthesis** (`lp_synthesis`) — the
   past-excitation interpolator, the per-subframe excitation build
   `u(n) = ĝ_p·v(n) + ĝ_c·c(n)`, and the `1/Â(z)` synthesis filter.
+- **§4.2.2 short-term postfilter `H_f(z)`** (`short_term_postfilter`) —
+  the eq (84) weighted pole/zero pair `Â(z/γ_n)/Â(z/γ_d)` (γ_n = 0.55,
+  γ_d = 0.70) with the eq (85) impulse-response gain normalisation
+  `g_f = Σ_{n=0}^{19} |h_f(n)|`, per-subframe `â_i`, continuous memory.
 - **§4.2.5 output high-pass + ×2 upscaling** (`post_process`) — the
   tail of the §4.2 post-processing cascade.
 
 ### What is NOT yet wired up
 
-- The four front §4.2 post-processing stages (long-/short-term
-  postfilter, tilt compensation, adaptive gain control) and §4.4
-  frame-erasure concealment.
+- The remaining §4.2 post-processing stages (§4.2.1 long-term
+  postfilter, §4.2.3 tilt compensation, §4.2.4 adaptive gain control)
+  and §4.4 frame-erasure concealment.
 - The full encoder.
 - Registry-side codec factory wiring (the codec entry point returns
   `NotImplemented`).
