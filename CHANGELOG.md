@@ -8,6 +8,40 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 326 wires the **§4.2.1 long-term (harmonic) postfilter
+  `H_p(z)`** — the head of the §4.2 post-processing cascade and the
+  last front stage that was still missing. New
+  `oxideav_g729::long_term_postfilter` module:
+  - `LongTermPostfilter` is the stateful integer-delay form of eqs
+    (78)–(83). Per subframe it forms the eq (79) residual
+    `r̂(n) = ŝ(n) + Σ_{i=1}^{10} γ_n^i·â_i·ŝ(n−i)` — clause 4.2.1's
+    "numerator of the short-term postfilter `Â(z/γ_n)`" applied to the
+    reconstructed speech, reusing `ShortTermPostfilter::weighted_num`
+    (now `pub(crate)`) so the two stages share one `γ_n^i·â_i`
+    definition.
+  - The eq (80) integer delay search maximises
+    `R(k) = Σ_{n=0}^{39} r̂(n)·r̂(n−k)` over the three candidates
+    `[int(T_1) − 1, int(T_1) + 1]`; the eq (82) long-term-prediction-gain
+    test disables the filter (`g_l = 0`) when
+    `R′(T)² / Σ r̂(n)² < 0.5` (`ENABLE_THRESHOLD`); otherwise the eq (83)
+    gain `g_l = Σ r̂(n)·r̂(n−T) / Σ r̂(n−T)²` is bounded to `[0, 1]`.
+  - `filter_subframe` applies the eq (78) harmonic filter
+    `H_p(z) = (1/(1+γ_p·g_l))·(1 + γ_p·g_l·z⁻ᵀ)` (`GAMMA_P` = 0.5),
+    returning the postfiltered subframe plus a `LongTermDecision`
+    (chosen delay + gain). The reconstructed-speech and residual
+    histories are zero-initialised per clause 4.3 and carry across
+    subframes (`MAX_DELAY` = 144).
+  - 12 spec-cited unit tests: flat-filter residual identity, residual vs
+    direct convolution, periodic-residual enable with near-unit gain,
+    uncorrelated/alternating residual disable, eq (82) threshold gating,
+    eq (78) algebra with history, history advance order, gain bound +
+    delay window, determinism.
+  - **Scope note / docs-gap:** the second-pass 1/8-resolution
+    *fractional* delay refinement and its `tab_hup_s` (length 33) /
+    `tab_hup_l` (length 129) interpolation filters are NOT wired — the
+    spec prose names the filter lengths but defers their per-phase tap
+    layout / convolution indexing to the electronic-attachment
+    reference. The integer pass is the spec-prose-complete core.
 - Round 319 wires the **§4.2.3 tilt compensation** and **§4.2.4
   adaptive gain control** stages of the §4.2 post-processing cascade —
   the two filters that sit between the round-313 short-term postfilter

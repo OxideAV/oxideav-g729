@@ -146,7 +146,14 @@ impl ShortTermPostfilter {
     /// The weighted numerator coefficients `γ_n^i·â_i` for `i = 1 … 10`
     /// (slot `j` holds the `i = j+1` coefficient), from the subframe
     /// `â_i` (slots `0 … 9` hold `â_1 … â_10`).
-    fn weighted_num(a: &[f32; M]) -> [f32; M] {
+    ///
+    /// Exposed crate-internally because the §4.2.1 long-term postfilter's
+    /// eq (79) residual `r̂(n) = ŝ(n) + Σ γ_n^i·â_i·ŝ(n−i)` is, per
+    /// clause 4.2.1, "the numerator of the short-term postfilter" applied
+    /// to `ŝ(n)` — the very `γ_n^i·â_i` weights computed here. Sharing the
+    /// helper keeps the two stages on one definition (see
+    /// [`crate::long_term_postfilter`]).
+    pub(crate) fn weighted_num(a: &[f32; M]) -> [f32; M] {
         let mut w = [0.0f32; M];
         let mut g = GAMMA_N;
         for i in 0..M {

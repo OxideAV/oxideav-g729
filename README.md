@@ -44,6 +44,16 @@ by `decode_chain::FrameDecoder` as one stateful per-frame call:
 - **§3.7 / §3.10 / §4.1.6 LP synthesis** (`lp_synthesis`) — the
   past-excitation interpolator, the per-subframe excitation build
   `u(n) = ĝ_p·v(n) + ĝ_c·c(n)`, and the `1/Â(z)` synthesis filter.
+- **§4.2.1 long-term postfilter `H_p(z)`** (`long_term_postfilter`) —
+  the head of the §4.2 cascade. Forms the eq (79) residual
+  `r̂(n) = ŝ(n) + Σ γ_n^i·â_i·ŝ(n−i)` (the short-term postfilter
+  numerator applied to `ŝ`), runs the eq (80) integer delay search over
+  `[int(T1)−1, int(T1)+1]`, the eq (82) `R′(T)²/Σr̂² < 0.5` disable test,
+  and the eq (83) bounded gain `g_l`, then applies the eq (78) harmonic
+  filter `H_p(z) = (1/(1+γ_p·g_l))·(1 + γ_p·g_l·z⁻ᵀ)` (γ_p = 0.5). The
+  integer-delay form is fully spec-prose-sourced; the 1/8-resolution
+  fractional refinement (length-33/129 interpolation filters) is the
+  remaining sub-stage (its tap layout is defer-to-reference, a docs-gap).
 - **§4.2.2 short-term postfilter `H_f(z)`** (`short_term_postfilter`) —
   the eq (84) weighted pole/zero pair `Â(z/γ_n)/Â(z/γ_d)` (γ_n = 0.55,
   γ_d = 0.70) with the eq (85) impulse-response gain normalisation
@@ -63,9 +73,11 @@ by `decode_chain::FrameDecoder` as one stateful per-frame call:
 
 ### What is NOT yet wired up
 
-- The §4.2.1 long-term postfilter (its residual-domain two-pass pitch
-  search) — the only remaining §4.2 post-processing stage — and §4.4
-  frame-erasure concealment.
+- The §4.2.1 long-term postfilter's **1/8-resolution fractional** delay
+  pass (the length-33/129 interpolation filters `tab_hup_s`/`tab_hup_l`,
+  whose per-phase tap layout the spec prose defers to the reference) —
+  the integer-delay pass is wired above. And §4.4 frame-erasure
+  concealment.
 - The full encoder.
 - Registry-side codec factory wiring (the codec entry point returns
   `NotImplemented`).
