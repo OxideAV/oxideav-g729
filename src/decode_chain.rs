@@ -81,6 +81,7 @@ use crate::gain_predict::{GainPredictor, PredictedGain};
 use crate::gain_reconstruct::{
     reconstruct_gains_from_transmitted, GainReconstructError, QuantisedGains,
 };
+use crate::lp_synthesis::{SynthesizedFrame, Synthesizer};
 use crate::lsp_interpolate::{omega_to_q, LspInterpolator, SUBFRAMES_PER_FRAME};
 use crate::lsp_reconstruct::{LspReconstructError, LspReconstructor};
 use crate::lsp_to_lp::{lsp_to_lp, LpCoefficients};
@@ -255,6 +256,11 @@ pub struct FrameDecoder {
     /// the delay value T2 of the previous frame"). Not listed in
     /// Table 9, so it starts at zero per the clause-4.3 default.
     prev_int_t2: i32,
+    /// §3.10 / §4.1.6 LP synthesizer. Owns the eq (40) past-excitation
+    /// buffer and the eq (77) 10th-order filter memory, both zero-init
+    /// per clause 4.3. Driven only by the `*_to_speech` entry points;
+    /// the parameter-only `decode_*` calls leave it untouched.
+    synthesizer: Synthesizer,
 }
 
 impl Default for FrameDecoder {
@@ -273,6 +279,7 @@ impl FrameDecoder {
             gain_predictor: GainPredictor::new(),
             g_p_prev: BETA_INIT,
             prev_int_t2: 0,
+            synthesizer: Synthesizer::new(),
         }
     }
 
@@ -288,6 +295,16 @@ impl FrameDecoder {
     #[must_use]
     pub fn prev_int_t2(&self) -> i32 {
         self.prev_int_t2
+    }
+
+    /// Borrow the §3.10 / §4.1.6 [`Synthesizer`] for inspection / tests.
+    ///
+    /// The synthesizer only advances when a `*_to_speech` entry point is
+    /// used; the parameter-only `decode_*` calls leave it at its
+    /// clause-4.3 start-up state.
+    #[must_use]
+    pub fn synthesizer(&self) -> &Synthesizer {
+        &self.synthesizer
     }
 
     /// Decode one 164-byte ITU serial frame: framing parse → Table-8
@@ -429,6 +446,68 @@ impl FrameDecoder {
                 sub2.expect("subframe 2 populated above"),
             ],
         })
+    }
+
+    /// Decode one 164-byte ITU serial frame all the way to reconstructed
+    /// speech `ŝ(n)`.
+    ///
+    /// Runs the §4.1 parameter chain ([`Self::decode_serial_frame`]) and
+    /// then the §3.10 → §4.1.6 LP synthesis (eq (40) adaptive-codebook
+    /// interpolation, eq (75) excitation `u(n) = ĝ_p·v(n) + ĝ_c·c(n)`,
+    /// eq (77) `1/Â(z)` filter), advancing both the §4.1 cross-frame
+    /// state and the synthesizer's eq (40)/(77) memories in stream
+    /// order. The returned [`SynthesizedFrame`] exposes the 80
+    /// reconstructed-speech samples via
+    /// [`SynthesizedFrame::speech`].
+    ///
+    /// The §4.2 post-processing cascade (postfilters, tilt, AGC, output
+    /// high-pass + ×2) is **not** applied here — those modules exist
+    /// standalone and are wired separately. This entry point yields the
+    /// pre-postfilter reconstructed speech.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode_serial_frame`].
+    pub fn decode_serial_frame_to_speech(
+        &mut self,
+        frame_bytes: &[u8],
+    ) -> Result<SynthesizedFrame, FrameDecodeError> {
+        let kind = parse_frame(frame_bytes)?;
+        self.decode_frame_kind_to_speech(&kind)
+    }
+
+    /// Decode one already-parsed [`FrameKind`] to reconstructed speech.
+    ///
+    /// See [`Self::decode_serial_frame_to_speech`] for the chain.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode_frame_kind`].
+    pub fn decode_frame_kind_to_speech(
+        &mut self,
+        frame: &FrameKind,
+    ) -> Result<SynthesizedFrame, FrameDecodeError> {
+        let params = unpack_parameters(frame)?;
+        self.decode_parameters_to_speech(&params)
+    }
+
+    /// Run the §4.1 parameter chain followed by the §3.10 → §4.1.6 LP
+    /// synthesis on one frame's unpacked Table-8 codewords, advancing
+    /// all cross-frame state plus the synthesizer's memories.
+    ///
+    /// See [`Self::decode_serial_frame_to_speech`] for the chain.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode_parameters`]. On a codeword-domain error the
+    /// synthesizer is left untouched (synthesis runs only after a
+    /// successful parameter decode).
+    pub fn decode_parameters_to_speech(
+        &mut self,
+        params: &Parameters,
+    ) -> Result<SynthesizedFrame, FrameDecodeError> {
+        let frame = self.decode_parameters(params)?;
+        Ok(self.synthesizer.synthesize_frame(&frame))
     }
 }
 
@@ -711,5 +790,136 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `decode_parameters_to_speech` must equal running the §4.1 chain
+    /// then handing the [`DecodedFrame`] to a standalone [`Synthesizer`]:
+    /// the speech entry point is exactly that composition, with the
+    /// synthesizer state living inside the chain.
+    #[test]
+    fn speech_entry_point_matches_decode_then_synthesize() {
+        use crate::lp_synthesis::Synthesizer;
+
+        let params = parity_ok_params();
+
+        let mut chain = FrameDecoder::new();
+        let speech = chain
+            .decode_parameters_to_speech(&params)
+            .expect("in-domain");
+
+        let mut ref_chain = FrameDecoder::new();
+        let frame = ref_chain.decode_parameters(&params).expect("in-domain");
+        let mut synth = Synthesizer::new();
+        let ref_speech = synth.synthesize_frame(&frame);
+
+        assert_eq!(speech, ref_speech);
+        // The parameter-level cross-frame state advanced identically.
+        assert_eq!(chain.g_p_prev(), ref_chain.g_p_prev());
+        assert_eq!(chain.prev_int_t2(), ref_chain.prev_int_t2());
+    }
+
+    /// The 80 reconstructed-speech samples are finite for an in-domain
+    /// frame, and the speech entry point advances the chain's synthesizer
+    /// memory off its clause-4.3 all-zero start-up state.
+    #[test]
+    fn speech_entry_point_produces_finite_samples_and_advances_state() {
+        let mut chain = FrameDecoder::new();
+        assert!(chain.synthesizer().exc_history().iter().all(|&x| x == 0.0));
+
+        let speech = chain
+            .decode_parameters_to_speech(&parity_ok_params())
+            .expect("in-domain");
+        let pcm = speech.speech();
+        assert_eq!(pcm.len(), 2 * SUBFRAME_SIZE);
+        assert!(pcm.iter().all(|s| s.is_finite()));
+
+        // A non-silent frame leaves a non-zero excitation tail in the
+        // synthesizer's eq (40) history.
+        assert!(chain.synthesizer().exc_history().iter().any(|&x| x != 0.0));
+    }
+
+    /// Two consecutive frames through the speech path are not identical
+    /// in general because the synthesizer carries state — and the second
+    /// frame still matches the standalone decode-then-synthesize
+    /// composition that shares the same advancing state.
+    #[test]
+    fn speech_path_carries_synthesizer_state_across_frames() {
+        use crate::lp_synthesis::Synthesizer;
+
+        let params = parity_ok_params();
+
+        let mut chain = FrameDecoder::new();
+        let _ = chain.decode_parameters_to_speech(&params).expect("frame 1");
+        let speech2 = chain.decode_parameters_to_speech(&params).expect("frame 2");
+
+        let mut ref_chain = FrameDecoder::new();
+        let mut synth = Synthesizer::new();
+        let f1 = ref_chain.decode_parameters(&params).expect("frame 1");
+        let _ = synth.synthesize_frame(&f1);
+        let f2 = ref_chain.decode_parameters(&params).expect("frame 2");
+        let ref_speech2 = synth.synthesize_frame(&f2);
+
+        assert_eq!(speech2, ref_speech2);
+    }
+
+    /// The serial / frame-kind / parameter speech entry points all agree
+    /// for the same well-formed frame.
+    #[test]
+    fn speech_serial_entry_point_matches_parameter_entry_point() {
+        let params = parity_ok_params();
+        let vals: [(u16, usize); 15] = [
+            (u16::from(params.l0), 1),
+            (u16::from(params.l1), 7),
+            (u16::from(params.l2), 5),
+            (u16::from(params.l3), 5),
+            (u16::from(params.p1), 8),
+            (u16::from(params.p0), 1),
+            (params.c1, 13),
+            (u16::from(params.s1), 4),
+            (u16::from(params.ga1), 3),
+            (u16::from(params.gb1), 4),
+            (u16::from(params.p2), 5),
+            (params.c2, 13),
+            (u16::from(params.s2), 4),
+            (u16::from(params.ga2), 3),
+            (u16::from(params.gb2), 4),
+        ];
+        let mut bits = Vec::with_capacity(FRAME_BITS);
+        for &(v, w) in &vals {
+            for k in 0..w {
+                bits.push(((v >> (w - 1 - k)) & 1) == 1);
+            }
+        }
+        let mut buf = Vec::with_capacity(164);
+        buf.extend_from_slice(&SYNC_WORD.to_le_bytes());
+        buf.extend_from_slice(&BITS_HEADER.to_le_bytes());
+        for b in &bits {
+            let w = if *b { BIT_ONE } else { BIT_ZERO };
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
+
+        let mut chain_a = FrameDecoder::new();
+        let from_serial = chain_a
+            .decode_serial_frame_to_speech(&buf)
+            .expect("well-formed");
+        let mut chain_b = FrameDecoder::new();
+        let from_params = chain_b
+            .decode_parameters_to_speech(&params)
+            .expect("in-domain");
+        assert_eq!(from_serial, from_params);
+    }
+
+    /// An erased frame is rejected by the speech path without advancing
+    /// the synthesizer state (synthesis runs only after a successful
+    /// parameter decode).
+    #[test]
+    fn speech_path_rejects_erased_frame_without_advancing_synthesizer() {
+        let mut chain = FrameDecoder::new();
+        let err = chain
+            .decode_frame_kind_to_speech(&FrameKind::Erased)
+            .unwrap_err();
+        assert_eq!(err, FrameDecodeError::Erased);
+        assert!(chain.synthesizer().exc_history().iter().all(|&x| x == 0.0));
+        assert!(chain.synthesizer().syn_mem().iter().all(|&x| x == 0.0));
     }
 }

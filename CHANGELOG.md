@@ -8,6 +8,36 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 337 wires the **§3.10 / §4.1.6 LP synthesis** stage into the
+  `decode_chain::FrameDecoder`, turning the §4.1 parameter decoder into a
+  decoder that emits reconstructed-speech PCM. The `Synthesizer` (eq (40)
+  past-excitation interpolator, eq (75) excitation build
+  `u(n) = ĝ_p·v(n) + ĝ_c·c(n)`, eq (77) `1/Â(z)` filter) is now owned by
+  the chain as the fifth piece of clause-4.3 cross-frame state (its
+  eq (40)/(77) memories, zero-init):
+  - New `FrameDecoder::decode_serial_frame_to_speech`,
+    `decode_frame_kind_to_speech`, and `decode_parameters_to_speech`
+    entry points — the three existing parameter entry points each gain a
+    `*_to_speech` sibling that runs the §4.1 chain then the §3.10 →
+    §4.1.6 synthesis and returns a `SynthesizedFrame` (80 reconstructed
+    samples via `SynthesizedFrame::speech`). The synthesizer advances
+    only on these calls; the parameter-only `decode_*` calls leave it at
+    its start-up state. A codeword-domain error (or a §4.4 erasure
+    sentinel) is surfaced before any synthesis runs, so the synthesizer
+    memory is not advanced on a rejected frame.
+  - New `FrameDecoder::synthesizer` accessor for inspection / tests.
+  - This is the pre-postfilter reconstructed speech `ŝ(n)`: the §4.2
+    post-processing cascade (postfilters, tilt, AGC, output high-pass +
+    ×2) stays standalone and is wired separately — the §4.2.1 long-term
+    postfilter's 1/8-resolution fractional pass remains the documented
+    gap that blocks an end-to-end conformance match.
+  - 5 new tests: the speech path equals the standalone
+    decode-then-synthesize composition, produces finite samples and
+    advances the eq (40) history off zero, carries synthesizer state
+    across consecutive frames, agrees across the serial / frame-kind /
+    parameter entry points, and rejects an erased frame without advancing
+    the synthesizer. Crate unit tests 219 → 224.
+
 - Round 331 wires the **§4.4 frame-erasure concealment** machinery — the
   decoder-side error recovery that reconstructs a frame whose 80-bit
   payload was lost. New `oxideav_g729::concealment` module:

@@ -15,7 +15,14 @@ pending completion of the decode and encode chains.
 ## What is wired up
 
 The decode path is implemented up to reconstructed speech, sequenced
-by `decode_chain::FrameDecoder` as one stateful per-frame call:
+by `decode_chain::FrameDecoder` as one stateful per-frame call. The
+`*_to_speech` entry points (`decode_serial_frame_to_speech`,
+`decode_frame_kind_to_speech`, `decode_parameters_to_speech`) run the
+§4.1 parameter chain and the §3.10 / §4.1.6 LP synthesis in one call and
+return the 80 reconstructed-speech samples `ŝ(n)` of the frame; the
+synthesizer is owned by the chain as cross-frame state. The §4.2
+post-processing cascade is implemented as standalone modules but is not
+yet wired into this end-to-end call (see below):
 
 - **Bit-exact numeric-tables foundation** — the LP-analysis windowing,
   LSF cosine grid, pitch interpolation filters, MA gain-prediction
@@ -87,6 +94,13 @@ by `decode_chain::FrameDecoder` as one stateful per-frame call:
   pass (the length-33/129 interpolation filters `tab_hup_s`/`tab_hup_l`,
   whose per-phase tap layout the spec prose defers to the reference) —
   the integer-delay pass is wired above.
+- The §4.2 post-processing cascade (short-term postfilter, tilt
+  compensation, adaptive gain control, output high-pass + ×2) into the
+  end-to-end `*_to_speech` decode call — the stages exist as standalone
+  modules, but chaining them into the per-frame call is blocked on the
+  §4.2.1 long-term postfilter, whose fractional pass is the docs-gap
+  above. The `*_to_speech` entry points return the pre-postfilter
+  reconstructed speech `ŝ(n)`.
 - The full encoder.
 - Registry-side codec factory wiring (the codec entry point returns
   `NotImplemented`).
