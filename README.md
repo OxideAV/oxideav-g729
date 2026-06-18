@@ -70,14 +70,23 @@ by `decode_chain::FrameDecoder` as one stateful per-frame call:
   `sf′(n) = g(n)·sf(n)`, with the Table 9 init `g(−1) = 1.0`.
 - **§4.2.5 output high-pass + ×2 upscaling** (`post_process`) — the
   tail of the §4.2 post-processing cascade.
+- **§4.4 frame-erasure concealment** (`concealment`) — the §4.4 voicing
+  classifier (`Concealer::observe_good_frame`: a frame is periodic iff
+  any subframe's long-term prediction gain clears the eq (82) 3 dB
+  threshold, reusing `LongTermDecision.gain`; an erased frame inherits
+  the previous class), the eq (93)/(94) adaptive+fixed gain attenuations
+  (`0.9`/`0.98`, the adaptive bounded `< 0.9`), the eq (95) 4 dB
+  gain-predictor-memory attenuation (floored at `−14`), the eq (96)
+  replacement-excitation random generator (`seed = 31821·seed + 13849`,
+  seed `21845`, 13-bit index / 4-bit sign), and the §4.4.4 periodic-case
+  pitch-delay repeat (`+1`/subframe, bounded `143`).
 
 ### What is NOT yet wired up
 
 - The §4.2.1 long-term postfilter's **1/8-resolution fractional** delay
   pass (the length-33/129 interpolation filters `tab_hup_s`/`tab_hup_l`,
   whose per-phase tap layout the spec prose defers to the reference) —
-  the integer-delay pass is wired above. And §4.4 frame-erasure
-  concealment.
+  the integer-delay pass is wired above.
 - The full encoder.
 - Registry-side codec factory wiring (the codec entry point returns
   `NotImplemented`).

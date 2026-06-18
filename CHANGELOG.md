@@ -8,6 +8,33 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 331 wires the **§4.4 frame-erasure concealment** machinery — the
+  decoder-side error recovery that reconstructs a frame whose 80-bit
+  payload was lost. New `oxideav_g729::concealment` module:
+  - `VoicingClass` + `Concealer::observe_good_frame` implement the §4.4
+    voicing classifier: a 10 ms frame is **periodic** if at least one
+    5 ms subframe had a long-term prediction gain > 3 dB (the eq (82)
+    enable decision of `LongTermPostfilter`, reused via
+    `LongTermDecision.gain > 0`), else **non-periodic**; an erased frame
+    inherits the previous reconstructed frame's class.
+  - `attenuate_fixed_gain` — eq (93) `ĝ_c^(m) = 0.98·ĝ_c^(m−1)`.
+  - `attenuate_adaptive_gain` — eq (94) `ĝ_p^(m) = 0.9·ĝ_p^(m−1)`
+    bounded `< 0.9`.
+  - `attenuated_predictor_memory_db` — eq (95)
+    `Û^(m) = 0.25·Σ_{i=1}^{4} Û^(m−i) − 4.0` bounded `≥ −14` (the §4.4.3
+    "4 dB" attenuation of the `GainPredictor` memory).
+  - `next_random_excitation` — the §4.4.4 non-periodic replacement
+    excitation: eq (96) generator `seed = 31821·seed + 13849` (initial
+    seed `21845`), fixed-codebook index from the 13 LSBs of one random
+    number, sign field from the 4 LSBs of the next.
+  - `periodic_pitch_delay` — the §4.4.4 periodic-case pitch-delay repeat
+    (integer part of the previous frame's delay, +1 per subframe,
+    bounded by 143).
+  - eqs (93)–(96) transcribed clean-room from the EPUB raster figures
+    `images/eq{93,94,95,96}.jpg`; 16 unit tests cover the classifier,
+    inheritance, each attenuation, the LCG recurrence + bit extraction,
+    and the bounded periodic-delay repeat.
+
 - Round 326 wires the **§4.2.1 long-term (harmonic) postfilter
   `H_p(z)`** — the head of the §4.2 post-processing cascade and the
   last front stage that was still missing. New
