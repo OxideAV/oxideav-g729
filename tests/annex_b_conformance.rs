@@ -27,8 +27,8 @@
 use std::path::{Path, PathBuf};
 
 use oxideav_g729::annex_b::{
-    self, AnnexBFrame, ACTIVE_BITS, ERASED_SYNC_WORD, SID_GAIN_BITS, SID_L1_BITS, SID_L2_BITS,
-    SID_LP0_BITS, SID_WORDS,
+    self, AnnexBDecoder, AnnexBFrame, ResolvedFrame, ACTIVE_BITS, ERASED_SYNC_WORD, SID_GAIN_BITS,
+    SID_L1_BITS, SID_L2_BITS, SID_LP0_BITS, SID_WORDS,
 };
 use oxideav_g729::decode_chain::FrameDecoder;
 use oxideav_g729::serial::{FrameKind, SYNC_WORD};
@@ -235,6 +235,69 @@ fn annex_b_sid_frames_unpack_in_range() {
         }
     }
     assert!(total_sid > 0, "no SID frames found in the Annex B corpus");
+}
+
+#[test]
+fn annex_b_decoder_resolves_full_corpus() {
+    let Some(root) = conformance_root() else {
+        eprintln!("annex_b_conformance: corpus absent; skipping");
+        return;
+    };
+    let g729b = root.join("g729b");
+
+    let mut checked = 0usize;
+    let mut total_resolved = 0usize;
+    let mut total_erased_active = 0usize;
+    let mut total_silence = 0usize;
+    for &seq in SEQUENCES {
+        let Ok(bit) = std::fs::read(g729b.join(format!("{seq}.bit"))) else {
+            continue;
+        };
+        let frames = annex_b::parse_annex_b_stream(&bit)
+            .unwrap_or_else(|e| panic!("{seq}: framing error {e}"));
+
+        let mut dec = AnnexBDecoder::new();
+        // The first SID seen determines when carried energy becomes
+        // available; before that, untransmitted frames carry None.
+        let mut seen_sid = false;
+        for frame in &frames {
+            let resolved = dec.resolve(frame);
+            match resolved {
+                ResolvedFrame::Active(_) => {}
+                ResolvedFrame::Sid { energy_db, .. } => {
+                    seen_sid = true;
+                    assert!(
+                        (-12.0..=66.0).contains(&energy_db),
+                        "{seq}: SID energy {energy_db} out of range",
+                    );
+                }
+                ResolvedFrame::Untransmitted { last_energy_db } => {
+                    total_silence += 1;
+                    // Once a SID has been seen, every untransmitted frame
+                    // must carry a concrete energy.
+                    if seen_sid {
+                        assert!(
+                            last_energy_db.is_some(),
+                            "{seq}: untransmitted frame after a SID carries no energy",
+                        );
+                    }
+                }
+                ResolvedFrame::ErasedActive => total_erased_active += 1,
+            }
+            total_resolved += 1;
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "no Annex B sequences found");
+    assert!(total_resolved > 0);
+    // tstseq6 contributes the only erasures in the corpus: one erased
+    // SID-sized frame in a silence run (→ untransmitted) and one erased
+    // untransmitted frame, so the corpus has no active-erasure but does
+    // exercise the silence-inheritance path heavily.
+    assert!(total_silence > 0, "corpus had no untransmitted frames");
+    // Don't require erased-active frames (the corpus may have none); just
+    // assert the counter is well-defined.
+    let _ = total_erased_active;
 }
 
 #[test]

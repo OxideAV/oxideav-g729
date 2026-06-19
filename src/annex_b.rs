@@ -439,6 +439,130 @@ pub fn dequant_sid_energy_db(index: u8) -> f32 {
     }
 }
 
+/// The resolved (post-§B.4.5) transmission type of a decoded Annex B
+/// frame, after the erasure-inheritance rule has been applied.
+///
+/// This differs from [`AnnexBFrame`] in that [`AnnexBFrame::Erased`] has
+/// been resolved against the preceding frame: an erasure after an active
+/// frame becomes [`Self::Active`]; an erasure after silence becomes
+/// [`Self::Untransmitted`]. The variant carries the data the comfort-
+/// noise / speech synthesis stage needs.
+///
+/// Carries `f32` energies, so it is [`PartialEq`] but not [`Eq`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedFrame {
+    /// Active speech: decode through the §4.1 base chain. Carries the
+    /// 80 transmitted bits.
+    Active(Box<[bool; ACTIVE_BITS]>),
+    /// A SID frame refreshing the comfort-noise parameters. Carries the
+    /// freshly-decoded [`SidFrame`] and the §B.4.2.1 energy in dB.
+    Sid { sid: SidFrame, energy_db: f32 },
+    /// A non-active frame with no fresh parameters — comfort noise
+    /// continues from the last [`Self::Sid`]. Carries that last SID's
+    /// energy (`None` before any SID has been seen, e.g. the leading
+    /// frames of a stream that opens on silence).
+    Untransmitted { last_energy_db: Option<f32> },
+    /// An active frame was erased: the §4.4 base-codec concealment path
+    /// runs. (Distinct from [`Self::Untransmitted`], which is the
+    /// silence-side concealment.)
+    ErasedActive,
+}
+
+/// Stateful Annex B decoder driver implementing the §B.4.1 frame-type
+/// continuity and the §B.4.5 erasure-inheritance rule.
+///
+/// Feed each parsed [`AnnexBFrame`] in stream order to [`Self::resolve`];
+/// the driver tracks the previous resolved type and the last SID
+/// parameters so it can:
+///
+/// * resolve [`AnnexBFrame::Erased`] per §B.4.5 — "if the preceding frame
+///   was active, then the current frame is considered as active; else if
+///   the preceding frame was either a SID frame or an untransmitted
+///   frame, the current erased frame is considered as untransmitted";
+/// * carry the last SID energy forward across [`AnnexBFrame::Untransmitted`]
+///   frames (§B.4.4 — "the non-active voice signal is generated … according
+///   to the last received energy and spectral shape information").
+///
+/// This is the routing layer; the actual §4.1 speech synthesis and the
+/// §B.4.4 CNG synthesis (blocked on absent tables) plug in downstream by
+/// matching on the [`ResolvedFrame`] this returns.
+#[derive(Debug, Clone)]
+pub struct AnnexBDecoder {
+    /// The previous frame's resolved transmission class (whether it was
+    /// active or silence), needed for the §B.4.5 erasure rule. `None`
+    /// before the first frame.
+    prev_active: Option<bool>,
+    /// The last received SID frame, reused across untransmitted frames
+    /// (§B.4.4). `None` before any SID has been seen.
+    last_sid: Option<SidFrame>,
+}
+
+impl Default for AnnexBDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AnnexBDecoder {
+    /// A fresh driver with no prior frame and no SID parameters.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            prev_active: None,
+            last_sid: None,
+        }
+    }
+
+    /// The last received SID frame, or `None` if none has been seen yet.
+    #[must_use]
+    pub fn last_sid(&self) -> Option<SidFrame> {
+        self.last_sid
+    }
+
+    /// Resolve one parsed [`AnnexBFrame`] into a [`ResolvedFrame`],
+    /// advancing the §B.4.1 / §B.4.5 state.
+    ///
+    /// The returned variant tells the synthesis stage which path to run;
+    /// see [`ResolvedFrame`].
+    pub fn resolve(&mut self, frame: &AnnexBFrame) -> ResolvedFrame {
+        match frame {
+            AnnexBFrame::Active(bits) => {
+                self.prev_active = Some(true);
+                ResolvedFrame::Active(bits.clone())
+            }
+            AnnexBFrame::Sid(sid) => {
+                self.last_sid = Some(*sid);
+                self.prev_active = Some(false);
+                ResolvedFrame::Sid {
+                    sid: *sid,
+                    energy_db: sid.energy_db(),
+                }
+            }
+            AnnexBFrame::Untransmitted => {
+                self.prev_active = Some(false);
+                ResolvedFrame::Untransmitted {
+                    last_energy_db: self.last_sid.map(|s| s.energy_db()),
+                }
+            }
+            AnnexBFrame::Erased => {
+                // §B.4.5: an erased frame inherits the preceding frame's
+                // class. Active→active concealment; else→untransmitted.
+                // Before any frame (prev_active None), treat as silence.
+                if self.prev_active == Some(true) {
+                    // Stays "active" for the inheritance chain.
+                    self.prev_active = Some(true);
+                    ResolvedFrame::ErasedActive
+                } else {
+                    self.prev_active = Some(false);
+                    ResolvedFrame::Untransmitted {
+                        last_energy_db: self.last_sid.map(|s| s.energy_db()),
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,6 +746,96 @@ mod tests {
         // Index is taken mod 32; q=32 aliases to q=0.
         assert_eq!(dequant_sid_energy_db(32), dequant_sid_energy_db(0));
         assert_eq!(dequant_sid_energy_db(37), dequant_sid_energy_db(5));
+    }
+
+    fn sid(gain: u8) -> SidFrame {
+        SidFrame {
+            lp0: 0,
+            l1: 0,
+            l2: 0,
+            gain,
+        }
+    }
+
+    #[test]
+    fn resolve_erased_after_active_is_erased_active() {
+        let mut dec = AnnexBDecoder::new();
+        let active = AnnexBFrame::Active(Box::new([false; ACTIVE_BITS]));
+        let _ = dec.resolve(&active);
+        let r = dec.resolve(&AnnexBFrame::Erased);
+        assert_eq!(r, ResolvedFrame::ErasedActive);
+    }
+
+    #[test]
+    fn resolve_erased_after_silence_is_untransmitted() {
+        let mut dec = AnnexBDecoder::new();
+        // SID then untransmitted then erased — the erased frame inherits
+        // the silence class and becomes untransmitted.
+        let _ = dec.resolve(&AnnexBFrame::Sid(sid(10)));
+        let _ = dec.resolve(&AnnexBFrame::Untransmitted);
+        let r = dec.resolve(&AnnexBFrame::Erased);
+        match r {
+            ResolvedFrame::Untransmitted { last_energy_db } => {
+                assert_eq!(last_energy_db, Some(dequant_sid_energy_db(10)));
+            }
+            other => panic!("expected Untransmitted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_leading_erased_is_untransmitted_no_energy() {
+        // An erased frame at the very start (no prior frame) defaults to
+        // silence with no carried energy.
+        let mut dec = AnnexBDecoder::new();
+        let r = dec.resolve(&AnnexBFrame::Erased);
+        assert_eq!(
+            r,
+            ResolvedFrame::Untransmitted {
+                last_energy_db: None
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_untransmitted_carries_last_sid_energy() {
+        let mut dec = AnnexBDecoder::new();
+        let _ = dec.resolve(&AnnexBFrame::Sid(sid(20)));
+        // Two untransmitted frames keep the SID-20 energy.
+        for _ in 0..2 {
+            match dec.resolve(&AnnexBFrame::Untransmitted) {
+                ResolvedFrame::Untransmitted { last_energy_db } => {
+                    assert_eq!(last_energy_db, Some(dequant_sid_energy_db(20)));
+                }
+                other => panic!("expected Untransmitted, got {other:?}"),
+            }
+        }
+        // A new SID updates the carried energy.
+        let _ = dec.resolve(&AnnexBFrame::Sid(sid(6)));
+        match dec.resolve(&AnnexBFrame::Untransmitted) {
+            ResolvedFrame::Untransmitted { last_energy_db } => {
+                assert_eq!(last_energy_db, Some(dequant_sid_energy_db(6)));
+            }
+            other => panic!("expected Untransmitted, got {other:?}"),
+        }
+        assert_eq!(dec.last_sid(), Some(sid(6)));
+    }
+
+    #[test]
+    fn resolve_active_then_sid_then_active_chain() {
+        let mut dec = AnnexBDecoder::new();
+        let active = AnnexBFrame::Active(Box::new([true; ACTIVE_BITS]));
+        assert!(matches!(dec.resolve(&active), ResolvedFrame::Active(_)));
+        assert!(matches!(
+            dec.resolve(&AnnexBFrame::Sid(sid(8))),
+            ResolvedFrame::Sid { .. }
+        ));
+        // Active after silence is still active; a following erasure is
+        // ErasedActive again.
+        assert!(matches!(dec.resolve(&active), ResolvedFrame::Active(_)));
+        assert_eq!(
+            dec.resolve(&AnnexBFrame::Erased),
+            ResolvedFrame::ErasedActive
+        );
     }
 
     #[test]
