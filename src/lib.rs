@@ -268,6 +268,7 @@ pub mod parameters;
 pub mod pitch_decode;
 pub mod pitch_sharpen;
 pub mod post_process;
+pub mod postfilter_cascade;
 pub mod serial;
 pub mod short_term_postfilter;
 pub mod tables;

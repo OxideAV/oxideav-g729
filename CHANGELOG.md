@@ -8,6 +8,16 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 340 adds the **§4.2 decoder post-processing cascade** — the
+  five-stage adaptive postfilter (`postfilter_cascade`) that turns the
+  §4.1.6 reconstructed speech `ŝ(n)` into final decoder output: §4.2.1
+  long-term harmonic postfilter `H_p(z)` (anchored on the first
+  subframe's transmitted integer pitch delay `int(T_1)`), §4.2.2
+  short-term postfilter `H_f(z)`, §4.2.3 tilt compensation `H_t(z)`,
+  §4.2.4 adaptive gain control (eq (88)–(90)), and §4.2.5 output
+  high-pass `H_h2(z)` + ×2 up-scaling (eq (91)). Wired into
+  `decode_chain::FrameDecoder` as the post-synthesis stage; covered by
+  `tests/postfilter_conformance.rs`.
 - Round 337 wires the **§3.10 / §4.1.6 LP synthesis** stage into the
   `decode_chain::FrameDecoder`, turning the §4.1 parameter decoder into a
   decoder that emits reconstructed-speech PCM. The `Synthesizer` (eq (40)

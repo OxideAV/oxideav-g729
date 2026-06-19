@@ -88,6 +88,7 @@ use crate::lsp_to_lp::{lsp_to_lp, LpCoefficients};
 use crate::parameters::{unpack_parameters, ParameterError, Parameters};
 use crate::pitch_decode::{decode_t1_from_p1, decode_t2_from_p2, derive_t_min, PitchDelay};
 use crate::pitch_sharpen::{clamp_beta, sharpen};
+use crate::postfilter_cascade::{PostfilterCascade, PostfilteredFrame};
 use crate::serial::{parse_frame, FrameKind, SerialError};
 use crate::tables::M;
 
@@ -261,6 +262,12 @@ pub struct FrameDecoder {
     /// per clause 4.3. Driven only by the `*_to_speech` entry points;
     /// the parameter-only `decode_*` calls leave it untouched.
     synthesizer: Synthesizer,
+    /// §4.2 post-processing cascade (long-term + short-term postfilters,
+    /// tilt compensation, adaptive gain control, output high-pass + ×2).
+    /// Owns the five stages' clause-4.3 state; driven only by the
+    /// `*_to_postfiltered` entry points (the `*_to_speech` calls leave it
+    /// untouched).
+    postfilter: PostfilterCascade,
 }
 
 impl Default for FrameDecoder {
@@ -280,6 +287,7 @@ impl FrameDecoder {
             g_p_prev: BETA_INIT,
             prev_int_t2: 0,
             synthesizer: Synthesizer::new(),
+            postfilter: PostfilterCascade::new(),
         }
     }
 
@@ -305,6 +313,16 @@ impl FrameDecoder {
     #[must_use]
     pub fn synthesizer(&self) -> &Synthesizer {
         &self.synthesizer
+    }
+
+    /// Borrow the §4.2 [`PostfilterCascade`] for inspection / tests.
+    ///
+    /// The cascade only advances when a `*_to_postfiltered` entry point is
+    /// used; the `decode_*` and `*_to_speech` calls leave it at its
+    /// clause-4.3 start-up state.
+    #[must_use]
+    pub fn postfilter(&self) -> &PostfilterCascade {
+        &self.postfilter
     }
 
     /// Decode one 164-byte ITU serial frame: framing parse → Table-8
@@ -508,6 +526,69 @@ impl FrameDecoder {
     ) -> Result<SynthesizedFrame, FrameDecodeError> {
         let frame = self.decode_parameters(params)?;
         Ok(self.synthesizer.synthesize_frame(&frame))
+    }
+
+    /// Decode one 164-byte ITU serial frame all the way to the §4.2
+    /// post-processed decoder output `sf′(n)`.
+    ///
+    /// Runs the §4.1 parameter chain, the §3.10 → §4.1.6 LP synthesis, and
+    /// then the full §4.2 post-processing cascade (long-term postfilter,
+    /// short-term postfilter, tilt compensation, adaptive gain control,
+    /// output high-pass + ×2 up-scaling — see [`PostfilterCascade`]),
+    /// advancing the §4.1 cross-frame state, the synthesizer memories, and
+    /// the five cascade stages in stream order. The returned
+    /// [`PostfilteredFrame`] exposes the 80 ×2-upscaled output samples via
+    /// [`PostfilteredFrame::output`].
+    ///
+    /// The §4.2.1 long-term postfilter uses its **integer-delay** form
+    /// (the 1/8-resolution fractional second pass is a documented
+    /// docs-gap; see [`crate::long_term_postfilter`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode_serial_frame`].
+    pub fn decode_serial_frame_to_postfiltered(
+        &mut self,
+        frame_bytes: &[u8],
+    ) -> Result<PostfilteredFrame, FrameDecodeError> {
+        let kind = parse_frame(frame_bytes)?;
+        self.decode_frame_kind_to_postfiltered(&kind)
+    }
+
+    /// Decode one already-parsed [`FrameKind`] to the §4.2 post-processed
+    /// decoder output.
+    ///
+    /// See [`Self::decode_serial_frame_to_postfiltered`] for the chain.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode_frame_kind`].
+    pub fn decode_frame_kind_to_postfiltered(
+        &mut self,
+        frame: &FrameKind,
+    ) -> Result<PostfilteredFrame, FrameDecodeError> {
+        let params = unpack_parameters(frame)?;
+        self.decode_parameters_to_postfiltered(&params)
+    }
+
+    /// Run the §4.1 parameter chain, the §3.10 → §4.1.6 LP synthesis, and
+    /// the §4.2 post-processing cascade on one frame's unpacked Table-8
+    /// codewords, advancing all cross-frame state.
+    ///
+    /// See [`Self::decode_serial_frame_to_postfiltered`] for the chain.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode_parameters`]. On a codeword-domain error neither
+    /// the synthesizer nor the postfilter cascade is touched (both run
+    /// only after a successful parameter decode).
+    pub fn decode_parameters_to_postfiltered(
+        &mut self,
+        params: &Parameters,
+    ) -> Result<PostfilteredFrame, FrameDecodeError> {
+        let frame = self.decode_parameters(params)?;
+        let speech = self.synthesizer.synthesize_frame(&frame);
+        Ok(self.postfilter.process_frame(&speech, &frame))
     }
 }
 
@@ -921,5 +1002,130 @@ mod tests {
         assert_eq!(err, FrameDecodeError::Erased);
         assert!(chain.synthesizer().exc_history().iter().all(|&x| x == 0.0));
         assert!(chain.synthesizer().syn_mem().iter().all(|&x| x == 0.0));
+    }
+
+    /// `decode_parameters_to_postfiltered` equals running the §4.1 chain,
+    /// the synthesizer, then the §4.2 cascade by hand — the cascade entry
+    /// point is exactly that composition, with the cascade state living
+    /// inside the chain.
+    #[test]
+    fn postfiltered_entry_point_matches_decode_synthesize_postfilter() {
+        use crate::lp_synthesis::Synthesizer;
+        use crate::postfilter_cascade::PostfilterCascade;
+
+        let params = parity_ok_params();
+
+        let mut chain = FrameDecoder::new();
+        let pf = chain
+            .decode_parameters_to_postfiltered(&params)
+            .expect("in-domain");
+
+        let mut ref_chain = FrameDecoder::new();
+        let frame = ref_chain.decode_parameters(&params).expect("in-domain");
+        let mut synth = Synthesizer::new();
+        let speech = synth.synthesize_frame(&frame);
+        let mut cascade = PostfilterCascade::new();
+        let ref_pf = cascade.process_frame(&speech, &frame);
+
+        assert_eq!(pf, ref_pf);
+    }
+
+    /// The 80 post-filtered output samples are finite for an in-domain
+    /// frame, and the cascade entry point advances the chain's cascade
+    /// state off its clause-4.3 all-zero start-up state.
+    #[test]
+    fn postfiltered_entry_point_produces_finite_output_and_advances_state() {
+        let mut chain = FrameDecoder::new();
+        assert!(chain
+            .postfilter()
+            .long_term()
+            .s_hist()
+            .iter()
+            .all(|&x| x == 0.0));
+
+        let pf = chain
+            .decode_parameters_to_postfiltered(&parity_ok_params())
+            .expect("in-domain");
+        let out = pf.output();
+        assert_eq!(out.len(), 2 * SUBFRAME_SIZE);
+        assert!(out.iter().all(|s| s.is_finite()));
+
+        // A non-silent frame leaves a non-zero history in the long-term
+        // postfilter stage.
+        assert!(chain
+            .postfilter()
+            .long_term()
+            .s_hist()
+            .iter()
+            .any(|&x| x != 0.0));
+    }
+
+    /// The serial / frame-kind / parameter post-filtered entry points all
+    /// agree for the same well-formed frame.
+    #[test]
+    fn postfiltered_serial_entry_point_matches_parameter_entry_point() {
+        let params = parity_ok_params();
+        let vals: [(u16, usize); 15] = [
+            (u16::from(params.l0), 1),
+            (u16::from(params.l1), 7),
+            (u16::from(params.l2), 5),
+            (u16::from(params.l3), 5),
+            (u16::from(params.p1), 8),
+            (u16::from(params.p0), 1),
+            (params.c1, 13),
+            (u16::from(params.s1), 4),
+            (u16::from(params.ga1), 3),
+            (u16::from(params.gb1), 4),
+            (u16::from(params.p2), 5),
+            (params.c2, 13),
+            (u16::from(params.s2), 4),
+            (u16::from(params.ga2), 3),
+            (u16::from(params.gb2), 4),
+        ];
+        let mut bits = Vec::with_capacity(FRAME_BITS);
+        for &(v, w) in &vals {
+            for k in 0..w {
+                bits.push(((v >> (w - 1 - k)) & 1) == 1);
+            }
+        }
+        let mut buf = Vec::with_capacity(164);
+        buf.extend_from_slice(&SYNC_WORD.to_le_bytes());
+        buf.extend_from_slice(&BITS_HEADER.to_le_bytes());
+        for b in &bits {
+            let w = if *b { BIT_ONE } else { BIT_ZERO };
+            buf.extend_from_slice(&w.to_le_bytes());
+        }
+
+        let mut chain_a = FrameDecoder::new();
+        let from_serial = chain_a
+            .decode_serial_frame_to_postfiltered(&buf)
+            .expect("well-formed");
+        let mut chain_b = FrameDecoder::new();
+        let from_params = chain_b
+            .decode_parameters_to_postfiltered(&params)
+            .expect("in-domain");
+        assert_eq!(from_serial, from_params);
+    }
+
+    /// An erased frame is rejected by the post-filter path without
+    /// advancing the cascade state (the cascade runs only after a
+    /// successful parameter decode).
+    #[test]
+    fn postfiltered_path_rejects_erased_frame_without_advancing_cascade() {
+        let mut chain = FrameDecoder::new();
+        let err = chain
+            .decode_frame_kind_to_postfiltered(&FrameKind::Erased)
+            .unwrap_err();
+        assert_eq!(err, FrameDecodeError::Erased);
+        assert!(chain
+            .postfilter()
+            .long_term()
+            .s_hist()
+            .iter()
+            .all(|&x| x == 0.0));
+        assert_eq!(
+            chain.postfilter().agc().gain(),
+            crate::adaptive_gain_control::G_INIT
+        );
     }
 }
