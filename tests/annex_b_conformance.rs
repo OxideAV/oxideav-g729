@@ -27,8 +27,9 @@
 use std::path::{Path, PathBuf};
 
 use oxideav_g729::annex_b::{
-    self, AnnexBDecoder, AnnexBFrame, ResolvedFrame, ACTIVE_BITS, ERASED_SYNC_WORD, SID_GAIN_BITS,
-    SID_L1_BITS, SID_L2_BITS, SID_LP0_BITS, SID_WORDS,
+    self, AnnexBDecoder, AnnexBFrame, AnnexBOutput, AnnexBStreamDecoder, ResolvedFrame,
+    ACTIVE_BITS, ERASED_SYNC_WORD, FRAME_SAMPLES, SID_GAIN_BITS, SID_L1_BITS, SID_L2_BITS,
+    SID_LP0_BITS, SID_WORDS,
 };
 use oxideav_g729::decode_chain::FrameDecoder;
 use oxideav_g729::serial::{FrameKind, SYNC_WORD};
@@ -298,6 +299,57 @@ fn annex_b_decoder_resolves_full_corpus() {
     // Don't require erased-active frames (the corpus may have none); just
     // assert the counter is well-defined.
     let _ = total_erased_active;
+}
+
+#[test]
+fn annex_b_stream_decode_full_corpus() {
+    let Some(root) = conformance_root() else {
+        eprintln!("annex_b_conformance: corpus absent; skipping");
+        return;
+    };
+    let g729b = root.join("g729b");
+
+    let mut checked = 0usize;
+    let mut total_speech = 0usize;
+    for &seq in SEQUENCES {
+        let bit_path = g729b.join(format!("{seq}.bit"));
+        let out_path = g729b.join(format!("{seq}.out"));
+        let (Ok(bit), Ok(out)) = (std::fs::read(&bit_path), std::fs::read(&out_path)) else {
+            continue;
+        };
+
+        let mut dec = AnnexBStreamDecoder::new();
+        let outputs = dec
+            .decode_stream(&bit)
+            .unwrap_or_else(|e| panic!("{seq}: stream decode error {e}"));
+
+        // One output block per PCM frame in the reference output.
+        assert_eq!(
+            outputs.len(),
+            out.len() / 160,
+            "{seq}: {} decoded blocks but {} PCM frames",
+            outputs.len(),
+            out.len() / 160,
+        );
+
+        for (i, o) in outputs.iter().enumerate() {
+            match o {
+                AnnexBOutput::Speech(s) => {
+                    assert_eq!(s.len(), FRAME_SAMPLES);
+                    assert!(
+                        s.iter().all(|x| x.is_finite()),
+                        "{seq}: speech frame #{i} has non-finite sample",
+                    );
+                    total_speech += 1;
+                }
+                AnnexBOutput::ComfortNoisePlaceholder { .. }
+                | AnnexBOutput::ErasedActivePlaceholder => {}
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "no Annex B sequences found");
+    assert!(total_speech > 0, "no active speech frames decoded");
 }
 
 #[test]

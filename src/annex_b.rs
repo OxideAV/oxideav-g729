@@ -563,6 +563,147 @@ impl AnnexBDecoder {
     }
 }
 
+/// Number of PCM samples in one G.729 frame (10 ms at 8 kHz).
+pub const FRAME_SAMPLES: usize = 2 * crate::fixed_codebook::SUBFRAME_SIZE;
+
+/// What the §B stream decoder produced for one frame.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnnexBOutput {
+    /// Active speech, reconstructed bit-exactly through the §4.1 →
+    /// §4.1.6 → §4.2 base decode chain. Carries 80 post-filtered samples.
+    Speech(Box<[f32; FRAME_SAMPLES]>),
+    /// A non-active (SID / untransmitted / silence-erasure) frame. The
+    /// §B.4.4 comfort-noise synthesis is **blocked on absent tables**
+    /// (the SID-LSP VQ subset codebooks), so this is a documented
+    /// placeholder: 80 samples of silence, tagged with the comfort-noise
+    /// energy that *would* drive CNG once the tables are staged.
+    ComfortNoisePlaceholder { energy_db: Option<f32> },
+    /// An active frame was erased; the §4.4 base-codec concealment path
+    /// should run. Carries no synthesized samples here because the base
+    /// chain surfaces erasure separately — the caller drives concealment.
+    ErasedActivePlaceholder,
+}
+
+/// End-to-end Annex B stream decoder: routes each parsed frame to the
+/// right path and drives the base §4.1 → §4.2 chain for active speech.
+///
+/// This threads two pieces of cross-frame state together — the §B.4.1 /
+/// §B.4.5 routing ([`AnnexBDecoder`]) and the base-codec synthesis
+/// ([`crate::decode_chain::FrameDecoder`]) — so an Annex B `.bit` stream
+/// decodes to per-frame PCM blocks in one walk. Active frames are
+/// reconstructed bit-exactly; non-active frames return a documented
+/// [`AnnexBOutput::ComfortNoisePlaceholder`] because the §B.4.4 CNG
+/// synthesis is blocked on absent numeric tables (see the module-level
+/// docs-gap note).
+#[derive(Debug, Clone)]
+pub struct AnnexBStreamDecoder {
+    router: AnnexBDecoder,
+    base: crate::decode_chain::FrameDecoder,
+}
+
+impl Default for AnnexBStreamDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AnnexBStreamDecoder {
+    /// A fresh decoder with clause-4.3 / §B start-up state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            router: AnnexBDecoder::new(),
+            base: crate::decode_chain::FrameDecoder::new(),
+        }
+    }
+
+    /// Borrow the §B.4.1/§B.4.5 routing state for inspection / tests.
+    #[must_use]
+    pub fn router(&self) -> &AnnexBDecoder {
+        &self.router
+    }
+
+    /// Decode one parsed [`AnnexBFrame`], advancing all cross-frame state.
+    ///
+    /// Active frames run the base §4.1 → §4.1.6 → §4.2 chain and return
+    /// [`AnnexBOutput::Speech`]; non-active frames return a comfort-noise
+    /// placeholder; an erased-active frame returns
+    /// [`AnnexBOutput::ErasedActivePlaceholder`].
+    ///
+    /// # Errors
+    ///
+    /// Surfaces a [`crate::decode_chain::FrameDecodeError`] only on an
+    /// active frame whose 80-bit payload fails the base decode (which
+    /// cannot happen on a well-formed stream).
+    pub fn decode_frame(
+        &mut self,
+        frame: &AnnexBFrame,
+    ) -> Result<AnnexBOutput, crate::decode_chain::FrameDecodeError> {
+        match self.router.resolve(frame) {
+            ResolvedFrame::Active(bits) => {
+                let kind = crate::serial::FrameKind::Active(bits);
+                let pf = self.base.decode_frame_kind_to_postfiltered(&kind)?;
+                Ok(AnnexBOutput::Speech(Box::new(pf.output())))
+            }
+            ResolvedFrame::Sid { energy_db, .. } => Ok(AnnexBOutput::ComfortNoisePlaceholder {
+                energy_db: Some(energy_db),
+            }),
+            ResolvedFrame::Untransmitted { last_energy_db } => {
+                Ok(AnnexBOutput::ComfortNoisePlaceholder {
+                    energy_db: last_energy_db,
+                })
+            }
+            ResolvedFrame::ErasedActive => Ok(AnnexBOutput::ErasedActivePlaceholder),
+        }
+    }
+
+    /// Walk an entire Annex B serial bitstream, decoding every frame in
+    /// stream order.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces the first [`AnnexBError`] from the framing parse (wrapped
+    /// in [`crate::decode_chain::FrameDecodeError::Serial`] is *not* used
+    /// — framing errors are returned via [`StreamDecodeError::Framing`]),
+    /// or a base-chain decode error via [`StreamDecodeError::Decode`].
+    pub fn decode_stream(
+        &mut self,
+        mut bytes: &[u8],
+    ) -> Result<Vec<AnnexBOutput>, StreamDecodeError> {
+        let mut out = Vec::new();
+        while !bytes.is_empty() {
+            let (frame, consumed) =
+                parse_annex_b_frame(bytes).map_err(StreamDecodeError::Framing)?;
+            let decoded = self
+                .decode_frame(&frame)
+                .map_err(StreamDecodeError::Decode)?;
+            out.push(decoded);
+            bytes = &bytes[consumed..];
+        }
+        Ok(out)
+    }
+}
+
+/// Error from [`AnnexBStreamDecoder::decode_stream`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamDecodeError {
+    /// The serial framing parse failed.
+    Framing(AnnexBError),
+    /// An active frame's base-codec decode failed.
+    Decode(crate::decode_chain::FrameDecodeError),
+}
+
+impl core::fmt::Display for StreamDecodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Framing(e) => write!(f, "g729 Annex B framing: {e}"),
+            Self::Decode(e) => write!(f, "g729 Annex B base decode: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for StreamDecodeError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,6 +977,56 @@ mod tests {
             dec.resolve(&AnnexBFrame::Erased),
             ResolvedFrame::ErasedActive
         );
+    }
+
+    #[test]
+    fn stream_decoder_routes_silence_to_placeholder() {
+        let mut dec = AnnexBStreamDecoder::new();
+        // SID then untransmitted → comfort-noise placeholders carrying
+        // the SID energy.
+        let out = dec
+            .decode_frame(&AnnexBFrame::Sid(sid(12)))
+            .expect("sid decodes");
+        assert_eq!(
+            out,
+            AnnexBOutput::ComfortNoisePlaceholder {
+                energy_db: Some(dequant_sid_energy_db(12)),
+            }
+        );
+        let out = dec
+            .decode_frame(&AnnexBFrame::Untransmitted)
+            .expect("untx decodes");
+        assert_eq!(
+            out,
+            AnnexBOutput::ComfortNoisePlaceholder {
+                energy_db: Some(dequant_sid_energy_db(12)),
+            }
+        );
+    }
+
+    #[test]
+    fn stream_decoder_erased_active_placeholder() {
+        let mut dec = AnnexBStreamDecoder::new();
+        let active = AnnexBFrame::Active(Box::new([false; ACTIVE_BITS]));
+        let out = dec.decode_frame(&active).expect("active decodes");
+        assert!(matches!(out, AnnexBOutput::Speech(_)));
+        let out = dec
+            .decode_frame(&AnnexBFrame::Erased)
+            .expect("erased decodes");
+        assert_eq!(out, AnnexBOutput::ErasedActivePlaceholder);
+    }
+
+    #[test]
+    fn stream_decoder_active_produces_80_samples() {
+        let mut dec = AnnexBStreamDecoder::new();
+        let active = AnnexBFrame::Active(Box::new([false; ACTIVE_BITS]));
+        match dec.decode_frame(&active).expect("decodes") {
+            AnnexBOutput::Speech(s) => {
+                assert_eq!(s.len(), FRAME_SAMPLES);
+                assert!(s.iter().all(|x| x.is_finite()));
+            }
+            other => panic!("expected Speech, got {other:?}"),
+        }
     }
 
     #[test]
