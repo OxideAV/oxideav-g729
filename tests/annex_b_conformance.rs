@@ -311,6 +311,7 @@ fn annex_b_stream_decode_full_corpus() {
 
     let mut checked = 0usize;
     let mut total_speech = 0usize;
+    let mut total_comfort_noise = 0usize;
     for &seq in SEQUENCES {
         let bit_path = g729b.join(format!("{seq}.bit"));
         let out_path = g729b.join(format!("{seq}.out"));
@@ -342,14 +343,34 @@ fn annex_b_stream_decode_full_corpus() {
                     );
                     total_speech += 1;
                 }
-                AnnexBOutput::ComfortNoisePlaceholder { .. }
-                | AnnexBOutput::ErasedActivePlaceholder => {}
+                AnnexBOutput::ComfortNoise {
+                    excitation,
+                    target_gain,
+                    ..
+                } => {
+                    assert_eq!(excitation.len(), FRAME_SAMPLES);
+                    assert!(
+                        excitation.iter().all(|x| x.is_finite()),
+                        "{seq}: comfort-noise frame #{i} has non-finite excitation",
+                    );
+                    assert!(
+                        target_gain.is_finite() && *target_gain >= 0.0,
+                        "{seq}: comfort-noise frame #{i} target gain {target_gain} invalid",
+                    );
+                    total_comfort_noise += 1;
+                }
+                AnnexBOutput::ErasedActivePlaceholder => {}
             }
         }
         checked += 1;
     }
     assert!(checked > 0, "no Annex B sequences found");
     assert!(total_speech > 0, "no active speech frames decoded");
+    assert!(
+        total_comfort_noise > 0,
+        "no §B.4.4 comfort-noise frames synthesized across the corpus",
+    );
+    eprintln!("annex_b stream: {total_speech} speech + {total_comfort_noise} comfort-noise frames",);
 }
 
 #[test]

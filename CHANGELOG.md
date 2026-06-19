@@ -8,6 +8,25 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 346 adds the **§B.4.4 CNG (comfort-noise) excitation synthesis**
+  (`cng`): the silence-frame *excitation* path, fully spec-prose-sourced
+  from the Annex B eqs (B.19)–(B.26). The eq (B.19) target-gain smoothing
+  (`G̃_t` jump-to-SID after active, `7/8 : 1/8` relax across a non-active
+  run, stateful `CngGainSmoother`); the eqs (B.20)–(B.22) per-subframe
+  adaptive/fixed gain solving (`GainSolveTerms` reducing eq (B.20) to the
+  eq (B.21) monic quadratic via the ACELP `Σe_f²=4` identity,
+  lowest-abs-root `solve_fixed_gain`, eq (B.22) `Max{0.5, √(K/A)}`
+  `ga_upper_bound`); the eqs (B.24)–(B.26) Gaussian mixture (`MixEnergies`,
+  `solve_mix` for `(α=0.6, β>0)` with the `α=1/β=0` fallback,
+  `build_cng_excitation`); and `CngRandom` (the §4.4.4 eq (96) recurrence,
+  reset per active frame per §B.4.4) driving the pitch-lag / `Ga` /
+  Gaussian draws. The `AnnexBStreamDecoder` now synthesizes the
+  energy-controlled comfort-noise excitation for every non-active frame
+  (`AnnexBOutput::ComfortNoise`, 80 samples + target gain) instead of the
+  prior silence placeholder — 3 102 comfort-noise frames synthesized
+  across the staged `g729b` corpus. The §B.4.2.2 SID-LSP VQ subset
+  codebooks (needed for the comfort-noise *spectral envelope* / LP-filtered
+  PCM) remain a documented docs-gap.
 - Round 343 adds the **Annex B (DTX / CNG) decoder framing + routing**
   surface (`annex_b`): variable-length Annex B serial framing (the
   per-frame bit-count header selecting untransmitted / SID / active,

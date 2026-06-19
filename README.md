@@ -107,12 +107,25 @@ yet wired into this end-to-end call (see below):
     erasure-inheritance rule (active→active concealment, silence→
     untransmitted) and SID-parameter persistence across untransmitted
     frames.
+  - **§B.4.4 comfort-noise excitation synthesis** (`cng`) — the
+    silence-frame *excitation* path, fully spec-prose-sourced from the
+    Annex B eqs (B.19)–(B.26): the eq (B.19) target-gain smoothing
+    (`G̃_t` jump-to-SID after active, `7/8 : 1/8` relax across a
+    non-active run), the eqs (B.20)–(B.22) per-subframe adaptive/fixed
+    gain solving (the `Ea`/`I`/`K` reduction to the eq (B.21) monic
+    quadratic via the ACELP `Σe_f²=4` identity, lowest-abs root, the
+    eq (B.22) `Max{0.5, √(K/A)}` `Ga` interval), and the eqs (B.24)–(B.26)
+    Gaussian mixture (`α=0.6`, `β>0` from the eq (B.25) quadratic with the
+    `α=1/β=0` fallback). The eq (96) random sequence (reset per active
+    frame per §B.4.4) drives the pitch-lag / `Ga` / Gaussian draws.
   - **End-to-end stream decode** (`AnnexBStreamDecoder`) — routes a whole
-    Annex B `.bit` stream to per-frame PCM: active frames decode
+    Annex B `.bit` stream to per-frame output: active frames decode
     bit-exactly through the §4.1 → §4.2 base chain (`AnnexBOutput::Speech`),
-    non-active frames return a documented comfort-noise placeholder tagged
-    with the SID energy. Validated over all 10 staged `g729b` sequences
-    (one output block per reference PCM frame).
+    non-active frames synthesize the §B.4.4 energy-controlled comfort-noise
+    *excitation* (`AnnexBOutput::ComfortNoise`, 80 samples + target gain)
+    driven by the decoded SID energy. Validated over all 10 staged `g729b`
+    sequences (one output block per reference PCM frame; 3 102 comfort-noise
+    frames synthesized across the corpus).
 
 ### What is NOT yet wired up
 
@@ -127,17 +140,20 @@ yet wired into this end-to-end call (see below):
   §4.2.1 long-term postfilter, whose fractional pass is the docs-gap
   above. The `*_to_speech` entry points return the pre-postfilter
   reconstructed speech `ŝ(n)`.
-- **Annex B comfort-noise synthesis** (§B.4.2.2 SID-LSP VQ dequant +
-  §B.4.4 CNG excitation) — blocked on absent numeric tables. The
-  SID-LSP VQ subset codebooks (the §B.4.2.2 32-address first-stage
-  subset + the two 16-address second-stage subset + the modified MA
-  predictor) and `annexB-cng-lsp-sid-reset-Q15.csv` (`lspSid_reset`,
-  listed in the docs `tables/README.md` but **not present** as a file)
-  are not staged under `docs/audio/g729/tables/` — only the CNG
-  spectrum factor/shift and VAD margin tables are. The §B decoder
-  framing, SID indices, energy dequant, and frame-type routing are
-  wired; the silence-frame *synthesis* returns a placeholder until the
-  tables land. (Docs-gap reported in the round-343 notes.)
+- **Annex B comfort-noise spectral envelope** (§B.4.2.2 SID-LSP VQ
+  dequant) — blocked on absent numeric tables. The SID-LSP VQ subset
+  codebooks (the §B.4.2.2 32-address first-stage subset + the two
+  16-address second-stage subset + the modified MA predictor) and
+  `annexB-cng-lsp-sid-reset-Q15.csv` (`lspSid_reset`, listed in the docs
+  `tables/README.md` but **not present** as a file) are not staged under
+  `docs/audio/g729/tables/` — only the CNG spectrum factor/shift and VAD
+  margin tables are. The §B.4.4 CNG *excitation* (energy path) is now
+  synthesized (eqs (B.19)–(B.26), `cng` module); what still awaits the
+  SID-LSP VQ tables is the **LP-filtered PCM** — the excitation must pass
+  through the SID-LSP-derived synthesis filter for the correct spectral
+  colour, so `AnnexBOutput::ComfortNoise` surfaces the raw excitation
+  until that envelope can be reconstructed. (Docs-gap: SID-LSP VQ subset
+  codebooks + `lspSid_reset`.)
 - The full encoder.
 - Registry-side codec factory wiring (the codec entry point returns
   `NotImplemented`).

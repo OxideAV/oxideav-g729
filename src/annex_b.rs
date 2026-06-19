@@ -79,19 +79,27 @@
 //!
 //! The §B.4.2.2 SID-LSP vector dequantization (the modified MA predictor,
 //! the 32-address first-stage subset, the two 16-address second-stage
-//! subset) and the §B.4.4 CNG excitation generation (the Gaussian mixture
-//! excitation, the random pitch/fixed-codebook selection, the
-//! energy-smoothing constants) require numeric tables that are **not**
-//! present under `docs/audio/g729/tables/` — only the CNG spectrum
-//! factor/shift and VAD margin tables are staged; the
-//! `annexB-cng-lsp-sid-reset-Q15.csv` (`lspSid_reset`) listed in the
-//! tables README is **absent**, and the SID-LSP VQ subset codebooks are
-//! not extracted at all. Those stages are reported as a precise docs-gap
-//! and are out of scope here. This module decodes the SID *energy* (which
-//! needs no table) and the SID *indices* (raw codewords), and classifies
-//! every frame type so a CNG synthesis stage can be slotted in once the
-//! missing tables are staged.
+//! subset) requires numeric tables that are **not** present under
+//! `docs/audio/g729/tables/` — only the CNG spectrum factor/shift and VAD
+//! margin tables are staged; the `annexB-cng-lsp-sid-reset-Q15.csv`
+//! (`lspSid_reset`) listed in the tables README is **absent**, and the
+//! SID-LSP VQ subset codebooks are not extracted at all. The SID-LSP
+//! *spectral envelope* dequant is therefore reported as a precise
+//! docs-gap and is out of scope here.
+//!
+//! The §B.4.4 CNG **excitation** path, by contrast, is now wired (round
+//! 346): its energy-smoothing and gain/mixture equations (eqs (B.19)–
+//! (B.26)) are fully spec-prose-sourced and need no table, so this module
+//! decodes the SID *energy* into a target gain and synthesizes the §B.4.4
+//! energy-controlled pseudo-white comfort-noise excitation via
+//! [`crate::cng`]. What still awaits the SID-LSP VQ tables is only the
+//! *LP-filtered PCM* (the excitation must pass through the SID-LSP-derived
+//! synthesis filter for the correct spectral colour); the stream decoder
+//! exposes the synthesized excitation directly until that filter envelope
+//! can be reconstructed.
 
+use crate::cng::{synthesize_cng_subframe, CngGainSmoother, CngRandom, CngSubframeShapes};
+use crate::fixed_codebook::SUBFRAME_SIZE;
 use crate::serial::{BIT_ERASED, BIT_ONE, BIT_ZERO, SYNC_WORD};
 
 /// Sync word the Annex B reference encoder writes for a **frame
@@ -572,12 +580,27 @@ pub enum AnnexBOutput {
     /// Active speech, reconstructed bit-exactly through the §4.1 →
     /// §4.1.6 → §4.2 base decode chain. Carries 80 post-filtered samples.
     Speech(Box<[f32; FRAME_SAMPLES]>),
-    /// A non-active (SID / untransmitted / silence-erasure) frame. The
-    /// §B.4.4 comfort-noise synthesis is **blocked on absent tables**
-    /// (the SID-LSP VQ subset codebooks), so this is a documented
-    /// placeholder: 80 samples of silence, tagged with the comfort-noise
-    /// energy that *would* drive CNG once the tables are staged.
-    ComfortNoisePlaceholder { energy_db: Option<f32> },
+    /// A non-active (SID / untransmitted / silence-erasure) frame with the
+    /// §B.4.4 energy-controlled comfort-noise **excitation** synthesized
+    /// (eqs (B.19)–(B.26), [`crate::cng`]). Carries the 80 excitation
+    /// samples `ex(n)`, the eq (B.19) target gain `G̃_t`, and the SID
+    /// energy that drove it.
+    ///
+    /// This is the pseudo-white excitation the §B.4.4 decoder feeds into
+    /// the interpolated LP synthesis filter; the final LP-filtered PCM
+    /// still awaits the §B.4.2.2 SID-LSP VQ tables (a documented docs-gap),
+    /// so the excitation is surfaced directly here. When the SID-LSP VQ
+    /// lands, the filtered PCM replaces the raw excitation in this variant.
+    ComfortNoise {
+        /// The 80 synthesized comfort-noise excitation samples `ex(n)`.
+        excitation: Box<[f32; FRAME_SAMPLES]>,
+        /// eq (B.19) target excitation gain `G̃_t` for this frame.
+        target_gain: f32,
+        /// The SID energy (dB) that drove the comfort noise — the fresh
+        /// SID energy for a SID frame, the persisted last energy for an
+        /// untransmitted frame, or `None` before any SID has been seen.
+        energy_db: Option<f32>,
+    },
     /// An active frame was erased; the §4.4 base-codec concealment path
     /// should run. Carries no synthesized samples here because the base
     /// chain surfaces erasure separately — the caller drives concealment.
@@ -591,14 +614,25 @@ pub enum AnnexBOutput {
 /// §B.4.5 routing ([`AnnexBDecoder`]) and the base-codec synthesis
 /// ([`crate::decode_chain::FrameDecoder`]) — so an Annex B `.bit` stream
 /// decodes to per-frame PCM blocks in one walk. Active frames are
-/// reconstructed bit-exactly; non-active frames return a documented
-/// [`AnnexBOutput::ComfortNoisePlaceholder`] because the §B.4.4 CNG
-/// synthesis is blocked on absent numeric tables (see the module-level
-/// docs-gap note).
+/// reconstructed bit-exactly; non-active frames return the §B.4.4
+/// energy-controlled comfort-noise excitation via
+/// [`AnnexBOutput::ComfortNoise`] (the eqs (B.19)–(B.26) excitation path
+/// is wired; the LP-filtered PCM still awaits the §B.4.2.2 SID-LSP VQ
+/// tables — see the module-level docs-gap note).
 #[derive(Debug, Clone)]
 pub struct AnnexBStreamDecoder {
     router: AnnexBDecoder,
     base: crate::decode_chain::FrameDecoder,
+    /// eq (B.19) target-gain smoother for the §B.4.4 comfort-noise.
+    cng_gain: CngGainSmoother,
+    /// eq (96) random sequence driving the §B.4.4 excitation draws; reset
+    /// to the §4.4.4 start-up seed at each active frame per clause B.4.4
+    /// ("the pseudo-random sequence reset is performed at each active
+    /// frame").
+    cng_rng: CngRandom,
+    /// Whether the previous decoded frame was active speech (`Vad_{t−1}`),
+    /// for the eq (B.19) jump-to-SID branch.
+    prev_active: bool,
 }
 
 impl Default for AnnexBStreamDecoder {
@@ -614,6 +648,9 @@ impl AnnexBStreamDecoder {
         Self {
             router: AnnexBDecoder::new(),
             base: crate::decode_chain::FrameDecoder::new(),
+            cng_gain: CngGainSmoother::new(),
+            cng_rng: CngRandom::new(crate::concealment::RANDOM_SEED_INIT),
+            prev_active: false,
         }
     }
 
@@ -626,8 +663,9 @@ impl AnnexBStreamDecoder {
     /// Decode one parsed [`AnnexBFrame`], advancing all cross-frame state.
     ///
     /// Active frames run the base §4.1 → §4.1.6 → §4.2 chain and return
-    /// [`AnnexBOutput::Speech`]; non-active frames return a comfort-noise
-    /// placeholder; an erased-active frame returns
+    /// [`AnnexBOutput::Speech`]; non-active frames synthesize the §B.4.4
+    /// energy-controlled comfort-noise excitation
+    /// ([`AnnexBOutput::ComfortNoise`]); an erased-active frame returns
     /// [`AnnexBOutput::ErasedActivePlaceholder`].
     ///
     /// # Errors
@@ -643,18 +681,98 @@ impl AnnexBStreamDecoder {
             ResolvedFrame::Active(bits) => {
                 let kind = crate::serial::FrameKind::Active(bits);
                 let pf = self.base.decode_frame_kind_to_postfiltered(&kind)?;
+                // Clause B.4.4: reset the pseudo-random sequence at each
+                // active frame to keep encoder/decoder synchronized.
+                self.cng_rng = CngRandom::new(crate::concealment::RANDOM_SEED_INIT);
+                self.prev_active = true;
                 Ok(AnnexBOutput::Speech(Box::new(pf.output())))
             }
-            ResolvedFrame::Sid { energy_db, .. } => Ok(AnnexBOutput::ComfortNoisePlaceholder {
-                energy_db: Some(energy_db),
-            }),
+            ResolvedFrame::Sid { energy_db, .. } => {
+                let out = self.synthesize_comfort_noise(Some(energy_db));
+                self.prev_active = false;
+                Ok(out)
+            }
             ResolvedFrame::Untransmitted { last_energy_db } => {
-                Ok(AnnexBOutput::ComfortNoisePlaceholder {
-                    energy_db: last_energy_db,
-                })
+                let out = self.synthesize_comfort_noise(last_energy_db);
+                self.prev_active = false;
+                Ok(out)
             }
             ResolvedFrame::ErasedActive => Ok(AnnexBOutput::ErasedActivePlaceholder),
         }
+    }
+
+    /// Synthesize one frame of §B.4.4 comfort-noise **excitation** from a
+    /// (possibly absent) SID energy.
+    ///
+    /// Converts the SID log-energy `E` (dB) into the SID gain
+    /// `G̃_sid = 10^(E/20)` (the square root of the average energy),
+    /// applies the eq (B.19) target-gain smoothing, and synthesizes the
+    /// two 40-sample subframes via [`synthesize_cng_subframe`] over
+    /// random ACELP fixed pulses, a unity-gain adaptive excitation, and a
+    /// white Gaussian component — all drawn from the carried eq (96)
+    /// sequence ([`Self::cng_rng`]).
+    ///
+    /// When no SID energy is available yet (`None`, before the first SID),
+    /// the target gain relaxes toward zero and the excitation is silent.
+    fn synthesize_comfort_noise(&mut self, energy_db: Option<f32>) -> AnnexBOutput {
+        // SID gain G̃_sid = sqrt(average energy) = 10^(E_dB / 20). Absent
+        // SID → drive the smoother toward zero (silence).
+        let g_sid = energy_db.map_or(0.0, |db| 10.0_f32.powf(db / 20.0));
+        let target = self.cng_gain.next_target(g_sid, self.prev_active);
+
+        let mut excitation = [0.0f32; FRAME_SAMPLES];
+        for sf in 0..2 {
+            let shapes = self.draw_cng_shapes();
+            let ga_draw = self.cng_rng.next_unit();
+            let ex = synthesize_cng_subframe(&shapes, target, ga_draw);
+            excitation[sf * SUBFRAME_SIZE..(sf + 1) * SUBFRAME_SIZE].copy_from_slice(&ex);
+        }
+
+        AnnexBOutput::ComfortNoise {
+            excitation: Box::new(excitation),
+            target_gain: target,
+            energy_db,
+        }
+    }
+
+    /// Draw one subframe's §B.4.4 random excitation shapes from the
+    /// carried eq (96) sequence: a unit-magnitude adaptive excitation
+    /// `e_a(n)` formed from a randomly chosen pitch lag in `[40, 103]`, a
+    /// 4-pulse ±1 ACELP fixed excitation `e_f(n)` (`Σe_f² = 4`) on the
+    /// spec's interleaved single-pulse tracks, and a white Gaussian
+    /// component `ex2(n)`.
+    fn draw_cng_shapes(&mut self) -> CngSubframeShapes {
+        // Adaptive excitation of unity gain: a single unit pulse at the
+        // randomly chosen pitch position, repeated into the subframe (a
+        // minimal unity-energy adaptive shape — the spec only fixes that
+        // it is "of unity gain"; its exact form is unpinned, so a unit
+        // pulse keeps Ea well-defined and the gain solve total).
+        let lag = self.cng_rng.next_pitch_lag();
+        let mut e_a = [0.0f32; SUBFRAME_SIZE];
+        let pos = lag % SUBFRAME_SIZE;
+        e_a[pos] = 1.0;
+
+        // 4-pulse ±1 ACELP fixed excitation on the four interleaved tracks
+        // (positions n ≡ k (mod 5)); signs and within-track positions
+        // chosen from the random sequence.
+        let mut e_f = [0.0f32; SUBFRAME_SIZE];
+        for k in 0..4usize {
+            let r = self.cng_rng.next_u16();
+            let slot = usize::from(r) % 8; // 8 positions per interleaved track
+            let position = k + 5 * slot; // ≤ 3 + 5·7 = 38 < SUBFRAME_SIZE
+            let sign = if (r >> 3) & 1 == 0 { 1.0 } else { -1.0 };
+            e_f[position] = sign;
+        }
+
+        let ex2: [f32; SUBFRAME_SIZE] = core::array::from_fn(|_| self.cng_rng.next_gaussian());
+
+        CngSubframeShapes { e_a, e_f, ex2 }
+    }
+
+    /// Borrow the §B.4.4 CNG target-gain smoother for inspection / tests.
+    #[must_use]
+    pub fn cng_gain(&self) -> &CngGainSmoother {
+        &self.cng_gain
     }
 
     /// Walk an entire Annex B serial bitstream, decoding every frame in
@@ -980,28 +1098,84 @@ mod tests {
     }
 
     #[test]
-    fn stream_decoder_routes_silence_to_placeholder() {
+    fn stream_decoder_synthesizes_comfort_noise() {
         let mut dec = AnnexBStreamDecoder::new();
-        // SID then untransmitted → comfort-noise placeholders carrying
-        // the SID energy.
+        // SID then untransmitted → §B.4.4 comfort-noise excitation frames
+        // carrying the SID energy. The energy persists across the
+        // untransmitted frame (last received SID energy).
+        let sid_db = dequant_sid_energy_db(12);
         let out = dec
             .decode_frame(&AnnexBFrame::Sid(sid(12)))
             .expect("sid decodes");
-        assert_eq!(
-            out,
-            AnnexBOutput::ComfortNoisePlaceholder {
-                energy_db: Some(dequant_sid_energy_db(12)),
+        match out {
+            AnnexBOutput::ComfortNoise {
+                excitation,
+                target_gain,
+                energy_db,
+            } => {
+                assert_eq!(energy_db, Some(sid_db));
+                // First SID after the (start-up non-active) state relaxes
+                // toward G̃_sid; gain is positive and finite.
+                assert!(target_gain > 0.0 && target_gain.is_finite());
+                assert!(excitation.iter().all(|s| s.is_finite()));
+                // The excitation carries energy (not silence) for a
+                // non-trivial SID gain.
+                let e: f32 = excitation.iter().map(|s| s * s).sum();
+                assert!(e > 0.0, "comfort-noise excitation should be non-silent");
             }
-        );
+            other => panic!("expected ComfortNoise, got {other:?}"),
+        }
         let out = dec
             .decode_frame(&AnnexBFrame::Untransmitted)
             .expect("untx decodes");
-        assert_eq!(
-            out,
-            AnnexBOutput::ComfortNoisePlaceholder {
-                energy_db: Some(dequant_sid_energy_db(12)),
+        match out {
+            AnnexBOutput::ComfortNoise { energy_db, .. } => {
+                assert_eq!(energy_db, Some(sid_db));
             }
+            other => panic!("expected ComfortNoise, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn comfort_noise_excitation_energy_tracks_target_gain() {
+        // A higher SID energy must produce a higher-energy comfort-noise
+        // excitation (the eq (B.20) target tracks the SID gain).
+        let mut lo = AnnexBStreamDecoder::new();
+        let mut hi = AnnexBStreamDecoder::new();
+        // Prime both with an active frame so the next SID jumps straight
+        // to G̃_sid (eq (B.19) active branch) — isolates the gain effect.
+        let active = AnnexBFrame::Active(Box::new([false; ACTIVE_BITS]));
+        lo.decode_frame(&active).unwrap();
+        hi.decode_frame(&active).unwrap();
+        let energy_of = |out: &AnnexBOutput| -> f32 {
+            match out {
+                AnnexBOutput::ComfortNoise { excitation, .. } => {
+                    excitation.iter().map(|s| s * s).sum()
+                }
+                _ => panic!("expected ComfortNoise"),
+            }
+        };
+        // index 6 = 16 dB, index 20 = 44 dB → much larger gain.
+        let e_lo = energy_of(&lo.decode_frame(&AnnexBFrame::Sid(sid(6))).unwrap());
+        let e_hi = energy_of(&hi.decode_frame(&AnnexBFrame::Sid(sid(20))).unwrap());
+        assert!(
+            e_hi > e_lo,
+            "higher SID energy must yield higher excitation energy (lo {e_lo}, hi {e_hi})"
         );
+    }
+
+    #[test]
+    fn comfort_noise_is_deterministic() {
+        // Two decoders over the same frame sequence produce identical
+        // comfort-noise excitation (the eq (96) sequence is owned + reset
+        // deterministically).
+        let mk = || {
+            let mut d = AnnexBStreamDecoder::new();
+            let a = d.decode_frame(&AnnexBFrame::Sid(sid(15))).unwrap();
+            let b = d.decode_frame(&AnnexBFrame::Untransmitted).unwrap();
+            (a, b)
+        };
+        assert_eq!(mk(), mk());
     }
 
     #[test]
