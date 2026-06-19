@@ -87,6 +87,32 @@ yet wired into this end-to-end call (see below):
   replacement-excitation random generator (`seed = 31821·seed + 13849`,
   seed `21845`, 13-bit index / 4-bit sign), and the §4.4.4 periodic-case
   pitch-delay repeat (`+1`/subframe, bounded `143`).
+- **Annex B (DTX / CNG) decoder framing + routing** (`annex_b`) — the
+  silence-compression decode surface that is fully determined by the
+  staged corpus + Annex B prose:
+  - **Variable-length serial framing** — the Annex B `.bit` files carry
+    a per-frame bit-count header (`n_bits ∈ {0, 16, 80}`) selecting
+    untransmitted / SID / active; `parse_annex_b_frame` /
+    `parse_annex_b_stream` classify each frame into
+    `AnnexBFrame::{Active, Sid, Untransmitted, Erased}`, handling both
+    §B.4.5 erasure shapes (the `0x6B20` erased-sync word and an
+    all-`0x0000` payload).
+  - **SID bitstream unpack** (Table B.2) — predictor (1) / first-stage
+    LSF (5) / second-stage LSF (4) / gain (5) into a typed `SidFrame`.
+  - **§B.4.2.1 energy dequantizer** (`dequant_sid_energy_db`) — the
+    5-bit non-uniform log quantizer (−12 dB floor; −4..12 dB / 4 dB;
+    16..66 dB / 2 dB), fully prose-sourced (the spec states it "does not
+    need the storage of a quantizer table").
+  - **§B.4.1/§B.4.5 frame-type state machine** (`AnnexBDecoder`) — the
+    erasure-inheritance rule (active→active concealment, silence→
+    untransmitted) and SID-parameter persistence across untransmitted
+    frames.
+  - **End-to-end stream decode** (`AnnexBStreamDecoder`) — routes a whole
+    Annex B `.bit` stream to per-frame PCM: active frames decode
+    bit-exactly through the §4.1 → §4.2 base chain (`AnnexBOutput::Speech`),
+    non-active frames return a documented comfort-noise placeholder tagged
+    with the SID energy. Validated over all 10 staged `g729b` sequences
+    (one output block per reference PCM frame).
 
 ### What is NOT yet wired up
 
@@ -101,6 +127,17 @@ yet wired into this end-to-end call (see below):
   §4.2.1 long-term postfilter, whose fractional pass is the docs-gap
   above. The `*_to_speech` entry points return the pre-postfilter
   reconstructed speech `ŝ(n)`.
+- **Annex B comfort-noise synthesis** (§B.4.2.2 SID-LSP VQ dequant +
+  §B.4.4 CNG excitation) — blocked on absent numeric tables. The
+  SID-LSP VQ subset codebooks (the §B.4.2.2 32-address first-stage
+  subset + the two 16-address second-stage subset + the modified MA
+  predictor) and `annexB-cng-lsp-sid-reset-Q15.csv` (`lspSid_reset`,
+  listed in the docs `tables/README.md` but **not present** as a file)
+  are not staged under `docs/audio/g729/tables/` — only the CNG
+  spectrum factor/shift and VAD margin tables are. The §B decoder
+  framing, SID indices, energy dequant, and frame-type routing are
+  wired; the silence-frame *synthesis* returns a placeholder until the
+  tables land. (Docs-gap reported in the round-343 notes.)
 - The full encoder.
 - Registry-side codec factory wiring (the codec entry point returns
   `NotImplemented`).

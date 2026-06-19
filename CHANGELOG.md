@@ -8,6 +8,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 343 adds the **Annex B (DTX / CNG) decoder framing + routing**
+  surface (`annex_b`): variable-length Annex B serial framing (the
+  per-frame bit-count header selecting untransmitted / SID / active,
+  plus both §B.4.5 erasure shapes — the `0x6B20` erased-sync word and an
+  all-`0x0000` payload); SID bitstream unpack (Table B.2:
+  predictor 1 / first-stage LSF 5 / second-stage LSF 4 / gain 5);
+  the §B.4.2.1 5-bit non-uniform log energy dequantizer
+  (`dequant_sid_energy_db`, fully prose-sourced); the §B.4.1/§B.4.5
+  frame-type state machine `AnnexBDecoder` (erasure inheritance + SID
+  persistence); and the end-to-end `AnnexBStreamDecoder` that decodes a
+  whole Annex B `.bit` stream to per-frame PCM (active speech bit-exact
+  through the §4.1 → §4.2 base chain, non-active frames a documented
+  comfort-noise placeholder). Validated over all 10 staged `g729b`
+  conformance sequences in `tests/annex_b_conformance.rs`. The §B.4.2.2
+  SID-LSP VQ dequant + §B.4.4 CNG excitation *synthesis* are blocked on
+  absent numeric tables (the SID-LSP VQ subset codebooks +
+  `annexB-cng-lsp-sid-reset-Q15.csv`) and reported as a docs-gap.
 - Round 340 adds the **§4.2 decoder post-processing cascade** — the
   five-stage adaptive postfilter (`postfilter_cascade`) that turns the
   §4.1.6 reconstructed speech `ŝ(n)` into final decoder output: §4.2.1

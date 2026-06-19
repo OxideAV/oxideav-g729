@@ -225,6 +225,26 @@
 //! clause 4.2.4). The §4.2.1 long-term postfilter remains the last
 //! unwired §4.2 stage.
 //!
+//! Round 343 lands the **Annex B (DTX / CNG) decoder framing + routing**
+//! surface in a new [`annex_b`] module — the silence-compression decode
+//! path that is fully determined by the staged `g729b` conformance corpus
+//! and the Annex B prose. [`annex_b::parse_annex_b_frame`] /
+//! [`annex_b::parse_annex_b_stream`] read the variable-length Annex B
+//! serial framing (the per-frame bit-count header selecting
+//! untransmitted / SID / active, plus both §B.4.5 erasure shapes — the
+//! `0x6B20` erased-sync word and an all-`0x0000` payload) into
+//! [`annex_b::AnnexBFrame`]; [`annex_b::SidFrame`] carries the Table-B.2
+//! SID indices; [`annex_b::dequant_sid_energy_db`] is the §B.4.2.1 5-bit
+//! non-uniform log energy dequantizer (fully prose-sourced — the spec
+//! states it needs no quantizer table); [`annex_b::AnnexBDecoder`] is the
+//! §B.4.1/§B.4.5 frame-type state machine (erasure inheritance + SID
+//! persistence); and [`annex_b::AnnexBStreamDecoder`] decodes a whole
+//! Annex B stream to per-frame PCM — active speech bit-exact through the
+//! §4.1 → §4.2 base chain, non-active frames a documented comfort-noise
+//! placeholder. The §B.4.2.2 SID-LSP VQ dequant and §B.4.4 CNG excitation
+//! *synthesis* are blocked on absent numeric tables and reported as a
+//! docs-gap.
+//!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
