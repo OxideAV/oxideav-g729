@@ -8,6 +8,31 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 357 wires the **§4.4 frame-erasure concealment** into the
+  streaming decode chain (`decode_chain`). New `*_concealed` entry points
+  (`decode_serial_frame_to_postfiltered_concealed`,
+  `decode_serial_frame_to_speech_concealed`) reconstruct an erasure
+  sentinel into concealed PCM instead of returning
+  `FrameDecodeError::Erased`: the §4.4.1 LP-parameter repeat (last good
+  frame), the §4.4.2 gain attenuation (eqs (93)/(94), compounding across
+  an erasure run), the §4.4.3 gain-predictor-memory attenuation (eq (95)),
+  and the §4.4.4 replacement excitation — periodic (adaptive-codebook
+  repeat at the carried pitch delay, +1/subframe, bounded 143) or
+  non-periodic (eq (96) random fixed codebook) by the inherited voicing
+  class, which is latched on every good frame from the §4.2.1 long-term-
+  postfilter decisions. A leading erasure before any good frame
+  synthesizes silence. The previously-standalone `concealment` module's
+  primitives are now driven end-to-end; the whole ERASURE corpus (300
+  frames / variant, 60 erased) decodes to finite bounded PCM. The good-
+  frame path is unchanged (the concealed entry points match the strict
+  ones bit-for-bit on active frames).
+- Round 357 adds a **whole-corpus PCM conformance harness**
+  (`tests/pcm_conformance.rs`) over both the base-codec and Annex-A `.PST`
+  references: first-subframe bit-accuracy across all clean vectors of both
+  corpora, and a regression guard asserting the documented §3.9 fixed-
+  point gain-saturation gap is a **bounded** multiplicative over-gain
+  (whole-vector RMS ratio < 40×, measured 7–18.5×), not a divergence —
+  the ceiling can be ratcheted toward 1.0 as the gap closes.
 - Round 346 adds the **§B.4.4 CNG (comfort-noise) excitation synthesis**
   (`cng`): the silence-frame *excitation* path, fully spec-prose-sourced
   from the Annex B eqs (B.19)–(B.26). The eq (B.19) target-gain smoothing

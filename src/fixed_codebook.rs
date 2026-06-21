@@ -109,7 +109,11 @@ pub const C_FIELD_BITS_TRACK_3: usize = 4;
 
 /// Decoded pulse — a `(position, sign)` pair per spec eq (45). The
 /// codevector `c(n)` is the sum of [`NUM_PULSES`] such impulses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Default` is the inert pulse (`position 0`, `sign 0`) used only to
+/// seed an all-zero codevector for the §4.4 leading-erasure silence
+/// frame; a decoded pulse always carries `sign ∈ {−1, +1}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Pulse {
     /// Pulse position `m_k` per spec Table 7. Lies in
     /// `0..SUBFRAME_SIZE` and is congruent to `k mod TRACK_STRIDE`
@@ -122,7 +126,11 @@ pub struct Pulse {
 
 /// Decoded per-subframe fixed-codebook pulses per spec eq (45) and
 /// Table 7. Indexed in spec order `(i_0, i_1, i_2, i_3)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Default` is the all-inert-pulse set (used only to seed the §4.4
+/// leading-erasure silence frame); a real decode always has four signed
+/// pulses on their Table-7 tracks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FixedCodebookPulses {
     /// The four signed pulses that make up the codevector. Indexed
     /// `[0..NUM_PULSES]` in spec `(i_0, i_1, i_2, i_3)` order.

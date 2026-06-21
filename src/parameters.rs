@@ -115,7 +115,12 @@ pub const PITCH_BITS_PER_FRAME: usize = P1_BITS + P0_BITS + P2_BITS;
 /// Each field carries the raw integer value of the codeword as read
 /// MSB-first from the wire. The struct is `Copy` since every field is
 /// a small integer; pass it by value through the §4.1 procedures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Default` is the all-zero codeword set — used only to tag the §4.4
+/// leading-erasure silence frame, which carries no transmitted
+/// parameters; a real frame's `Parameters` come from
+/// [`unpack_parameters`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Parameters {
     /// `L0` — 1-bit predictor-mode selector for §3.2.4 LSP
     /// reconstruction. Domain: `0..=1` (1-bit field).

@@ -249,6 +249,98 @@ fn gain_gap_is_bounded_not_divergent() {
     );
 }
 
+/// §4.4 frame-erasure concealment end-to-end: the `*_concealed` decode
+/// path runs the ERASURE corpus (which interleaves 240 active + 60 erased
+/// frames per variant) to completion — every erased frame, which the
+/// strict `*_to_postfiltered` path rejects with `FrameDecodeError::Erased`,
+/// is now reconstructed into finite, bounded concealed PCM (the §4.4.1 LP
+/// repeat + §4.4.2 gain attenuation + §4.4.4 replacement excitation). The
+/// whole-stream amplitude stays bounded (the concealed frames ride the
+/// same documented §3.9 gain gap as active frames, not a fresh
+/// divergence), and the decode is deterministic.
+#[test]
+fn erasure_concealment_decodes_whole_stream_bounded() {
+    let Some(root) = conformance_root() else {
+        eprintln!("g729 conformance corpus absent — skipping erasure-concealment check");
+        return;
+    };
+
+    let mut checked = 0usize;
+    for corpus in CORPORA {
+        let label = format!("{corpus}/ERASURE");
+        let bit_path = root.join(format!("{corpus}/ERASURE.BIT"));
+        let pst_path = root.join(format!("{corpus}/ERASURE.PST"));
+        if !bit_path.is_file() || !pst_path.is_file() {
+            continue;
+        }
+        let bit = std::fs::read(&bit_path).unwrap_or_else(|e| panic!("{label}.BIT: {e}"));
+        let reference = read_pst(&pst_path);
+        let n_frames = bit.len() / FRAME_BYTES;
+
+        // Count the erased frames the strict path would reject.
+        let erased = (0..n_frames)
+            .filter(|&f| {
+                matches!(
+                    serial::parse_frame(&bit[f * FRAME_BYTES..(f + 1) * FRAME_BYTES]),
+                    Ok(FrameKind::Erased)
+                )
+            })
+            .count();
+        assert!(
+            erased > 0,
+            "{label}: expected erasure sentinels in the corpus"
+        );
+
+        // The concealed path decodes every frame (active + erased) without
+        // erroring, producing one 80-sample block per frame.
+        let mut dec = FrameDecoder::new();
+        let mut out = Vec::with_capacity(n_frames * SAMPLES_PER_FRAME);
+        for f in 0..n_frames {
+            let frame = &bit[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+            let pf = dec
+                .decode_serial_frame_to_postfiltered_concealed(frame)
+                .unwrap_or_else(|e| panic!("{label}: frame #{f} concealed decode failed: {e}"));
+            out.extend_from_slice(&pf.output());
+        }
+        assert_eq!(
+            out.len(),
+            n_frames * SAMPLES_PER_FRAME,
+            "{label}: concealed path must emit one block per frame",
+        );
+        for (i, &s) in out.iter().enumerate() {
+            assert!(s.is_finite(), "{label}: concealed sample {i} not finite");
+        }
+
+        let ratio = rms_ratio(&out, &reference);
+        eprintln!(
+            "{label}: {n_frames} frames ({erased} concealed) — RMS ratio {ratio:.2}× \
+             (concealed PCM, bounded; §3.9 gain gap shared with active frames)",
+        );
+        assert!(
+            ratio.is_finite() && ratio < RMS_RATIO_CEILING,
+            "{label}: concealed RMS ratio {ratio} ≥ {RMS_RATIO_CEILING} — concealment diverged",
+        );
+
+        // Determinism of the concealed path (owned state, no globals).
+        let mut dec2 = FrameDecoder::new();
+        let mut out2 = Vec::with_capacity(out.len());
+        for f in 0..n_frames {
+            let frame = &bit[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+            let pf = dec2
+                .decode_serial_frame_to_postfiltered_concealed(frame)
+                .unwrap();
+            out2.extend_from_slice(&pf.output());
+        }
+        assert_eq!(out, out2, "{label}: concealed decode is not deterministic");
+
+        checked += 1;
+    }
+    assert!(
+        checked >= 1,
+        "expected the ERASURE vector in at least one corpus"
+    );
+}
+
 /// The whole-corpus postfiltered decode is deterministic on every clean
 /// vector — two independent runs produce byte-identical PCM. Locks down
 /// that all decoder state is owned (no hidden globals) across the full

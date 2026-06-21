@@ -76,6 +76,7 @@
 //! including harmonic enhancement", i.e. the eq (48)-modified vector,
 //! and §3.9.1 defines `E` over that same `c(n)`.
 
+use crate::concealment::Concealer;
 use crate::fixed_codebook::{self, FixedCodebookError, FixedCodebookPulses, SUBFRAME_SIZE};
 use crate::gain_predict::{GainPredictor, PredictedGain};
 use crate::gain_reconstruct::{
@@ -268,6 +269,18 @@ pub struct FrameDecoder {
     /// `*_to_postfiltered` entry points (the `*_to_speech` calls leave it
     /// untouched).
     postfilter: PostfilterCascade,
+    /// §4.4 frame-erasure concealer (voicing class, eq (96) random seed,
+    /// carried periodic pitch delay). Advanced only by the `*_concealed`
+    /// entry points; the strict `decode_*` / `*_to_speech` /
+    /// `*_to_postfiltered` calls (which error on an erasure) leave it at
+    /// its clause-4.3 start-up state.
+    concealer: Concealer,
+    /// The last successfully-decoded **good** frame, retained for the
+    /// §4.4.1 LP-parameter repeat and the §4.4.2 gain attenuation that an
+    /// erased frame is built from. `None` until the first good frame is
+    /// decoded through a `*_concealed` entry point (a leading erasure with
+    /// no prior good frame synthesizes silence).
+    last_good: Option<DecodedFrame>,
 }
 
 impl Default for FrameDecoder {
@@ -288,7 +301,16 @@ impl FrameDecoder {
             prev_int_t2: 0,
             synthesizer: Synthesizer::new(),
             postfilter: PostfilterCascade::new(),
+            concealer: Concealer::new(),
+            last_good: None,
         }
+    }
+
+    /// Borrow the §4.4 [`Concealer`] for inspection / tests. Only the
+    /// `*_concealed` entry points advance it.
+    #[must_use]
+    pub fn concealer(&self) -> &Concealer {
+        &self.concealer
     }
 
     /// Borrow the current eq (47) `β` source (`ĝ_p^(m−1)`) for
@@ -590,6 +612,218 @@ impl FrameDecoder {
         let speech = self.synthesizer.synthesize_frame(&frame);
         Ok(self.postfilter.process_frame(&speech, &frame))
     }
+
+    // ---------------------------------------------------------------
+    // §4.4 frame-erasure concealment — the `*_concealed` entry points.
+    //
+    // Unlike the strict `*_to_postfiltered` / `*_to_speech` calls (which
+    // return `FrameDecodeError::Erased` on a §4.4 erasure sentinel so the
+    // caller can decide its own policy), these entry points implement the
+    // clause-4.4 concealment: an erased frame is reconstructed from the
+    // last good frame's parameters with the §4.4.2 gain attenuation and
+    // §4.4.4 replacement excitation, then run through the same §4.1.6
+    // synthesis + §4.2 cascade as a good frame. A good frame decodes
+    // normally and additionally latches the concealer's voicing class
+    // (§4.4) from the §4.2.1 long-term-postfilter decisions and retains
+    // itself as the new last-good frame.
+    // ---------------------------------------------------------------
+
+    /// Decode one 164-byte ITU serial frame to §4.2 post-processed output,
+    /// applying §4.4 **frame-erasure concealment** on an erasure sentinel
+    /// instead of erroring.
+    ///
+    /// A good frame decodes exactly as
+    /// [`Self::decode_serial_frame_to_postfiltered`] and additionally
+    /// updates the §4.4 concealer (voicing class + carried pitch delay)
+    /// and the retained last-good frame. An erased frame
+    /// ([`FrameKind::Erased`]) is concealed per clause 4.4: the §4.4.1 LP
+    /// repeat, the §4.4.2 gain attenuation (eqs (93)/(94)), the §4.4.3
+    /// gain-predictor-memory attenuation (eq (95)), and the §4.4.4
+    /// replacement excitation (periodic repeat or eq (96) random fixed
+    /// codebook by the inherited voicing class).
+    ///
+    /// A leading erasure before any good frame has been seen synthesizes
+    /// from the clause-4.3 zero state (silence), matching the reference
+    /// decoder's start-up behaviour.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameDecodeError::Serial`] on malformed framing. A well-formed
+    /// active or erased frame never errors here (the erasure that
+    /// `*_to_postfiltered` would reject is concealed).
+    pub fn decode_serial_frame_to_postfiltered_concealed(
+        &mut self,
+        frame_bytes: &[u8],
+    ) -> Result<PostfilteredFrame, FrameDecodeError> {
+        let kind = parse_frame(frame_bytes)?;
+        match kind {
+            FrameKind::Erased => Ok(self.conceal_to_postfiltered()),
+            FrameKind::Active(_) => {
+                let params = unpack_parameters(&kind)?;
+                let frame = self.decode_parameters(&params)?;
+                let speech = self.synthesizer.synthesize_frame(&frame);
+                let pf = self.postfilter.process_frame(&speech, &frame);
+                self.observe_good_frame(&frame, &pf);
+                Ok(pf)
+            }
+        }
+    }
+
+    /// Decode one 164-byte ITU serial frame to the §4.1.6 reconstructed
+    /// speech `ŝ(n)`, applying §4.4 concealment on an erasure sentinel.
+    ///
+    /// The reconstructed-speech analogue of
+    /// [`Self::decode_serial_frame_to_postfiltered_concealed`] — runs the
+    /// §4.1.6 synthesis but not the §4.2 cascade. Because the §4.4 voicing
+    /// class is derived from the §4.2.1 long-term-postfilter decisions, a
+    /// good frame here runs the cascade internally **only** to obtain that
+    /// classification (its postfiltered output is discarded); the returned
+    /// value is the pre-postfilter `ŝ(n)`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode_serial_frame_to_postfiltered_concealed`].
+    pub fn decode_serial_frame_to_speech_concealed(
+        &mut self,
+        frame_bytes: &[u8],
+    ) -> Result<SynthesizedFrame, FrameDecodeError> {
+        let kind = parse_frame(frame_bytes)?;
+        match kind {
+            FrameKind::Erased => Ok(self.conceal_to_speech()),
+            FrameKind::Active(_) => {
+                let params = unpack_parameters(&kind)?;
+                let frame = self.decode_parameters(&params)?;
+                let speech = self.synthesizer.synthesize_frame(&frame);
+                // Classify via the cascade (postfiltered output discarded)
+                // so the concealer's §4.4 voicing class stays in sync.
+                let pf = self.postfilter.process_frame(&speech, &frame);
+                self.observe_good_frame(&frame, &pf);
+                Ok(speech)
+            }
+        }
+    }
+
+    /// Latch the §4.4 concealer's voicing class + carried pitch delay from
+    /// a good frame's §4.2.1 long-term decisions, and retain the frame as
+    /// the new last-good frame for any subsequent erasure.
+    fn observe_good_frame(&mut self, frame: &DecodedFrame, pf: &PostfilteredFrame) {
+        let decisions = [pf.subframes[0].long_term, pf.subframes[1].long_term];
+        // §4.4.4 periodic repeat starts from int(T1) of the good frame.
+        let int_t1 = frame.subframes[0].pitch.int_t.max(0) as usize;
+        self.concealer.observe_good_frame(&decisions, int_t1);
+        self.last_good = Some(*frame);
+    }
+
+    /// Build a concealed [`DecodedFrame`] for an erased frame from the
+    /// retained last-good frame (clause 4.4). Returns `None` before any
+    /// good frame has been seen (leading-erasure silence).
+    fn build_concealed_frame(&mut self) -> Option<DecodedFrame> {
+        let mut frame = self.last_good?;
+        let periodic = self.concealer.is_periodic();
+
+        for sub in &mut frame.subframes {
+            // §4.4.2 gain attenuation (eqs (93)/(94)): decay the previous
+            // subframe's gains.
+            let g_p = Concealer::attenuate_adaptive_gain(sub.gains.g_p_hat);
+            let g_c = Concealer::attenuate_fixed_gain(sub.g_c_hat);
+
+            if periodic {
+                // §4.4.4 periodic case: repeat the adaptive codebook at the
+                // carried pitch delay (+1 per subframe, bounded 143) and
+                // drop the fixed-codebook contribution.
+                let delay = self.concealer.periodic_pitch_delay();
+                sub.pitch = PitchDelay {
+                    int_t: delay as i32,
+                    frac: 0,
+                };
+                sub.codevector = [0.0; SUBFRAME_SIZE];
+                sub.g_c_hat = 0.0;
+            } else {
+                // §4.4.4 non-periodic case: eq (96) random fixed codebook,
+                // no adaptive contribution.
+                let rnd = self.concealer.next_random_excitation();
+                if let Ok(pulses) = fixed_codebook::decode_pulses(rnd.index, rnd.sign as u8) {
+                    let raw = fixed_codebook::build_codevector(&pulses);
+                    sub.fixed = pulses;
+                    sub.codevector = sharpen(&raw, sub.pitch.int_t, self.g_p_prev);
+                }
+                sub.g_c_hat = g_c;
+            }
+            sub.gains.g_p_hat = if periodic { g_p } else { 0.0 };
+
+            // §4.4.3 gain-predictor-memory attenuation (eq (95)): push the
+            // averaged-minus-4 dB value onto the predictor so a sustained
+            // erasure run keeps decaying the predicted gain.
+            let u_db = Concealer::attenuated_predictor_memory_db(&self.gain_predictor);
+            self.gain_predictor
+                .push_quantised_error(10.0_f32.powf(u_db / 20.0));
+
+            // Advance the eq (47) β source with the attenuated adaptive
+            // gain, matching the good-frame state thread.
+            self.g_p_prev = sub.gains.g_p_hat;
+        }
+
+        // Retain the concealed frame as the basis for a further erasure
+        // (the §4.4.2 attenuation compounds across an erasure run).
+        self.last_good = Some(frame);
+        Some(frame)
+    }
+
+    /// Synthesize + postfilter a concealed erased frame (or silence before
+    /// the first good frame).
+    fn conceal_to_postfiltered(&mut self) -> PostfilteredFrame {
+        match self.build_concealed_frame() {
+            Some(frame) => {
+                let speech = self.synthesizer.synthesize_frame(&frame);
+                self.postfilter.process_frame(&speech, &frame)
+            }
+            None => {
+                // Leading erasure: silence frame from the zero state.
+                let silent = self.silence_frame();
+                let speech = self.synthesizer.synthesize_frame(&silent);
+                self.postfilter.process_frame(&speech, &silent)
+            }
+        }
+    }
+
+    /// Synthesize a concealed erased frame to reconstructed speech.
+    fn conceal_to_speech(&mut self) -> SynthesizedFrame {
+        let frame = self
+            .build_concealed_frame()
+            .unwrap_or_else(|| self.silence_frame());
+        self.synthesizer.synthesize_frame(&frame)
+    }
+
+    /// A zero-excitation frame used for a leading erasure (no last-good
+    /// frame yet). The LP filter is the identity (`â_i = 0`), so the
+    /// synthesizer emits silence — matching the clause-4.3 zero start-up.
+    fn silence_frame(&self) -> DecodedFrame {
+        let zero_sub = SubframeDecode {
+            lsp_q: [0.0; M],
+            lp: [0.0; M],
+            pitch: PitchDelay { int_t: 40, frac: 0 },
+            fixed: FixedCodebookPulses::default(),
+            beta: BETA_INIT,
+            codevector: [0.0; SUBFRAME_SIZE],
+            gains: QuantisedGains {
+                g_p_hat: 0.0,
+                gamma_hat: 0.0,
+            },
+            predicted: PredictedGain {
+                e_db: 0.0,
+                e_tilde_db: 0.0,
+                g_c_prime: 0.0,
+            },
+            g_c_hat: 0.0,
+        };
+        DecodedFrame {
+            params: Parameters::default(),
+            parity_ok: true,
+            omega: [0.0; M],
+            t_min: 20,
+            subframes: [zero_sub, zero_sub],
+        }
+    }
 }
 
 #[cfg(test)]
@@ -628,6 +862,53 @@ mod tests {
         let mut p = parity_ok_params();
         p.p0 = 0;
         p
+    }
+
+    /// Pack a [`Parameters`] struct into a 164-byte ITU serial frame
+    /// (sync word + bit-count header + 80 bit-words), mirroring the
+    /// inline packers used by the serial-entry-point tests.
+    fn serial_bytes(params: &Parameters) -> Vec<u8> {
+        let vals: [(u16, usize); 15] = [
+            (u16::from(params.l0), 1),
+            (u16::from(params.l1), 7),
+            (u16::from(params.l2), 5),
+            (u16::from(params.l3), 5),
+            (u16::from(params.p1), 8),
+            (u16::from(params.p0), 1),
+            (params.c1, 13),
+            (u16::from(params.s1), 4),
+            (u16::from(params.ga1), 3),
+            (u16::from(params.gb1), 4),
+            (u16::from(params.p2), 5),
+            (params.c2, 13),
+            (u16::from(params.s2), 4),
+            (u16::from(params.ga2), 3),
+            (u16::from(params.gb2), 4),
+        ];
+        let mut buf = Vec::with_capacity(164);
+        buf.extend_from_slice(&SYNC_WORD.to_le_bytes());
+        buf.extend_from_slice(&BITS_HEADER.to_le_bytes());
+        for &(v, w) in &vals {
+            for k in 0..w {
+                let bit = ((v >> (w - 1 - k)) & 1) == 1;
+                let word = if bit { BIT_ONE } else { BIT_ZERO };
+                buf.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        buf
+    }
+
+    /// A 164-byte erasure-sentinel serial frame (the all-`0x0000`-payload
+    /// §4.4.5 shape) the concealment path must conceal rather than error
+    /// on.
+    fn erased_serial_bytes() -> Vec<u8> {
+        let mut buf = Vec::with_capacity(164);
+        buf.extend_from_slice(&SYNC_WORD.to_le_bytes());
+        buf.extend_from_slice(&BITS_HEADER.to_le_bytes());
+        for _ in 0..crate::parameters::FRAME_BITS {
+            buf.extend_from_slice(&crate::serial::BIT_ERASED.to_le_bytes());
+        }
+        buf
     }
 
     /// Clause 4.3 / Table 9 start-up state of the chain-owned slots.
@@ -1127,5 +1408,134 @@ mod tests {
             chain.postfilter().agc().gain(),
             crate::adaptive_gain_control::G_INIT
         );
+    }
+
+    /// §4.4: the concealed post-filter path decodes an erasure sentinel
+    /// instead of erroring. After a good frame, an erased frame produces a
+    /// finite 80-sample concealed output block (where the strict path
+    /// returns `FrameDecodeError::Erased`).
+    #[test]
+    fn concealed_path_synthesizes_erased_frame() {
+        let good = serial_bytes(&parity_ok_params());
+        let erased = erased_serial_bytes();
+
+        // Strict path errors on the sentinel.
+        let mut strict = FrameDecoder::new();
+        strict
+            .decode_serial_frame_to_postfiltered(&good)
+            .expect("good frame");
+        assert_eq!(
+            strict
+                .decode_serial_frame_to_postfiltered(&erased)
+                .unwrap_err(),
+            FrameDecodeError::Erased,
+        );
+
+        // Concealed path synthesizes both.
+        let mut dec = FrameDecoder::new();
+        let g = dec
+            .decode_serial_frame_to_postfiltered_concealed(&good)
+            .expect("good frame conceals identically");
+        assert!(g.output().iter().all(|s| s.is_finite()));
+        let e = dec
+            .decode_serial_frame_to_postfiltered_concealed(&erased)
+            .expect("erased frame is concealed, not errored");
+        let out = e.output();
+        assert_eq!(out.len(), 2 * SUBFRAME_SIZE);
+        assert!(out.iter().all(|s| s.is_finite()));
+    }
+
+    /// §4.4 leading erasure: an erasure before any good frame synthesizes
+    /// silence (the clause-4.3 zero state), not an error.
+    #[test]
+    fn concealed_leading_erasure_is_silence() {
+        let mut dec = FrameDecoder::new();
+        let out = dec
+            .decode_serial_frame_to_postfiltered_concealed(&erased_serial_bytes())
+            .expect("leading erasure concealed")
+            .output();
+        // Zero excitation + identity LP → silence (within high-pass
+        // transient bounds, which start at zero state → exactly zero).
+        assert!(
+            out.iter().all(|&s| s == 0.0),
+            "leading erasure must be silent"
+        );
+    }
+
+    /// §4.4 / §4.4.4: a sustained erasure run stays finite and bounded —
+    /// the §4.4.2 gain attenuation (eqs (93)/(94)) compounds across the
+    /// run so the energy decays rather than diverging.
+    #[test]
+    fn concealed_sustained_erasure_run_is_bounded() {
+        let good = serial_bytes(&parity_ok_params());
+        let erased = erased_serial_bytes();
+        let mut dec = FrameDecoder::new();
+        // Prime with a few good frames so a voicing class + last-good
+        // frame are latched.
+        for _ in 0..3 {
+            dec.decode_serial_frame_to_postfiltered_concealed(&good)
+                .expect("good frame");
+        }
+        // Long erasure run.
+        let mut max_abs = 0.0f32;
+        for _ in 0..20 {
+            let out = dec
+                .decode_serial_frame_to_postfiltered_concealed(&erased)
+                .expect("concealed")
+                .output();
+            for &s in &out {
+                assert!(s.is_finite());
+                max_abs = max_abs.max(s.abs());
+            }
+        }
+        // The attenuation keeps the run bounded well below any runaway.
+        assert!(
+            max_abs < 1.0e6,
+            "erasure run diverged: max |sample| = {max_abs}"
+        );
+    }
+
+    /// The concealed path is deterministic: two chains over the same
+    /// good/erased sequence stay byte-identical (the eq (96) random
+    /// generator is owned chain state).
+    #[test]
+    fn concealed_path_is_deterministic() {
+        let good = serial_bytes(&parity_ok_params());
+        let erased = erased_serial_bytes();
+        let mut a = FrameDecoder::new();
+        let mut b = FrameDecoder::new();
+        for step in 0..8 {
+            let f = if step % 3 == 2 { &erased } else { &good };
+            let oa = a
+                .decode_serial_frame_to_postfiltered_concealed(f)
+                .unwrap()
+                .output();
+            let ob = b
+                .decode_serial_frame_to_postfiltered_concealed(f)
+                .unwrap()
+                .output();
+            assert_eq!(oa, ob, "step {step} diverged");
+        }
+    }
+
+    /// A good frame through the concealed entry point produces identical
+    /// output to the strict entry point (concealment is a superset — it
+    /// only changes behaviour on erasures).
+    #[test]
+    fn concealed_good_frame_matches_strict_path() {
+        let good = serial_bytes(&parity_ok_params());
+        let mut strict = FrameDecoder::new();
+        let mut conceal = FrameDecoder::new();
+        for _ in 0..4 {
+            let s = strict
+                .decode_serial_frame_to_postfiltered(&good)
+                .unwrap()
+                .output();
+            let c = conceal
+                .decode_serial_frame_to_postfiltered_concealed(&good)
+                .unwrap()
+                .output();
+            assert_eq!(s, c, "concealed path must match strict path on good frames");
+        }
     }
 }

@@ -14,15 +14,21 @@ pending completion of the decode and encode chains.
 
 ## What is wired up
 
-The decode path is implemented up to reconstructed speech, sequenced
-by `decode_chain::FrameDecoder` as one stateful per-frame call. The
-`*_to_speech` entry points (`decode_serial_frame_to_speech`,
-`decode_frame_kind_to_speech`, `decode_parameters_to_speech`) run the
-§4.1 parameter chain and the §3.10 / §4.1.6 LP synthesis in one call and
-return the 80 reconstructed-speech samples `ŝ(n)` of the frame; the
-synthesizer is owned by the chain as cross-frame state. The §4.2
-post-processing cascade is implemented as standalone modules but is not
-yet wired into this end-to-end call (see below):
+The decode path is implemented end-to-end to post-processed PCM output,
+sequenced by `decode_chain::FrameDecoder` as one stateful per-frame
+call. The `*_to_postfiltered` entry points run the §4.1 parameter chain,
+the §3.10 / §4.1.6 LP synthesis, and the full §4.2 post-processing
+cascade; the `*_to_speech` entry points return the pre-postfilter `ŝ(n)`;
+and the `*_concealed` entry points add §4.4 frame-erasure concealment.
+From the clause-4.3 zero state the first 5 ms subframe reconstructs to
+within a few PCM units of the staged `.PST` references on every clean
+vector of both corpora. Beyond the first frame the amplitude is a
+**bounded** multiplicative over-gain (whole-vector RMS ratio ≈ 7–10×):
+the float path omits the fixed-point reference's Q-format saturation of
+the §3.9.1 gain predictor (a documented docs-gap — the §3.9 gain
+fixed-point saturation), so the predicted energy `Ẽ^(m)` over-predicts
+without diverging. `tests/pcm_conformance.rs` measures and bounds this
+gap as a regression guard. The decode stages:
 
 - **Bit-exact numeric-tables foundation** — the LP-analysis windowing,
   LSF cosine grid, pitch interpolation filters, MA gain-prediction
@@ -86,7 +92,16 @@ yet wired into this end-to-end call (see below):
   gain-predictor-memory attenuation (floored at `−14`), the eq (96)
   replacement-excitation random generator (`seed = 31821·seed + 13849`,
   seed `21845`, 13-bit index / 4-bit sign), and the §4.4.4 periodic-case
-  pitch-delay repeat (`+1`/subframe, bounded `143`).
+  pitch-delay repeat (`+1`/subframe, bounded `143`). These primitives are
+  **wired end-to-end** into `decode_chain` via the `*_concealed` entry
+  points (`decode_serial_frame_to_postfiltered_concealed` /
+  `…_to_speech_concealed`): an erasure sentinel is reconstructed into
+  concealed PCM (LP repeat + gain attenuation + periodic/non-periodic
+  replacement excitation) instead of returning `FrameDecodeError::Erased`,
+  with the voicing class latched on each good frame from the §4.2.1
+  long-term decisions. The whole staged ERASURE corpus decodes to finite
+  bounded PCM; the strict (non-`_concealed`) entry points keep their
+  erasure-rejection contract.
 - **Annex B (DTX / CNG) decoder framing + routing** (`annex_b`) — the
   silence-compression decode surface that is fully determined by the
   staged corpus + Annex B prose:
