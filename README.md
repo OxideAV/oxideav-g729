@@ -58,15 +58,24 @@ gap as a regression guard. The decode stages:
   past-excitation interpolator, the per-subframe excitation build
   `u(n) = ĝ_p·v(n) + ĝ_c·c(n)`, and the `1/Â(z)` synthesis filter.
 - **§4.2.1 long-term postfilter `H_p(z)`** (`long_term_postfilter`) —
-  the head of the §4.2 cascade. Forms the eq (79) residual
-  `r̂(n) = ŝ(n) + Σ γ_n^i·â_i·ŝ(n−i)` (the short-term postfilter
-  numerator applied to `ŝ`), runs the eq (80) integer delay search over
-  `[int(T1)−1, int(T1)+1]`, the eq (82) `R′(T)²/Σr̂² < 0.5` disable test,
-  and the eq (83) bounded gain `g_l`, then applies the eq (78) harmonic
-  filter `H_p(z) = (1/(1+γ_p·g_l))·(1 + γ_p·g_l·z⁻ᵀ)` (γ_p = 0.5). The
-  integer-delay form is fully spec-prose-sourced; the 1/8-resolution
-  fractional refinement (length-33/129 interpolation filters) is the
-  remaining sub-stage (its tap layout is defer-to-reference, a docs-gap).
+  the head of the §4.2 cascade, now the **full two-pass** form. Forms the
+  eq (79) residual `r̂(n) = ŝ(n) + Σ γ_n^i·â_i·ŝ(n−i)` (the short-term
+  postfilter numerator applied to `ŝ`), runs the eq (80) integer delay
+  search over `[int(T1)−1, int(T1)+1]`, then the **eq (81)
+  1/8-resolution fractional second pass** — refining the integer anchor
+  `T_0` to `T = T_0 + frac/8` (`frac ∈ {0…7}`) by maximising the
+  pseudo-normalised correlation `R(T)²/E_T`, short (length-33,
+  `tab_hup_s`) filter first and the chosen non-integer fraction re-tested
+  with the long (length-129, `tab_hup_l`) filter (kept only if it raises
+  `R′(T)`, per the spec's longer-filter-replacement rule). The eq (82)
+  `R′(T)²/Σr̂² < 0.5` disable test, the eq (83) bounded gain `g_l`, then
+  the eq (78) harmonic filter `H_p(z) = (1/(1+γ_p·g_l))·(1 +
+  γ_p·g_l·z⁻ᵀ)` (γ_p = 0.5) applied at the fractional delay. The two
+  interpolation tables are the staged `tab_hup_s`/`tab_hup_l` CSVs
+  (compiled as 7-phase polyphase kernels, phase `p`↔`8−p` mirror); the
+  fractional pass engages on ~26 % of enabled subframes across the SPEECH
+  corpus vector. (The earlier README "tap layout is defer-to-reference"
+  docs-gap was stale — both tables were staged with full provenance.)
 - **§4.2.2 short-term postfilter `H_f(z)`** (`short_term_postfilter`) —
   the eq (84) weighted pole/zero pair `Â(z/γ_n)/Â(z/γ_d)` (γ_n = 0.55,
   γ_d = 0.70) with the eq (85) impulse-response gain normalisation
@@ -144,17 +153,17 @@ gap as a regression guard. The decode stages:
 
 ### What is NOT yet wired up
 
-- The §4.2.1 long-term postfilter's **1/8-resolution fractional** delay
-  pass (the length-33/129 interpolation filters `tab_hup_s`/`tab_hup_l`,
-  whose per-phase tap layout the spec prose defers to the reference) —
-  the integer-delay pass is wired above.
-- The §4.2 post-processing cascade (short-term postfilter, tilt
-  compensation, adaptive gain control, output high-pass + ×2) into the
-  end-to-end `*_to_speech` decode call — the stages exist as standalone
-  modules, but chaining them into the per-frame call is blocked on the
-  §4.2.1 long-term postfilter, whose fractional pass is the docs-gap
-  above. The `*_to_speech` entry points return the pre-postfilter
-  reconstructed speech `ŝ(n)`.
+- **PCM-bit-exact decode** — beyond the first frame the amplitude is a
+  bounded multiplicative over-gain (whole-vector RMS ratio ≈ 7–10×, up to
+  ≈ 18× on the TAME vector) because the float path omits the fixed-point
+  reference's Q-format saturation of the §3.9.1 gain predictor. The spec
+  prose (clause 3.9.1, eqs (66)–(72)) specifies **no** such clamp — it is
+  reference-code-only, so this is a hard docs-gap (the §3.9 gain
+  fixed-point saturation). `tests/pcm_conformance.rs` bounds the gap as a
+  regression guard. The §4.2 cascade — including the §4.2.1 two-pass
+  long-term postfilter wired this round — is chained end-to-end into
+  `decode_*_to_postfiltered`; the `*_to_speech` entry points
+  intentionally return the pre-postfilter reconstructed speech `ŝ(n)`.
 - **Annex B comfort-noise spectral envelope** (§B.4.2.2 SID-LSP VQ
   dequant) — blocked on absent numeric tables. The SID-LSP VQ subset
   codebooks (the §B.4.2.2 32-address first-stage subset + the two
@@ -173,9 +182,10 @@ gap as a regression guard. The decode stages:
 - Registry-side codec factory wiring (the codec entry point returns
   `NotImplemented`).
 - The remaining numeric tables (gain-quantizer coefficient matrix,
-  postfilter interpolation, taming, Annex B DTX/CNG, LSF↔LSP
-  cos/slope) are staged under `docs/audio/g729/tables/` but not yet
-  compiled in.
+  taming, Annex B SID-LSP VQ, LSF↔LSP cos/slope) are staged under
+  `docs/audio/g729/tables/` but not yet compiled in. (The §4.2.1
+  postfilter interpolation filters `tab_hup_s`/`tab_hup_l` are now
+  compiled — see the long-term postfilter above.)
 
 ## Clean-room provenance
 
