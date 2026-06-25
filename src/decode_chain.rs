@@ -562,9 +562,9 @@ impl FrameDecoder {
     /// [`PostfilteredFrame`] exposes the 80 ×2-upscaled output samples via
     /// [`PostfilteredFrame::output`].
     ///
-    /// The §4.2.1 long-term postfilter uses its **integer-delay** form
-    /// (the 1/8-resolution fractional second pass is a documented
-    /// docs-gap; see [`crate::long_term_postfilter`]).
+    /// The §4.2.1 long-term postfilter uses its full **two-pass** form
+    /// (integer anchor + 1/8-resolution fractional second pass; see
+    /// [`crate::long_term_postfilter`]).
     ///
     /// # Errors
     ///

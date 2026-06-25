@@ -893,4 +893,44 @@ mod tests {
             "frac=4 interp {interp} should be near midpoint {mid}"
         );
     }
+
+    /// Known-answer sinc-interpolation check: the §4.2.1 interpolation
+    /// kernels reproduce a band-limited sinusoid sampled at the exact
+    /// fractional delay `T_0 + frac/8`, and the **long** (length-129)
+    /// filter is more accurate than the **short** (length-33) one. This
+    /// validates the polyphase tap-offset layout end-to-end from the
+    /// staged data — independent of any reference — and confirms the
+    /// spec's rationale for the long-filter refinement.
+    #[test]
+    fn fractional_kernels_reproduce_fractional_delay() {
+        // Sampled sinusoid as the residual history; r̂(n−k) = sin(2π f (−k))
+        // relative to the output index. Load the history with the sine so
+        // residual_at / residual_interp draw the right samples.
+        let f = 0.07f32;
+        let mut pf = LongTermPostfilter::new();
+        for j in 0..HIST_LEN {
+            // r_hist[j] holds r̂(n−(j+1)); for output index 0 that is the
+            // sample at continuous offset −(j+1).
+            let n = -((j + 1) as f32);
+            pf.r_hist[j] = (core::f32::consts::TAU * f * n).sin();
+        }
+        let r = [0.0f32; SUBFRAME_SIZE];
+        let t0 = 20usize;
+        for frac in 1..POSTFILTER_FRAC_RES {
+            let truth = (core::f32::consts::TAU * f * (-(t0 as f32) - frac as f32 / 8.0)).sin();
+            let short = pf.residual_interp(&r, 0, t0, frac, false);
+            let long = pf.residual_interp(&r, 0, t0, frac, true);
+            let err_s = (short - truth).abs();
+            let err_l = (long - truth).abs();
+            assert!(err_s < 0.01, "frac={frac} short err {err_s}");
+            assert!(err_l < 0.01, "frac={frac} long err {err_l}");
+            // The long filter is at least as accurate as the short one
+            // (within a tight margin) — the spec keeps the long result
+            // only when it improves the correlation.
+            assert!(
+                err_l <= err_s + 1e-3,
+                "frac={frac}: long err {err_l} should not exceed short err {err_s}"
+            );
+        }
+    }
 }

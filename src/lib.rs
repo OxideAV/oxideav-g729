@@ -241,21 +241,44 @@
 //! persistence); and [`annex_b::AnnexBStreamDecoder`] decodes a whole
 //! Annex B stream to per-frame PCM — active speech bit-exact through the
 //! §4.1 → §4.2 base chain, non-active frames a documented comfort-noise
-//! placeholder. The §B.4.2.2 SID-LSP VQ dequant and §B.4.4 CNG excitation
-//! *synthesis* are blocked on absent numeric tables and reported as a
-//! docs-gap.
+//! placeholder. (Round 346 then wired the §B.4.4 CNG *excitation*
+//! synthesis, eqs (B.19)–(B.26), into the stream decoder.) The §B.4.2.2
+//! SID-LSP VQ dequant remains blocked on absent numeric tables and is
+//! reported as a docs-gap.
+//!
+//! Round 371 lands the **§4.2.1 long-term-postfilter 1/8-resolution
+//! fractional second pass**. The staged `tab_hup_s` / `tab_hup_l`
+//! interpolation filters are compiled into [`tables`]
+//! ([`tables::postfilter_interp_short`] /
+//! [`tables::postfilter_interp_long`]) and the
+//! [`long_term_postfilter::LongTermPostfilter`] delay search becomes the
+//! full two-pass procedure: the integer anchor `T_0` (eq (80)) is
+//! refined to a fractional delay `T_0 + frac/8` (eq (81)) by maximising
+//! the pseudo-normalised correlation, short (length-33) filter first and
+//! the chosen non-integer fraction re-tested with the long (length-129)
+//! filter (kept only if it raises `R′(T)`). The eq (78) harmonic filter
+//! then delays the reconstructed speech by the chosen fractional delay.
+//! This closes the README's standing fractional-pass "docs-gap" — both
+//! interpolation tables were staged with full provenance; their per-phase
+//! tap layout is the 7-phase polyphase decomposition (`frac = 1 … 7`).
 //!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
 //! ## What is NOT wired up
 //!
-//! Every decode/encode entry point still returns
-//! [`Error::NotImplemented`]. The remaining numeric tables
-//! (gain-quantizer coefficient matrix, postfilter interpolation,
-//! taming, Annex B DTX/CNG, LSF↔LSP cos/slope tables) are staged
-//! under `docs/audio/g729/tables/` but not yet compiled in; the
-//! Implementer leaves them out until the docs collaborator's
-//! specifier pass clarifies the per-clause wire-up direction.
+//! The registry-side codec factory (the `register` hook is a no-op and
+//! the trait-surface codec entry point returns [`Error::NotImplemented`])
+//! and the full encoder remain unwired. The decode path itself is
+//! implemented end-to-end to post-processed PCM through
+//! [`decode_chain::FrameDecoder`]
+//! (`decode_serial_frame_to_postfiltered`): beyond the first frame the
+//! amplitude is a bounded multiplicative over-gain because the float path
+//! omits the fixed-point reference's Q-format saturation of the §3.9.1
+//! gain predictor (a documented docs-gap — the spec prose specifies no
+//! such clamp; it is reference-code-only). Remaining numeric tables
+//! (gain-quantizer coefficient matrix, taming, Annex B SID-LSP VQ,
+//! LSF↔LSP cos/slope tables) are staged under
+//! `docs/audio/g729/tables/` but not yet compiled in.
 //!
 //! ## Clean-room provenance
 //!

@@ -16,8 +16,8 @@
 //!    pitch delay `int(T_1)` (clause 4.2.1: "int(T_1) is the integer part
 //!    of the (transmitted) pitch delay T_1 in the first subframe"); the
 //!    same `int(T_1)` anchors the integer search in **both** subframes.
-//!    Integer-delay form — see [`crate::long_term_postfilter`] for the
-//!    documented fractional-pass docs-gap.
+//!    Two-pass form (integer anchor + 1/8-resolution fractional
+//!    refinement) — see [`crate::long_term_postfilter`].
 //! 2. **§4.2.2 short-term postfilter `H_f(z)`** — `Â(z/γ_n)/Â(z/γ_d)`
 //!    with gain normalisation `1/g_f` ([`crate::short_term_postfilter`]).
 //! 3. **§4.2.3 tilt compensation `H_t(z)`** — first-order tilt corrector
@@ -60,8 +60,8 @@ const SUBFRAMES_PER_FRAME: usize = 2;
 /// inspection / tests alongside the final PCM.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PostfilteredSubframe {
-    /// §4.2.1 long-term-postfilter decision (chosen integer delay + gain
-    /// `g_l`) for this subframe.
+    /// §4.2.1 long-term-postfilter decision (chosen integer anchor +
+    /// 1/8 fractional offset + gain `g_l`) for this subframe.
     pub long_term: LongTermDecision,
     /// §4.2.5 final output samples `sf′(n)` (×2-upscaled, output
     /// high-passed), `n = 0 … 39`.
