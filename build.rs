@@ -97,11 +97,20 @@
 //! rows` lines of `cols` comma-separated literals); the emitted
 //! Rust array shape is `[[[i16; cols]; rows]; planes]`.
 //!
-//! Remaining codebook tables (gain GA/GB, postfilter interpolation
-//! (`tab_hup_*`), taming (`tab_zone`), Annex B DTX/CNG,
-//! LSF↔LSP cos/slope tables) are NOT compiled yet; their addition
-//! is gated on the docs collaborator handoff (#859 per workspace
-//! memory).
+//! Round 231 added the §3.9.2 gain GA/GB conjugate-structure codebooks
+//! and §3.9.3 mapping tables.
+//!
+//! Round 371 adds the §4.2.1 long-term-postfilter fractional-delay
+//! interpolation filters `tab_hup_s` (28 Q15) / `tab_hup_l` (112 Q15),
+//! compiled flat and reshaped into 7-phase polyphase kernels at the use
+//! site.
+//!
+//! Remaining tables (gain-quantizer coefficient matrix, taming
+//! (`tab_zone`), Annex B SID-LSP VQ, LSF↔LSP cos/slope tables) are NOT
+//! compiled yet; their addition is gated on the relevant decode/encode
+//! stage being wired (the cos/slope tables are only needed by a
+//! bit-exact fixed-point LP↔LSP path; the decode chain uses the float
+//! `cos`/`acos` boundary today).
 
 use std::env;
 use std::fs;
