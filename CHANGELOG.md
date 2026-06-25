@@ -8,6 +8,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 371 compiles the **§4.2.1 long-term-postfilter fractional-delay
+  interpolation filters** (`tab_hup_s` / `tab_hup_l`) into the
+  `tables` module. The staged CSVs (28 / 112 Q15 entries) — previously
+  carried under `docs/audio/g729/tables/` but not wired in — are now
+  emitted as `POSTFILTER_PITCH_INTERP_SHORT_Q15` (length-33 filter, 7
+  phases × 4 taps) and `POSTFILTER_PITCH_INTERP_LONG_Q15` (length-129
+  filter, 7 phases × 16 taps), with bounds-checked per-phase accessors
+  `postfilter_interp_short` / `postfilter_interp_long`. The seven stored
+  phases are the non-integer fractional offsets `frac = 1 … 7` of the
+  1/8-resolution second pass (clause 4.2.1); phase `p` and phase `8 − p`
+  are mirror images, and each phase has unity Q15 DC gain. This unblocks
+  the long-term-postfilter fractional refinement (the README's standing
+  "docs-gap" was stale — both tables were staged with full provenance).
 - Round 357 wires the **§4.4 frame-erasure concealment** into the
   streaming decode chain (`decode_chain`). New `*_concealed` entry points
   (`decode_serial_frame_to_postfiltered_concealed`,

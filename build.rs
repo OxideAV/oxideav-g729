@@ -296,6 +296,27 @@ const TABLES: &[Table] = &[
         stem: "gain-quantizer-codebook-GB-thresholds-Q15",
         shape: Shape::Flat { elements: 8 },
     },
+    // §4.2.1 long-term-postfilter fractional-delay interpolation filters
+    // (`tab_hup_s` / `tab_hup_l`). The 1/8-resolution second pass of the
+    // long-term postfilter delay search interpolates the residual at a
+    // fractional delay using a short (length-33) then a long (length-129)
+    // FIR. Each staged array (one Word16 per CSV line, Q15) packs the
+    // seven non-integer phases (`frac = 1 … 7`) of the polyphase
+    // decomposition consecutively:
+    //   * `tab_hup_s` = 7 phases × 4 taps  = 28 Word16 (Q15).
+    //   * `tab_hup_l` = 7 phases × 16 taps = 112 Word16 (Q15).
+    // Phase `p`'s taps are slice `p * taps_per_phase ..`; phase `p`
+    // and phase `8 − p` are mirror images (the kernel is symmetric).
+    // The phase/tap reshaping is applied at the use site in
+    // `long_term_postfilter`, so the table is compiled flat.
+    Table {
+        stem: "postfilter-pitch-interpolation-short",
+        shape: Shape::Flat { elements: 28 },
+    },
+    Table {
+        stem: "postfilter-pitch-interpolation-long",
+        shape: Shape::Flat { elements: 112 },
+    },
 ];
 
 /// Maps a CSV stem to its Rust-side `pub const` identifier. Kept here
@@ -331,6 +352,8 @@ fn const_ident(stem: &str) -> &'static str {
         "gain-quantizer-codebook-GB-permutation" => "GAIN_QUANT_GB_PERMUTATION",
         "gain-quantizer-codebook-GB-inverse-permutation" => "GAIN_QUANT_GB_INVERSE_PERMUTATION",
         "gain-quantizer-codebook-GB-thresholds-Q15" => "GAIN_QUANT_GB_THRESHOLDS_Q15",
+        "postfilter-pitch-interpolation-short" => "POSTFILTER_PITCH_INTERP_SHORT_Q15",
+        "postfilter-pitch-interpolation-long" => "POSTFILTER_PITCH_INTERP_LONG_Q15",
         _ => panic!("unknown table stem: {stem}"),
     }
 }

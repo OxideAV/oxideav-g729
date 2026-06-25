@@ -860,3 +860,72 @@ fn gain_vq_helpers_match_constants() {
         );
     }
 }
+
+/// §4.2.1 long-term-postfilter interpolation filters `tab_hup_s` /
+/// `tab_hup_l` have the staged element counts (28 / 112) and split into
+/// seven non-integer phases of 4 / 16 taps.
+#[test]
+fn postfilter_interp_tables_have_staged_shape() {
+    assert_eq!(tables::POSTFILTER_PITCH_INTERP_SHORT_Q15.len(), 28);
+    assert_eq!(tables::POSTFILTER_PITCH_INTERP_LONG_Q15.len(), 112);
+    assert_eq!(
+        tables::POSTFILTER_FRAC_PHASES * tables::POSTFILTER_INTERP_SHORT_TAPS,
+        28
+    );
+    assert_eq!(
+        tables::POSTFILTER_FRAC_PHASES * tables::POSTFILTER_INTERP_LONG_TAPS,
+        112
+    );
+    assert_eq!(tables::POSTFILTER_FRAC_RES, 8);
+    assert_eq!(tables::POSTFILTER_FRAC_PHASES, 7);
+}
+
+/// The §4.2.1 interpolation filters are leading-literal-pinned against
+/// the staged CSV (defence against transcription drift) and each phase
+/// sums to ~Q15 unity (a proper unity-gain interpolation kernel).
+#[test]
+fn postfilter_interp_phase_layout_and_unity_gain() {
+    // First short phase (frac = 1) literal pin.
+    assert_eq!(
+        tables::postfilter_interp_short(1),
+        &[-188, 2873, 31650, -1597]
+    );
+    // First long phase (frac = 1) literal pin (first 4 of 16 taps).
+    assert_eq!(
+        &tables::postfilter_interp_long(1)[..4],
+        &[-40, 72, -156, 315]
+    );
+    // The half-sample phase (frac = 4) is symmetric for both filters.
+    let s4 = tables::postfilter_interp_short(4);
+    assert_eq!(s4, &[-1492, 18050, 18050, -1492]);
+    let l4 = tables::postfilter_interp_long(4);
+    for j in 0..tables::POSTFILTER_INTERP_LONG_TAPS / 2 {
+        assert_eq!(
+            l4[j],
+            l4[tables::POSTFILTER_INTERP_LONG_TAPS - 1 - j],
+            "long frac=4 tap {j} should mirror"
+        );
+    }
+    // Mirror symmetry: phase `p` and phase `8 − p` are reversed copies.
+    for p in 1..tables::POSTFILTER_FRAC_RES {
+        let a = tables::postfilter_interp_short(p);
+        let b = tables::postfilter_interp_short(tables::POSTFILTER_FRAC_RES - p);
+        for (j, &av) in a.iter().enumerate() {
+            assert_eq!(av, b[tables::POSTFILTER_INTERP_SHORT_TAPS - 1 - j]);
+        }
+    }
+    // Unity gain (Q15): every phase sum is within a small tolerance of
+    // 32768 (the kernels were designed for unity DC gain).
+    for p in 1..tables::POSTFILTER_FRAC_RES {
+        let ss: i32 = tables::postfilter_interp_short(p)
+            .iter()
+            .map(|&v| v as i32)
+            .sum();
+        assert!((ss - 32768).abs() < 400, "short frac={p} sum {ss}");
+        let ls: i32 = tables::postfilter_interp_long(p)
+            .iter()
+            .map(|&v| v as i32)
+            .sum();
+        assert!((ls - 32768).abs() < 400, "long frac={p} sum {ls}");
+    }
+}

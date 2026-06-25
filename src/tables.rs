@@ -92,10 +92,22 @@
 //! * Bounds-checked lookup helpers [`gain_ga_entry`] / [`gain_gb_entry`]
 //!   borrowing a 2-element row from the matching codebook.
 //!
+//! Round 371 adds the §4.2.1 long-term-postfilter fractional-delay
+//! interpolation filters:
+//!
+//! * [`POSTFILTER_PITCH_INTERP_SHORT_Q15`] (`tab_hup_s`) — the
+//!   length-33 first-pass interpolation filter stored as 7 phases
+//!   (`frac = 1 … 7`) × 4 taps = 28 Q15 entries.
+//! * [`POSTFILTER_PITCH_INTERP_LONG_Q15`] (`tab_hup_l`) — the
+//!   length-129 refinement filter stored as 7 phases × 16 taps = 112
+//!   Q15 entries.
+//! * [`postfilter_interp_short`] / [`postfilter_interp_long`] —
+//!   bounds-checked phase accessors borrowing the 4-/16-tap kernel for
+//!   a given non-integer fractional phase.
+//!
 //! Still NOT compiled (gated on the docs collaborator specifier
 //! pass): gain-quantizer coefficient matrix (`coef` / `L_coef`),
-//! postfilter interpolation (`tab_hup_*`), taming (`tab_zone`),
-//! Annex B DTX/CNG, LSF↔LSP cos/slope tables.
+//! taming (`tab_zone`), Annex B DTX/CNG, LSF↔LSP cos/slope tables.
 //!
 //! ## Q-format convention reminder (G.729 §1.4)
 //!
@@ -183,6 +195,14 @@ include!(concat!(
 include!(concat!(
     env!("OUT_DIR"),
     "/gain-quantizer-codebook-GB-thresholds-Q15.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/postfilter-pitch-interpolation-short.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/postfilter-pitch-interpolation-long.rs"
 ));
 
 /// G.729 §4.1 transmitted parameter count per frame (spec `PRM_SIZE`).
@@ -406,4 +426,69 @@ pub fn gain_ga_entry(ga: usize) -> &'static [i16; GAIN_VQ_DIM] {
 #[must_use]
 pub fn gain_gb_entry(gb: usize) -> &'static [i16; GAIN_VQ_DIM] {
     &GAIN_QUANT_CODEBOOK_GB_Q14_Q12[gb]
+}
+
+/// G.729 §4.2.1 long-term-postfilter fractional-delay resolution — the
+/// spec's "resolution 1/8 around `T_0`" (clause 4.2.1, second pass). The
+/// fractional part of the postfilter pitch delay is one of `0 … 7`
+/// eighths of a sample.
+pub const POSTFILTER_FRAC_RES: usize = 8;
+
+/// Number of non-integer interpolation phases stored in each `tab_hup_*`
+/// array — the seven fractional offsets `frac = 1 … 7` (the integer case
+/// `frac = 0` needs no interpolation and is not stored). So each table is
+/// `POSTFILTER_FRAC_PHASES × taps_per_phase` Word16.
+pub const POSTFILTER_FRAC_PHASES: usize = POSTFILTER_FRAC_RES - 1;
+
+/// Taps per phase of the §4.2.1 **short** (length-33) long-term-postfilter
+/// interpolation filter `tab_hup_s`. The 28 stored coefficients are the
+/// seven phases (`frac = 1 … 7`) each carrying `POSTFILTER_INTERP_SHORT_TAPS`
+/// taps spanning the residual sample offsets `−1 … +2` around `T_0`.
+pub const POSTFILTER_INTERP_SHORT_TAPS: usize = 4;
+
+/// Taps per phase of the §4.2.1 **long** (length-129)
+/// long-term-postfilter interpolation filter `tab_hup_l`. The 112 stored
+/// coefficients are the seven phases each carrying
+/// `POSTFILTER_INTERP_LONG_TAPS` taps spanning the residual sample offsets
+/// `−7 … +8` around `T_0`.
+pub const POSTFILTER_INTERP_LONG_TAPS: usize = 16;
+
+/// Returns the `POSTFILTER_INTERP_SHORT_TAPS`-tap interpolation kernel for
+/// the §4.2.1 short (length-33) filter at fractional phase `frac`
+/// (`1 … 7`). The taps are Q15 and apply to the residual samples at
+/// integer offsets `−1 … +2` relative to the integer delay `T_0`
+/// (`tap[0]` ↔ offset `−1`, `tap[1]` ↔ offset `0`, …).
+///
+/// # Panics
+///
+/// Panics if `frac == 0` or `frac >= POSTFILTER_FRAC_RES` — the integer
+/// case (`frac == 0`) needs no interpolation kernel and must be handled
+/// by the caller (it is the integer-delayed residual directly).
+#[must_use]
+pub fn postfilter_interp_short(frac: usize) -> &'static [i16] {
+    assert!(
+        (1..POSTFILTER_FRAC_RES).contains(&frac),
+        "postfilter short interpolation phase frac={frac} out of 1..{POSTFILTER_FRAC_RES}"
+    );
+    let base = (frac - 1) * POSTFILTER_INTERP_SHORT_TAPS;
+    &POSTFILTER_PITCH_INTERP_SHORT_Q15[base..base + POSTFILTER_INTERP_SHORT_TAPS]
+}
+
+/// Returns the `POSTFILTER_INTERP_LONG_TAPS`-tap interpolation kernel for
+/// the §4.2.1 long (length-129) filter at fractional phase `frac`
+/// (`1 … 7`). The taps are Q15 and apply to the residual samples at
+/// integer offsets `−7 … +8` relative to the integer delay `T_0`
+/// (`tap[0]` ↔ offset `−7`, …, `tap[15]` ↔ offset `+8`).
+///
+/// # Panics
+///
+/// Panics if `frac == 0` or `frac >= POSTFILTER_FRAC_RES`.
+#[must_use]
+pub fn postfilter_interp_long(frac: usize) -> &'static [i16] {
+    assert!(
+        (1..POSTFILTER_FRAC_RES).contains(&frac),
+        "postfilter long interpolation phase frac={frac} out of 1..{POSTFILTER_FRAC_RES}"
+    );
+    let base = (frac - 1) * POSTFILTER_INTERP_LONG_TAPS;
+    &POSTFILTER_PITCH_INTERP_LONG_Q15[base..base + POSTFILTER_INTERP_LONG_TAPS]
 }
