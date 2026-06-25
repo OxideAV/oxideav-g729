@@ -33,11 +33,11 @@
 //!
 //! Accordingly the harness asserts only what is presently true and stable
 //! — structural soundness (finite output, no NaN/divergence on the clean
-//! vectors), determinism, and first-frame agreement — and **reports** the
-//! whole-vector SNR for regression tracking. As the gain-feedback issue
-//! and the §4.2.1 fractional-pass docs-gap close, the first-frame
-//! agreement assertion can be widened to the whole stream and an SNR
-//! floor ratcheted up.
+//! vectors), determinism, first-frame agreement, and that the §4.2.1
+//! 1/8-resolution fractional postfilter pass engages on real corpus data
+//! — and **reports** the whole-vector SNR for regression tracking. As the
+//! gain-feedback issue closes, the first-frame agreement assertion can be
+//! widened to the whole stream and an SNR floor ratcheted up.
 //!
 //! When the corpus directory is absent (published-crate build) every test
 //! logs a skip and exits clean, mirroring `tests/decode_chain_conformance.rs`.
@@ -161,6 +161,63 @@ fn postfilter_clean_corpus_is_structurally_sound() {
             "{label}: {n_frames} frames — whole-vector SNR {snr:.2} dB (tracked; see harness docs)"
         );
     }
+}
+
+/// The §4.2.1 1/8-resolution fractional postfilter pass is exercised
+/// end-to-end on real corpus data: decoding the SPEECH vector, the
+/// per-subframe long-term-postfilter decisions report a **non-trivial
+/// spread of fractional offsets** (`frac ∈ {0 … 7}`), with at least one
+/// non-zero fraction. A purely integer-delay postfilter would report
+/// `frac == 0` on every subframe; observing non-zero fractions confirms
+/// the new second-pass machinery actually runs through the public
+/// `decode_serial_frame_to_postfiltered` entry point, not just in
+/// synthetic unit tests.
+#[test]
+fn postfilter_fractional_pass_engages_on_corpus() {
+    let Some(root) = conformance_root() else {
+        eprintln!("g729 conformance corpus absent — skipping fractional-pass check");
+        return;
+    };
+    let bit = std::fs::read(root.join("g729-core/SPEECH.BIT")).expect("SPEECH.BIT staged");
+    let mut dec = FrameDecoder::new();
+    let n_frames = bit.len() / FRAME_BYTES;
+
+    let mut frac_counts = [0usize; 8];
+    let mut enabled_subframes = 0usize;
+    for f in 0..n_frames {
+        let frame = &bit[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+        let pf = dec
+            .decode_serial_frame_to_postfiltered(frame)
+            .unwrap_or_else(|e| panic!("SPEECH frame #{f} decode failed: {e}"));
+        for sub in &pf.subframes {
+            let frac = sub.long_term.frac;
+            assert!(frac < 8, "frac {frac} out of 1/8 range");
+            frac_counts[frac] += 1;
+            if sub.long_term.gain > 0.0 {
+                enabled_subframes += 1;
+            }
+        }
+    }
+
+    eprintln!(
+        "g729-core/SPEECH: {n_frames} frames, {enabled_subframes} subframes with the long-term \
+         postfilter enabled; fractional-offset histogram (frac=0..7) = {frac_counts:?}"
+    );
+
+    // The postfilter must enable on a meaningful share of this active
+    // speech vector …
+    assert!(
+        enabled_subframes > 0,
+        "long-term postfilter never enabled on SPEECH — cannot exercise the fractional pass"
+    );
+    // … and at least one enabled subframe must settle on a non-integer
+    // fractional delay (the second pass found a better fractional match).
+    let non_integer: usize = frac_counts[1..].iter().sum();
+    assert!(
+        non_integer > 0,
+        "no non-zero fractional offset observed on SPEECH — the 1/8 second pass never engaged \
+         (histogram {frac_counts:?})"
+    );
 }
 
 /// The post-filtered decode is deterministic: two independent runs of the
