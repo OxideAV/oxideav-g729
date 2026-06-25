@@ -8,6 +8,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 371 implements the **§4.2.1 long-term-postfilter 1/8-resolution
+  fractional second pass** (eq (81)), completing the two-pass delay
+  search. The integer anchor `T_0` (eq (80)) is refined to a fractional
+  delay `T_0 + frac/8` (`frac ∈ {0 … 7}`) by maximising the
+  pseudo-normalised correlation `R(T)²/E_T`: the length-33 short
+  interpolation filter is tried first, then the chosen non-integer
+  fraction is re-evaluated with the length-129 long filter and kept only
+  if it raises `R′(T)` (the spec's longer-filter-replacement rule). The
+  eq (78) harmonic filter now delays the reconstructed speech by the
+  chosen fractional delay (long-filter interpolated). `LongTermDecision`
+  gains a `frac` field. The fractional pass engages on ~26 % of enabled
+  subframes across the SPEECH corpus vector (verified end-to-end through
+  `decode_serial_frame_to_postfiltered`). A known-answer test confirms
+  the polyphase kernels reproduce a band-limited sinusoid at the exact
+  fractional delay, with the long filter more accurate than the short —
+  validating the tap layout independently of any reference.
 - Round 371 compiles the **§4.2.1 long-term-postfilter fractional-delay
   interpolation filters** (`tab_hup_s` / `tab_hup_l`) into the
   `tables` module. The staged CSVs (28 / 112 Q15 entries) — previously
