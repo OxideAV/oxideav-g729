@@ -86,31 +86,29 @@
 //! where `r̂_k(n)` is the residual delayed by the chosen delay (`r̂(n−T)`
 //! for an integer delay).
 //!
-//! ## Scope of this module — the **integer-delay** postfilter (eqs
-//! (78)–(83) with `T = T_0`)
+//! ## Scope of this module — the **two-pass** postfilter (eqs (78)–(83))
 //!
-//! This module realises the integer-delay form of clause 4.2.1: the
-//! full residual (eq (79)), the integer delay search (eq (80) over the
-//! three candidates `int(T_1) − 1 … int(T_1) + 1`), the long-term
+//! This module realises the full clause-4.2.1 two-pass long-term delay
+//! search: the residual (eq (79)), the integer delay search (eq (80)
+//! over the three candidates `int(T_1) − 1 … int(T_1) + 1`), the
+//! **1/8-resolution fractional second pass** (eq (81)), the long-term
 //! prediction-gain disable test (eq (82)), the bounded gain (eq (83)),
-//! and the eq (78) harmonic filter. For an **integer** delay `r̂_k(n)`
-//! reduces to `r̂(n − T_0)`, so eqs (81)–(83) collapse to sums over the
-//! integer-delayed residual, all of which are spelled out by the spec
-//! prose with no table dependency.
+//! and the eq (78) harmonic filter at the chosen fractional delay.
 //!
-//! The 1/8-resolution **fractional** refinement (the second pass) and
-//! its `tab_hup_s` (length 33, 28 stored coefficients) / `tab_hup_l`
-//! (length 129, 112 stored coefficients) interpolation filters are NOT
-//! wired here: the spec prose names the filter lengths but does not give
-//! the per-phase tap layout or the convolution indexing of those tables
-//! (it defers them to the electronic-attachment reference), so the
-//! fractional pass is a documented docs-gap and a separate follow-up.
-//! The integer pass is the spec-complete, prose-sourced core of the
-//! stage; an integer-only long-term postfilter is itself a valid
-//! harmonic postfilter (the fractional pass only refines the delay /
-//! correlation by interpolation, it cannot newly enable a filter the
-//! integer test disabled, since the integer delay is one of the search
-//! candidates).
+//! The fractional second pass (clause 4.2.1) refines the integer anchor
+//! `T_0` to `T = T_0 + frac/8` (`frac ∈ {0 … 7}`) by maximising the
+//! pseudo-normalised correlation `R(T)² / E_T`. The interpolation uses
+//! the staged `tab_hup_s` (length-33, 28 stored coefficients = 7 phases
+//! × 4 taps) filter first; the chosen non-integer fraction is then
+//! re-evaluated with the longer `tab_hup_l` (length-129, 112 = 7 phases
+//! × 16 taps) filter, and the long-filter fraction replaces the short
+//! one only if it increases `R(T)²/E_T` ("the new signal replaces the
+//! previous one only if the longer filter increases the value of
+//! `R′(T)`"). The per-phase tap layout of the two tables — previously a
+//! recorded docs-gap — is the 7-phase polyphase decomposition of the
+//! staged CSVs (see [`crate::tables::postfilter_interp_short`] /
+//! [`crate::tables::postfilter_interp_long`]); phase `p` and phase
+//! `8 − p` are mirror images.
 //!
 //! ## State (clause 4.3 init)
 //!
@@ -123,7 +121,10 @@
 
 use crate::fixed_codebook::SUBFRAME_SIZE;
 use crate::short_term_postfilter::ShortTermPostfilter;
-use crate::tables::M;
+use crate::tables::{
+    postfilter_interp_long, postfilter_interp_short, M, POSTFILTER_FRAC_RES,
+    POSTFILTER_INTERP_LONG_TAPS, POSTFILTER_INTERP_SHORT_TAPS,
+};
 
 /// §4.2.1 long-term-postfilter weight factor `γ_p = 0.5` (clause 4.2.1:
 /// "The factor `γ_p` controls the amount of long-term postfiltering and
@@ -150,13 +151,21 @@ pub const MAX_DELAY: usize = 144;
 const HIST_LEN: usize = MAX_DELAY;
 
 /// The eq (82)/(83) outcome of the delay search for one subframe: the
-/// chosen integer delay and the (possibly zero) long-term gain.
+/// chosen (possibly fractional) delay and the (possibly zero) long-term
+/// gain.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LongTermDecision {
-    /// The best integer delay `T_0` (eq (80)) in
+    /// The best **integer** delay `T_0` (eq (80)) in
     /// `[int(T_1) − 1, int(T_1) + 1]`. Always reported even when the
     /// filter is disabled (so callers can inspect the search outcome).
+    /// The full fractional delay the postfilter applies is
+    /// `T_0 + frac/8`.
     pub delay: usize,
+    /// The §4.2.1 second-pass **fractional** part of the delay, in
+    /// eighths of a sample (`0 … 7`, resolution 1/8 around `T_0`). The
+    /// applied long-term delay is `delay + frac/8`. `0` for the
+    /// integer-only outcome (and whenever the filter is disabled).
+    pub frac: usize,
     /// eq (83) long-term gain `g_l`, bounded `0 ≤ g_l ≤ 1`. Exactly
     /// `0.0` when the eq (82) disable test fires (long-term prediction
     /// gain below 3 dB) — in which case eq (78) degenerates to the
@@ -255,71 +264,219 @@ impl LongTermPostfilter {
         }
     }
 
-    /// Run the clause-4.2.1 integer delay search + gain decision for one
-    /// subframe.
+    /// Fetch the reconstructed speech at absolute subframe index `idx − k`,
+    /// drawing in-subframe samples from `s` and earlier ones from the
+    /// carried [`Self::s_hist`]. `idx` is `0 … 39`, `k ≥ 1`. Mirrors
+    /// [`Self::residual_at`] for the speech history (needed by the eq (78)
+    /// `z^{-T}` delay of the postfilter input).
+    fn speech_at(&self, s: &[f32; SUBFRAME_SIZE], idx: usize, k: usize) -> f32 {
+        if idx >= k {
+            s[idx - k]
+        } else {
+            let h = k - idx - 1;
+            if h < HIST_LEN {
+                self.s_hist[h]
+            } else {
+                0.0
+            }
+        }
+    }
+
+    /// Interpolate the reconstructed **speech** at the fractional delay
+    /// `T_0 + frac/8` for output sample `idx`, using the same kernel /
+    /// tap-offset convention as [`Self::residual_interp`]. This realises
+    /// the eq (78) `z^{-T}` fractional delay of the postfilter input. The
+    /// long (length-129) filter is used for a non-integer `frac` so the
+    /// applied delay matches the fraction the search settled on.
+    fn speech_interp(&self, s: &[f32; SUBFRAME_SIZE], idx: usize, t0: usize, frac: usize) -> f32 {
+        if frac == 0 {
+            return self.speech_at(s, idx, t0);
+        }
+        let taps = postfilter_interp_long(frac);
+        let half = POSTFILTER_INTERP_LONG_TAPS / 2;
+        let mut acc = 0.0f32;
+        for (j, &h) in taps.iter().enumerate() {
+            let k = (t0 + half).wrapping_sub(j);
+            acc += (h as f32 / 32768.0) * self.speech_at(s, idx, k);
+        }
+        acc
+    }
+
+    /// Interpolate the **residual** at the fractional delay `T_0 + frac/8`
+    /// for output sample `idx` (`0 … 39`), drawing residual samples from
+    /// the current subframe `r` and the carried history.
+    ///
+    /// `frac == 0` is the integer case, returning `r̂(idx − T_0)` directly.
+    /// For `frac = 1 … 7` the interpolation kernel ([`postfilter_interp_short`]
+    /// when `long == false`, length-33 first pass; [`postfilter_interp_long`]
+    /// when `long == true`, length-129 refinement) is convolved with the
+    /// residual samples centred on the integer delay: short taps span the
+    /// offsets `−2 … +1`, long taps span `−8 … +7` (tap `j` ↔ residual
+    /// sample `idx − T_0 − (HALF − j)`, where `HALF` is half the tap
+    /// count). A larger `frac` pulls the dominant tap toward the
+    /// next-deeper integer delay, realising the 1/8-resolution fractional
+    /// delay of clause 4.2.1.
+    fn residual_interp(
+        &self,
+        r: &[f32; SUBFRAME_SIZE],
+        idx: usize,
+        t0: usize,
+        frac: usize,
+        long: bool,
+    ) -> f32 {
+        if frac == 0 {
+            return self.residual_at(r, idx, t0);
+        }
+        let (taps, half): (&[i16], usize) = if long {
+            (
+                postfilter_interp_long(frac),
+                POSTFILTER_INTERP_LONG_TAPS / 2,
+            )
+        } else {
+            (
+                postfilter_interp_short(frac),
+                POSTFILTER_INTERP_SHORT_TAPS / 2,
+            )
+        };
+        let mut acc = 0.0f32;
+        for (j, &h) in taps.iter().enumerate() {
+            // tap j applies to r̂(idx − (T_0 + (half − j))) = the residual
+            // delayed by k = T_0 + half − j. `half − j` ranges over the
+            // tap offsets (e.g. short: +2 … −1).
+            let k = (t0 + half).wrapping_sub(j);
+            let rk = self.residual_at(r, idx, k);
+            acc += (h as f32 / 32768.0) * rk;
+        }
+        acc
+    }
+
+    /// Compute the eq (80)/(81) correlation `R(T) = Σ r̂(n)·r̂_T(n)` and the
+    /// delayed energy `E_T = Σ r̂_T(n)²` for a candidate fractional delay
+    /// `T_0 + frac/8`, using the short (`long == false`) or long
+    /// (`long == true`) interpolation kernel.
+    fn fractional_corr_energy(
+        &self,
+        r: &[f32; SUBFRAME_SIZE],
+        t0: usize,
+        frac: usize,
+        long: bool,
+    ) -> (f32, f32) {
+        let mut corr = 0.0f32;
+        let mut energy = 0.0f32;
+        for (idx, &rn) in r.iter().enumerate() {
+            let rk = self.residual_interp(r, idx, t0, frac, long);
+            corr += rn * rk;
+            energy += rk * rk;
+        }
+        (corr, energy)
+    }
+
+    /// Run the clause-4.2.1 **two-pass** delay search (integer + 1/8
+    /// fractional refinement) + gain decision for one subframe.
     ///
     /// `r` is the eq (79) residual for the subframe; `int_t1` is the
     /// integer part `int(T_1)` of the transmitted first-subframe pitch
-    /// delay. The search maximises eq (80) `R(k)` over the three integer
-    /// candidates `int(T_1) − 1 … int(T_1) + 1` (clamped to `≥ 1` and to
-    /// [`MAX_DELAY`]), retaining the candidate with the largest positive
-    /// `R(k)`. The eq (82) disable test then sets `g_l = 0` if the
-    /// squared normalised correlation is below [`ENABLE_THRESHOLD`], else
-    /// the eq (83) gain (bounded `[0, 1]`) is returned.
+    /// delay.
     ///
-    /// Returns the [`LongTermDecision`] (delay + gain) without mutating
-    /// state — the caller applies eq (78) and then advances the history.
+    /// **First pass** (eq (80)): the best integer `T_0` over
+    /// `int(T_1) − 1 … int(T_1) + 1` (clamped to `≥ 1` and to
+    /// [`MAX_DELAY`]) maximising the correlation `R(k)`.
+    ///
+    /// **Second pass** (clause 4.2.1, eq (81)): the best fractional offset
+    /// `frac ∈ {0 … 7}` (resolution 1/8 around `T_0`) maximising the
+    /// pseudo-normalised correlation `R(T)² / E_T`, where `E_T` is the
+    /// energy of the interpolated delayed residual. The search uses the
+    /// length-33 short filter first; the chosen non-integer `frac` is then
+    /// re-evaluated with the length-129 long filter, and the long-filter
+    /// fraction replaces the short-filter one **only if it increases**
+    /// `R(T)² / E_T` (the spec's "new signal replaces the previous one
+    /// only if the longer filter increases the value of `R′(T)`").
+    ///
+    /// The eq (82) disable test then sets `g_l = 0` if the squared
+    /// normalised correlation is below [`ENABLE_THRESHOLD`], else the
+    /// eq (83) gain (bounded `[0, 1]`) is returned. Returns the
+    /// [`LongTermDecision`] (integer delay + fractional part + gain)
+    /// without mutating state.
     #[must_use]
     pub fn decide(&self, r: &[f32; SUBFRAME_SIZE], int_t1: usize) -> LongTermDecision {
         // Energy of the current residual, Σ r̂(n)² (eq (82) denominator).
         let energy: f32 = r.iter().map(|v| v * v).sum();
 
-        // Integer candidate window [int(T1)−1, int(T1)+1], clamped so the
-        // delay stays a usable positive lag within the history reach.
+        // --- First pass: best integer T_0 (eq (80)). ---
         let lo = int_t1.saturating_sub(1).max(1);
         let hi = (int_t1 + 1).min(MAX_DELAY);
 
-        let mut best_delay = lo.max(1);
-        let mut best_corr = f32::NEG_INFINITY; // R(k) (eq (80))
-        let mut best_num = 0.0f32; //  Σ r̂(n)·r̂(n−T)  (eq (83) numerator)
-        let mut best_den = 0.0f32; //  Σ r̂(n−T)²       (eq (83) denominator)
-
+        let mut t0 = lo.max(1);
+        let mut best_int_corr = f32::NEG_INFINITY;
         for k in lo..=hi {
-            // R(k) = Σ_{n=0}^{39} r̂(n)·r̂(n−k); also accumulate the
-            // delayed-energy Σ r̂(n−k)² for the eq (83) gain.
             let mut corr = 0.0f32;
-            let mut den = 0.0f32;
             for (idx, &rn) in r.iter().enumerate() {
-                let rk = self.residual_at(r, idx, k);
-                corr += rn * rk;
-                den += rk * rk;
+                corr += rn * self.residual_at(r, idx, k);
             }
-            if corr > best_corr {
-                best_corr = corr;
-                best_delay = k;
-                best_num = corr;
-                best_den = den;
+            if corr > best_int_corr {
+                best_int_corr = corr;
+                t0 = k;
             }
         }
 
+        // --- Second pass: best fractional frac/8 around T_0 (eq (81)). ---
+        // Maximise the pseudo-normalised correlation R(T)²/E_T over the
+        // eight 1/8 offsets, short (length-33) filter first.
+        let mut best_frac = 0usize;
+        let mut best_num = 0.0f32; // Σ r̂·r̂_T  (eq (83) numerator)
+        let mut best_den = 0.0f32; // Σ r̂_T²    (eq (83) denominator)
+        let mut best_score = f32::NEG_INFINITY; // R(T)²/E_T (only when R>0)
+        for frac in 0..POSTFILTER_FRAC_RES {
+            let (corr, e_t) = self.fractional_corr_energy(r, t0, frac, false);
+            // A negative correlation cannot beat a disabled filter; only
+            // positive-correlation candidates compete for the maximum.
+            let score = if corr > 0.0 && e_t > 0.0 {
+                (corr * corr) / e_t
+            } else {
+                f32::NEG_INFINITY
+            };
+            if score > best_score {
+                best_score = score;
+                best_frac = frac;
+                best_num = corr;
+                best_den = e_t;
+            }
+        }
+
+        // Long-filter refinement: re-evaluate the chosen non-integer frac
+        // with the length-129 filter; keep it only if R(T)²/E_T rises.
+        if best_frac != 0 {
+            let (corr_l, e_l) = self.fractional_corr_energy(r, t0, best_frac, true);
+            if corr_l > 0.0 && e_l > 0.0 {
+                let score_l = (corr_l * corr_l) / e_l;
+                if score_l > best_score {
+                    best_score = score_l;
+                    best_num = corr_l;
+                    best_den = e_l;
+                }
+            }
+        }
+        let _ = best_score;
+
         // eq (82) long-term-prediction-gain disable: g_l = 0 when
-        // R′(T)² / Σ r̂(n)² < 0.5. For an integer delay,
-        // R′(T)² = (Σ r̂·r̂_k)² / (Σ r̂_k²) = best_num² / best_den.
-        // The test compares (best_num² / best_den) / energy < 0.5.
+        // R′(T)² / Σ r̂(n)² < 0.5, where R′(T)² = (Σ r̂·r̂_T)² / (Σ r̂_T²).
         let enabled = best_num > 0.0
             && best_den > 0.0
             && energy > 0.0
             && (best_num * best_num) >= ENABLE_THRESHOLD * energy * best_den;
 
-        let gain = if enabled {
-            // eq (83) g_l = Σ r̂·r̂_k / Σ r̂_k², bounded [0, 1].
-            (best_num / best_den).clamp(0.0, 1.0)
+        let (frac, gain) = if enabled {
+            // eq (83) g_l = Σ r̂·r̂_T / Σ r̂_T², bounded [0, 1].
+            (best_frac, (best_num / best_den).clamp(0.0, 1.0))
         } else {
-            0.0
+            // Disabled → eq (78) is the identity; report the integer
+            // anchor with no fractional offset.
+            (0, 0.0)
         };
 
         LongTermDecision {
-            delay: best_delay,
+            delay: t0,
+            frac,
             gain,
         }
     }
@@ -347,26 +504,22 @@ impl LongTermPostfilter {
         let r = self.residual(s, a);
         let decision = self.decide(&r, int_t1);
 
-        // eq (78): out(n) = (ŝ(n) + γ_p·g_l·ŝ(n−T)) / (1 + γ_p·g_l).
+        // eq (78): out(n) = (ŝ(n) + γ_p·g_l·ŝ(n−T)) / (1 + γ_p·g_l), where
+        // T = T_0 + frac/8 is the chosen fractional delay; ŝ(n−T) is the
+        // long-filter-interpolated reconstructed speech at that delay.
         let gl = decision.gain;
         let scale = GAMMA_P * gl;
         let inv = 1.0 / (1.0 + scale);
-        let t = decision.delay;
+        let t0 = decision.delay;
+        let frac = decision.frac;
 
         let mut out = [0.0f32; SUBFRAME_SIZE];
         for (n, &sn) in s.iter().enumerate() {
-            // ŝ(n − T): in-subframe for n ≥ T, else from history.
+            // ŝ(n − T): the (possibly fractional) delayed speech.
             let s_delayed = if gl == 0.0 {
                 0.0 // unused when the filter is disabled (scale = 0)
-            } else if n >= t {
-                s[n - t]
             } else {
-                let h = t - n - 1;
-                if h < HIST_LEN {
-                    self.s_hist[h]
-                } else {
-                    0.0
-                }
+                self.speech_interp(s, n, t0, frac)
             };
             out[n] = inv * (sn + scale * s_delayed);
         }
@@ -553,6 +706,11 @@ mod tests {
         let s_snapshot = s;
         let s_hist_before = pf.s_hist;
         let (out, dec) = pf.filter_subframe(&s, &a, period);
+        // An exact-integer-period signal scores highest at the integer
+        // delay (the fractional kernels slightly attenuate the energy), so
+        // the second pass settles on frac = 0 and the eq (78) algebra is
+        // the plain integer-delay form.
+        assert_eq!(dec.frac, 0, "exact period must keep the integer delay");
         let scale = GAMMA_P * dec.gain;
         let inv = 1.0 / (1.0 + scale);
         for n in 0..SUBFRAME_SIZE {
@@ -637,8 +795,102 @@ mod tests {
             core::array::from_fn(|n| if n % 2 == 0 { 500.0 } else { -500.0 });
         let (out, d) = pf.filter_subframe(&s, &a, 40);
         assert_eq!(d.gain, 0.0);
+        assert_eq!(d.frac, 0, "disabled filter reports no fractional offset");
         for n in 0..SUBFRAME_SIZE {
             assert!((out[n] - s[n]).abs() < 1e-6, "n={n}");
         }
+    }
+
+    /// The reported fractional offset is always a valid 1/8 phase
+    /// (`0 … 7`) for arbitrary inputs.
+    #[test]
+    fn fractional_offset_in_range() {
+        let mut pf = LongTermPostfilter::new();
+        let a: [f32; M] = [0.6, -0.2, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        for k in 0..30 {
+            let s: [f32; SUBFRAME_SIZE] =
+                core::array::from_fn(|n| (((n + k) as f32 * 0.21).sin()) * 800.0);
+            let (_out, d) = pf.filter_subframe(&s, &a, 35 + k);
+            assert!(d.frac < POSTFILTER_FRAC_RES, "frac {} out of range", d.frac);
+        }
+    }
+
+    /// A signal whose period is a non-integer number of samples drives
+    /// the second pass to a **non-zero** fractional offset: when the best
+    /// integer anchor is the *floor* of the period, the 1/8 refinement
+    /// adds a positive fraction `T_0 + frac/8` to reach the true period.
+    /// (Exercises the fractional path end-to-end.)
+    #[test]
+    fn non_integer_period_selects_fractional_delay() {
+        let mut pf = LongTermPostfilter::new();
+        // Period 40.25 samples: the integer correlation favours 40 (the
+        // floor) and the fractional pass adds ≈ 2/8 to reach 40.25.
+        let period = 40.25f32;
+        for j in 0..HIST_LEN {
+            let phase = (HIST_LEN - 1 - j) as f32;
+            let v = (phase * core::f32::consts::TAU / period).sin();
+            pf.s_hist[j] = v;
+            pf.r_hist[j] = v;
+        }
+        let r: [f32; SUBFRAME_SIZE] = core::array::from_fn(|n| {
+            ((HIST_LEN + n) as f32 * core::f32::consts::TAU / period).sin()
+        });
+        // Anchor the integer window on 40 so T_0 is the period floor.
+        let d = pf.decide(&r, 40);
+        assert!(d.gain > 0.0, "fractional match enables the filter");
+        // The applied delay T_0 + frac/8 should approach the true 40.25.
+        let applied = d.delay as f32 + d.frac as f32 / 8.0;
+        assert!(
+            (applied - period).abs() <= 0.5,
+            "applied delay {applied} (T_0={}, frac={}) should be near {period}",
+            d.delay,
+            d.frac
+        );
+        assert_ne!(
+            d.frac, 0,
+            "a non-integer period must pick a non-zero 1/8 fraction (got frac=0)"
+        );
+    }
+
+    /// Fractional interpolation at `frac = 0` is exactly the integer
+    /// residual fetch (no kernel applied), so the two paths agree.
+    #[test]
+    fn frac_zero_interp_is_integer_fetch() {
+        let mut pf = LongTermPostfilter::new();
+        for j in 0..HIST_LEN {
+            pf.r_hist[j] = ((j as f32) * 0.37).cos() * 100.0;
+        }
+        let r: [f32; SUBFRAME_SIZE] = core::array::from_fn(|n| ((n as f32) * 0.5).sin() * 100.0);
+        for idx in 0..SUBFRAME_SIZE {
+            let a = pf.residual_interp(&r, idx, 30, 0, false);
+            let b = pf.residual_at(&r, idx, 30);
+            assert!((a - b).abs() < 1e-6, "idx={idx}");
+        }
+    }
+
+    /// The half-sample fractional phase (`frac = 4`) interpolates a slowly
+    /// varying residual to roughly the midpoint of its two integer
+    /// neighbours (the kernel is symmetric and near-unity-gain there).
+    #[test]
+    fn half_sample_interp_is_near_midpoint() {
+        let mut pf = LongTermPostfilter::new();
+        // A smooth ramp in the history so the midpoint is well-defined.
+        for j in 0..HIST_LEN {
+            // r_hist[j] holds r̂(n−(j+1)); make it a smooth linear ramp.
+            pf.r_hist[j] = 1000.0 - (j as f32) * 3.0;
+        }
+        let r = [0.0f32; SUBFRAME_SIZE];
+        // At idx = 0, integer delay T0 = 30 fetches r̂(−30) = r_hist[29];
+        // its neighbour r̂(−31) = r_hist[30]. The half-sample (frac=4)
+        // interpolation should land near the average of the two.
+        let t0 = 30usize;
+        let neighbour_lo = pf.residual_at(&r, 0, t0); // r̂(−30)
+        let neighbour_hi = pf.residual_at(&r, 0, t0 + 1); // r̂(−31)
+        let mid = 0.5 * (neighbour_lo + neighbour_hi);
+        let interp = pf.residual_interp(&r, 0, t0, 4, false);
+        assert!(
+            (interp - mid).abs() < 30.0,
+            "frac=4 interp {interp} should be near midpoint {mid}"
+        );
     }
 }

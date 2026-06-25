@@ -390,7 +390,11 @@ mod tests {
     use super::*;
 
     fn decision(gain: f32) -> LongTermDecision {
-        LongTermDecision { delay: 40, gain }
+        LongTermDecision {
+            delay: 40,
+            frac: 0,
+            gain,
+        }
     }
 
     /// Start-up state: non-periodic class, spec seed 21845, zero carried
