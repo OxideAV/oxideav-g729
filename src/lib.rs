@@ -305,6 +305,7 @@ pub mod gain_index_map;
 pub mod gain_predict;
 pub mod gain_reconstruct;
 pub mod long_term_postfilter;
+pub mod lp_analysis;
 pub mod lp_synthesis;
 pub mod lsp_interpolate;
 pub mod lsp_reconstruct;
