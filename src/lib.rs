@@ -308,6 +308,7 @@ pub mod levinson;
 pub mod long_term_postfilter;
 pub mod lp_analysis;
 pub mod lp_synthesis;
+pub mod lp_to_lsp;
 pub mod lsp_interpolate;
 pub mod lsp_reconstruct;
 pub mod lsp_to_lp;
