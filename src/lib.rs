@@ -313,6 +313,7 @@ pub mod lsp_interpolate;
 pub mod lsp_quantize;
 pub mod lsp_reconstruct;
 pub mod lsp_to_lp;
+pub mod open_loop_pitch;
 pub mod parameters;
 pub mod perceptual_weighting;
 pub mod pitch_decode;
