@@ -297,6 +297,7 @@ use oxideav_core::RuntimeContext;
 
 pub mod adaptive_gain_control;
 pub mod annex_b;
+pub mod closed_loop_pitch;
 pub mod cng;
 pub mod concealment;
 pub mod decode_chain;
