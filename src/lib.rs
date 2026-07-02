@@ -306,6 +306,7 @@ pub mod fixed_codebook;
 pub mod fixed_codebook_search;
 pub mod gain_index_map;
 pub mod gain_predict;
+pub mod gain_quantize;
 pub mod gain_reconstruct;
 pub mod levinson;
 pub mod long_term_postfilter;
