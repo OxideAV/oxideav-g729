@@ -301,6 +301,7 @@ pub mod closed_loop_pitch;
 pub mod cng;
 pub mod concealment;
 pub mod decode_chain;
+pub mod encode_chain;
 pub mod encode_target;
 pub mod fixed_codebook;
 pub mod fixed_codebook_search;
