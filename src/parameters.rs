@@ -400,6 +400,49 @@ impl Parameters {
     }
 }
 
+/// Writes `value`'s low `width` bits MSB-first into `bits[start ..
+/// start + width]` — the exact inverse of `read_msb_first` (Table-8
+/// NOTE ordering).
+#[inline]
+fn write_msb_first(bits: &mut [bool; BITS_PER_FRAME], start: usize, width: usize, value: u16) {
+    for k in 0..width {
+        bits[start + k] = (value >> (width - 1 - k)) & 1 == 1;
+    }
+}
+
+/// Packs the 15 Table-8 codeword indices into the 80-bit transmitted
+/// frame layout — the encoder-side inverse of [`unpack_bit_array`].
+/// Each field is masked to its spec width before packing, so
+/// out-of-domain caller values cannot corrupt neighbouring codewords.
+#[must_use]
+pub fn pack_bit_array(params: &Parameters) -> [bool; BITS_PER_FRAME] {
+    let o = Layout::OFFSETS;
+    let w = Layout::WIDTHS;
+    let mut bits = [false; BITS_PER_FRAME];
+    let fields: [u16; 15] = [
+        u16::from(params.l0),
+        u16::from(params.l1),
+        u16::from(params.l2),
+        u16::from(params.l3),
+        u16::from(params.p1),
+        u16::from(params.p0),
+        params.c1,
+        u16::from(params.s1),
+        u16::from(params.ga1),
+        u16::from(params.gb1),
+        u16::from(params.p2),
+        params.c2,
+        u16::from(params.s2),
+        u16::from(params.ga2),
+        u16::from(params.gb2),
+    ];
+    for i in 0..15 {
+        let mask = ((1u32 << w[i]) - 1) as u16;
+        write_msb_first(&mut bits, o[i], w[i], fields[i] & mask);
+    }
+    bits
+}
+
 /// Re-export the spec frame size at this module's surface so callers
 /// staying in `parameters` do not have to dip into [`crate::tables`]
 /// just for the 80-bit budget.

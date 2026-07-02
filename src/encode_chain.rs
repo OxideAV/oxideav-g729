@@ -189,6 +189,18 @@ impl FrameEncoder {
         })
     }
 
+    /// Encodes one frame and serialises it straight to the 164-byte
+    /// ITU serial wire format (Table-8 MSB-first packing +
+    /// sync/bit-count framing) — the full `.IN` → `.BIT` path.
+    pub fn encode_frame_to_serial(
+        &mut self,
+        pcm: &[f32; L_FRAME],
+    ) -> [u8; crate::serial::FRAME_BYTES] {
+        let out = self.encode_frame(pcm);
+        let bits = crate::parameters::pack_bit_array(&out.params);
+        crate::serial::write_frame(&bits)
+    }
+
     /// Encodes one 80-sample frame of 16-bit PCM (as `f32` sample
     /// values). Returns the transmitted parameter set. The first call
     /// primes the 5 ms look-ahead, so output frame `k` corresponds to

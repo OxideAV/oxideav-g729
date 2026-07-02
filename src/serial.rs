@@ -241,6 +241,27 @@ pub fn parse_frame(frame_bytes: &[u8]) -> Result<FrameKind, SerialError> {
     Ok(FrameKind::Active(bits))
 }
 
+/// Writes one 164-byte ITU serial frame from an 80-bit payload — the
+/// encoder-side inverse of [`parse_frame`]. Word 0 is the
+/// [`SYNC_WORD`], word 1 the [`BITS_HEADER`], and each payload bit
+/// becomes a [`BIT_ZERO`] / [`BIT_ONE`] word in wire order
+/// (little-endian `Word16`).
+#[must_use]
+pub fn write_frame(bits: &[bool; crate::tables::BITS_PER_FRAME]) -> [u8; FRAME_BYTES] {
+    let mut out = [0u8; FRAME_BYTES];
+    let mut put = |i: usize, w: u16| {
+        let le = w.to_le_bytes();
+        out[i * 2] = le[0];
+        out[i * 2 + 1] = le[1];
+    };
+    put(0, SYNC_WORD);
+    put(1, BITS_HEADER);
+    for (i, &b) in bits.iter().enumerate() {
+        put(i + 2, if b { BIT_ONE } else { BIT_ZERO });
+    }
+    out
+}
+
 /// Convenience: number of complete frames in a byte buffer whose
 /// length is an exact multiple of [`FRAME_BYTES`]. Returns
 /// [`SerialError::WrongLength`] if the buffer length is not a multiple

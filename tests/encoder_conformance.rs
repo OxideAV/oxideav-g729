@@ -171,6 +171,64 @@ fn frame_alignment_is_one_to_one() {
     );
 }
 
+/// Bitstream writer validation: parsing every active frame of every
+/// reference `.BIT` vector, unpacking to parameters, repacking, and
+/// re-serialising reproduces the original 164 bytes **byte-exactly** —
+/// the pack/write path is the true inverse of the parse/unpack path on
+/// the whole corpus.
+#[test]
+fn bitstream_writer_is_byte_exact_inverse() {
+    use oxideav_g729::parameters::pack_bit_array;
+    use oxideav_g729::serial::write_frame;
+
+    let Some(root) = conformance_root() else {
+        eprintln!("skip: conformance corpus not present");
+        return;
+    };
+    let mut checked = 0usize;
+    for name in VECTORS {
+        let bit_bytes = std::fs::read(root.join(format!("g729-core/{name}.BIT"))).unwrap();
+        for (f, chunk) in bit_bytes.chunks_exact(FRAME_BYTES).enumerate() {
+            let frame = parse_frame(chunk).unwrap();
+            let FrameKind::Active(_) = frame else {
+                continue;
+            };
+            let params = unpack_parameters(&frame).unwrap();
+            let rewritten = write_frame(&pack_bit_array(&params));
+            assert_eq!(
+                &rewritten[..],
+                chunk,
+                "{name} frame {f}: re-serialisation not byte-exact"
+            );
+            checked += 1;
+        }
+    }
+    println!("re-serialised {checked} frames byte-exactly");
+    assert!(checked > 8000, "corpus should cover thousands of frames");
+}
+
+/// The `.IN` → `.BIT` convenience path emits parseable 164-byte frames
+/// that survive the parse→unpack round-trip.
+#[test]
+fn encode_to_serial_roundtrips() {
+    let Some(root) = conformance_root() else {
+        eprintln!("skip: conformance corpus not present");
+        return;
+    };
+    let samples = read_pcm(&root.join("g729-core/ALGTHM.IN"));
+    let mut enc = FrameEncoder::new();
+    let mut enc2 = FrameEncoder::new();
+    for f in 0..samples.len() / SAMPLES_PER_FRAME {
+        let mut frame = [0.0f32; SAMPLES_PER_FRAME];
+        frame.copy_from_slice(&samples[f * SAMPLES_PER_FRAME..(f + 1) * SAMPLES_PER_FRAME]);
+        let wire = enc.encode_frame_to_serial(&frame);
+        let expect = enc2.encode_frame(&frame).params;
+        let parsed = parse_frame(&wire).unwrap();
+        let got = unpack_parameters(&parsed).unwrap();
+        assert_eq!(got, expect, "frame {f}: serial round-trip mismatch");
+    }
+}
+
 /// Every frame the encoder emits over the whole SPEECH vector decodes
 /// through the crate's own decoder with finite output.
 #[test]
