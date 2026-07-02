@@ -300,6 +300,7 @@ pub mod annex_b;
 pub mod cng;
 pub mod concealment;
 pub mod decode_chain;
+pub mod encode_target;
 pub mod fixed_codebook;
 pub mod gain_index_map;
 pub mod gain_predict;
