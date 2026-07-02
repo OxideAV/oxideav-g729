@@ -7,10 +7,42 @@ Zero C dependencies, no FFI, no `*-sys` crates.
 
 Clean-room rebuild in progress, grown one spec-cited unit at a time
 from the published ITU-T G.729 Recommendation prose and the ITU
-electronic-attachment numeric data tables. The crate is currently a
-**decode-side scaffold**: the registry hook (`register`) is a no-op
-and the trait-surface codec entry point returns `Error::NotImplemented`
-pending completion of the decode and encode chains.
+electronic-attachment numeric data tables. The crate now carries
+**both directions**: the decode path end-to-end to post-processed PCM,
+and (round 382) the **entire clause-3 encoder analysis chain** with a
+working `.IN` → `.BIT` path. The registry hook (`register`) is still a
+no-op and the trait-surface codec entry point returns
+`Error::NotImplemented` pending registry wire-up.
+
+## Encoder (round 382)
+
+`encode_chain::FrameEncoder` drives thirteen spec-cited encoder stages
+in clause-3 order — §3.1 pre-processing (eq (1) 140 Hz high-pass, ÷2
+folded in), §3.2.1 window/autocorrelation/lag-window (eqs (3)–(7)),
+§3.2.2 Levinson-Durbin (eqs (8)/(9) + reflection by-product), §3.2.3
+LP→LSP (Chebyshev grid search, 4× bisection), §3.2.4 LSP VQ search
+(eqs (18)–(23): adaptive weights, per-mode target, staged L1/L2/L3
+search over both L0 predictors, decode-side reconstructor in
+lock-step), §3.3 perceptual weighting (eqs (27)–(33): LAR hysteresis,
+γ₂ resonance adaptation, weighted speech), §3.4 open-loop pitch
+(eqs (34)/(35) + favour-lower-delays), §3.5/§3.6 impulse response +
+target (eq (36) residual, three-stage target filter), §3.7 closed-loop
+pitch (eqs (37)–(39): shift-and-add recursion, 1/3-resolution b12
+fractional refinement, both window procedures), §3.8.1 fixed-codebook
+focused search (eqs (43)–(60): sign-folded φ, thr₃ gate K₃ = 0.4,
+180-entry frame budget), §3.9.2 conjugate-structure gain VQ (eq (63)
+normal-equations optimum, 4×8 preselection, decode-side scoring), and
+the §3.10 memory updates. `encode_frame_to_serial` packs Table-8 and
+writes the 164-byte ITU serial frame (the packer/writer re-serialises
+every reference `.BIT` frame of the corpus **byte-exactly**, 8100+
+frames).
+
+Measured against the reference `.BIT` encoder outputs
+(`tests/encoder_conformance.rs`, float vs fixed-point, floors pinned as
+regression guards): frame alignment exactly 1:1, L0 agreement 81–95%,
+L1 exact-match 33–80%, subframe-1 `int(T1)` within ±2 on 56–91% of
+active frames; the whole 3750-frame SPEECH vector encoded by us decodes
+cleanly through our own decoder.
 
 ## What is wired up
 
@@ -178,7 +210,11 @@ gap as a regression guard. The decode stages:
   colour, so `AnnexBOutput::ComfortNoise` surfaces the raw excitation
   until that envelope can be reconstructed. (Docs-gap: SID-LSP VQ subset
   codebooks + `lspSid_reset`.)
-- The full encoder.
+- **Bit-exact encoding** — the round-382 encoder is float-domain; its
+  per-frame decisions agree with the fixed-point reference at the
+  measured rates above but are not yet bit-exact (razor-thin float
+  comparisons in every analysis stage). Closing this requires the same
+  fixed-point Q-format arithmetic as the §3.9 decode gap.
 - Registry-side codec factory wiring (the codec entry point returns
   `NotImplemented`).
 - The remaining numeric tables (gain-quantizer coefficient matrix,

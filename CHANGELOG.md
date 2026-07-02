@@ -8,6 +8,72 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 382 builds the **entire clause-3 encoder analysis chain** —
+  thirteen encoder stages, spec-cited from the Recommendation prose and
+  equation rasters, closing with a working `.IN` → `.BIT` path:
+  - **§3.1 pre-processing** (`preprocess`) — the eq (1) 140 Hz
+    pole/zero high-pass with the ÷2 scaling folded into the numerator,
+    from the compiled Q12 tables.
+  - **§3.2.1 LP-analysis front-end** (`lp_analysis`) — eq (4)
+    windowing by the compiled eq (3) 240-sample asymmetric window,
+    eq (5) autocorrelation (f64, `r(0) ≥ 1` guard), and the eq (6)/(7)
+    60 Hz lag window rebuilt from the split-double Q15 pairs + the
+    1.0001 white-noise correction.
+  - **§3.2.2 Levinson-Durbin** (`levinson`) — eqs (8)/(9) with
+    reflection-coefficient by-product and residual energy; validated by
+    AR-recovery and the normal-equations residual identity.
+  - **§3.2.3 LP→LSP** (`lp_to_lsp`) — sum/difference half-polynomials
+    via the (1 ± z⁻¹) divide-out recursion, Chebyshev/Clenshaw
+    evaluation, the 60-interval cosine-grid sign-change walk with 4×
+    bisection + linear interpolation; full round-trip against the
+    decode-side `lsp_to_lp` and the flat-predictor `cos(iπ/11)` set.
+  - **§3.2.4 LSP quantiser search** (`lsp_quantize`) — eq (18) arccos,
+    eq (22) adaptive weights (+×1.2 on w₅/w₆), eq (23) per-mode target,
+    the L1 (unweighted) → L2 → L3 (weighted, eq (21), 0.0012
+    rearrangement) staged search over both L0 predictors; wraps an
+    `LspReconstructor` so encoder/decoder MA states stay in lock-step.
+  - **§3.3 perceptual weighting** (`perceptual_weighting`) — eq (28)
+    LARs from k₁/k₂, eq (29) subframe interpolation, the eq (30)
+    flat/tilted hysteresis, eq (31)/(32) γ₂ resonance adaptation, and
+    the eq (33) weighted-speech recursion with cross-subframe memories.
+  - **§3.4 open-loop pitch** (`open_loop_pitch`) — eq (34) frame
+    correlation, three-section maxima (80–143 / 40–79 / 20–39), eq (35)
+    normalisation, and the 0.85-weighted favour-lower-delays selection.
+  - **§3.5/§3.6 impulse response + target** (`encode_target`) — `h(n)`
+    of `W(z)/Â(z)` exactly as the spec words it; eq (36) residual; the
+    three-stage target filter with §3.10-style difference-update.
+  - **§3.7 closed-loop pitch** (`closed_loop_pitch`) — both spec
+    window procedures, the eq (38) shift-and-add recursion, eq (37)
+    normalised correlation, and the eq (39) 1/3-resolution fractional
+    refinement through the compiled 13-tap b12 filter (the T1 ≥ 85
+    integer-only rule).
+  - **§3.8.1 fixed-codebook focused search** (`fixed_codebook_search`)
+    — eq (43) bounded adaptive gain, eq (50) target update, eq (49)
+    pre-filter fold, eq (51)/(52) φ/d, eqs (56)–(59) sign-folded
+    search, and the eq (60) `thr₃` gate (K₃ = 0.4, 180-entry frame
+    budget); recovers planted pulse sets exactly.
+  - **§3.9.2 gain VQ search** (`gain_quantize`) — the six eq (63)
+    inner products, the 2×2 normal-equations optimum, the 4-of-8 GA /
+    8-of-16 GB conjugate preselection, and the exhaustive 32-pair
+    search scored through the decode-side eq (73)/(74) reconstruction.
+  - **the frame encoder** (`encode_chain::FrameEncoder`) — glues all
+    stages in clause-3 order with the Figure-5 240-sample buffer
+    timing, dual quantised/unquantised LSP interpolation tracks, the
+    §3.7.2 odd-parity P0, the §3.9.3 index mapping, and the §3.10
+    memory updates; every quantised quantity is produced by the
+    decode-side modules so the encoder's local decoded state tracks a
+    real decoder bit-for-bit.
+  - **Table-8 packer + serial writer** (`parameters::pack_bit_array`,
+    `serial::write_frame`, `FrameEncoder::encode_frame_to_serial`) —
+    validated byte-exact against 8100+ corpus frames
+    (parse→unpack→repack→rewrite reproduces every reference `.BIT`
+    frame bit-for-bit).
+  - **Encoder conformance harness** (`tests/encoder_conformance.rs`)
+    over the ITU `.IN` corpus: 1:1 frame alignment proven, per-vector
+    agreement floors pinned (L0 81–95%, L1 exact 33–80%, int(T1) ±2 on
+    56–91% of active frames — floors at 75/25/45% with ratchet
+    headroom), and the whole 3750-frame SPEECH vector encoded then
+    decoded by our own decoder with finite non-silent output.
 - Round 371 implements the **§4.2.1 long-term-postfilter 1/8-resolution
   fractional second pass** (eq (81)), completing the two-pass delay
   search. The integer anchor `T_0` (eq (80)) is refined to a fractional
