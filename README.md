@@ -14,6 +14,37 @@ working `.IN` → `.BIT` path. The registry hook (`register`) is still a
 no-op and the trait-surface codec entry point returns
 `Error::NotImplemented` pending registry wire-up.
 
+## Encoder fixed-point grid (round 385)
+
+Clause 2.5 makes the 16-bit fixed-point arithmetic the conformance
+ground truth (the corpus `.BIT` streams were produced by it), and the
+§3.2.4 quantiser makes razor-thin nearest-neighbour decisions, so
+round 385 moves the encoder's LSF chain onto the reference's numeric
+grid: §3.1 pre-processing output rounded to the saturated 16-bit PCM
+grid (IIR feedback keeps the unrounded recursion value), eq (4)
+windowing as `⌊(s·w + 2^14)·2^−15⌋` (making the eq (5)
+autocorrelation exact integer arithmetic), the Levinson output rounded
+to **Q12** before the §3.2.3 root search, and eq (18) evaluated through
+the newly-compiled 64-segment arccos lookup (`lsf_conversion`,
+`lsf-lsp-cos-table-Q15` + `lsf-lsp-acos-slope-Q12`, with
+`LspQuantizer::quantize_lsf` as the LSF-domain entry point). A new
+reference-locked conformance harness (MA history driven by the
+reference's own transmitted indices — the exact state the reference
+encoder had) pins per-frame front-end fidelity separately from error
+propagation: locked all-four-LSP-indices agreement is now ALGTHM
+51.4% / FIXED 90.8% / LSP 47.4% / PITCH 86.9% / SPEECH 61.8% / TAME
+39.8% (TAME was **0.8%** before the Q12 step). End-to-end (own
+history) the ratchet moved to L1 exact 31–80% with T1±2 78–91%.
+Remaining measured gaps (black-box-probed and excluded: search
+structure, window timing, root-search precision ±4 Q15 LSB,
+F1/F2-coefficient quantisation, autocorrelation down-scaling,
+weight thresholds/caps): the exact fixed-point eq (21)/(22) weighted
+mode-selection behaviour on extreme spectra (the reference prefers
+predictor 0 where the float metric says predictor 1 wins by 3–10% —
+the TAME outlier) and the residual ~15% per-frame L1 disagreement
+whose margins (median ratio 1.21) point at the DPF
+Levinson/normalisation precision chain.
+
 ## Encoder (round 382)
 
 `encode_chain::FrameEncoder` drives thirteen spec-cited encoder stages
@@ -38,11 +69,11 @@ every reference `.BIT` frame of the corpus **byte-exactly**, 8100+
 frames).
 
 Measured against the reference `.BIT` encoder outputs
-(`tests/encoder_conformance.rs`, float vs fixed-point, floors pinned as
-regression guards): frame alignment exactly 1:1, L0 agreement 81–95%,
-L1 exact-match 33–80%, subframe-1 `int(T1)` within ±2 on 56–91% of
-active frames; the whole 3750-frame SPEECH vector encoded by us decodes
-cleanly through our own decoder.
+(`tests/encoder_conformance.rs`, floors pinned per vector as
+regression guards, round-385 numbers): frame alignment exactly 1:1,
+L0 agreement 62–94%, L1 exact-match 31–80%, subframe-1 `int(T1)`
+within ±2 on 78–91% of active frames; the whole 3750-frame SPEECH
+vector encoded by us decodes cleanly through our own decoder.
 
 ## What is wired up
 
@@ -210,18 +241,23 @@ gap as a regression guard. The decode stages:
   colour, so `AnnexBOutput::ComfortNoise` surfaces the raw excitation
   until that envelope can be reconstructed. (Docs-gap: SID-LSP VQ subset
   codebooks + `lspSid_reset`.)
-- **Bit-exact encoding** — the round-382 encoder is float-domain; its
-  per-frame decisions agree with the fixed-point reference at the
-  measured rates above but are not yet bit-exact (razor-thin float
-  comparisons in every analysis stage). Closing this requires the same
-  fixed-point Q-format arithmetic as the §3.9 decode gap.
+- **Bit-exact encoding** — round 385 moved the LSF chain onto the
+  reference's fixed-point grid (16-bit signal path, Q12 LP
+  coefficients, table-lookup eq (18)) but the decisions are not yet
+  exact. The two measured residuals: the fixed-point eq (21)/(22)
+  weighted mode-selection behaviour on extreme spectra (TAME), and
+  the DPF Levinson/normalisation precision chain (locked-history L1
+  mismatch margins have median ratio 1.21 — structural, not
+  knife-edge). The §3.9 decode-side Q-format gain saturation gap is
+  the same family.
 - Registry-side codec factory wiring (the codec entry point returns
   `NotImplemented`).
 - The remaining numeric tables (gain-quantizer coefficient matrix,
-  taming, Annex B SID-LSP VQ, LSF↔LSP cos/slope) are staged under
+  taming, Annex B SID-LSP VQ, the LSF→LSP cos direction
+  `table2`/`slope_cos`/`slope_acos`) are staged under
   `docs/audio/g729/tables/` but not yet compiled in. (The §4.2.1
-  postfilter interpolation filters `tab_hup_s`/`tab_hup_l` are now
-  compiled — see the long-term postfilter above.)
+  postfilter interpolation filters and the round-385 eq (18) arccos
+  pair `table`/`slope` are now compiled.)
 
 ## Clean-room provenance
 

@@ -8,6 +8,48 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 385 moves the **encoder LSF chain onto the reference's
+  fixed-point grid** — clause 2.5 makes the 16-bit arithmetic the
+  conformance ground truth, and the §3.2.4 quantiser's razor-thin
+  nearest-neighbour decisions measurably flip off it:
+  - **§3.1 pre-processing on the 16-bit grid** — `process_sample`
+    rounds its eq (1) output to the saturated 16-bit PCM grid
+    (round-half-up) while the IIR feedback keeps the unrounded
+    recursion value (the double-precision memory of a fixed-point
+    pole/zero filter).
+  - **§3.2.1 fixed-point windowing** — eq (4) evaluated as
+    `⌊(s·w + 2^14)·2^−15⌋`, putting the windowed speech on the 16-bit
+    grid and making the f64 eq (5) autocorrelation an exact 64-bit
+    integer accumulation.
+  - **Q12 LP coefficients** — the Levinson output is rounded to Q12
+    before the §3.2.3 root search (the reference finds its LSP roots
+    on the Q12-rounded `A(z)`; on TAME this single step takes the
+    reference-locked all-indices agreement from 0.8% to 39.8%).
+  - **eq (18) via the fixed-point arccos lookup** — new
+    `lsf_conversion` module compiling the staged
+    `lsf-lsp-cos-table-Q15` (65-sample `cos(ω)` grid) +
+    `lsf-lsp-acos-slope-Q12` (per-segment slopes) CSVs;
+    `acos_q15_to_freq_q15` / `acos_q15_to_lsf_q13` / `lsp_to_lsf_q13`,
+    with unit tests pinning monotonicity, exact segment boundaries,
+    endpoints, clamping, and the table's measured intrinsic error
+    profile. `LspQuantizer` gains the LSF-domain `quantize_lsf` entry
+    point; the §3.2.4 search core is extracted as the pure
+    `search_lsp_indices` (explicit MA history).
+  - **Reference-locked conformance floors** — new
+    `encoder_conformance` test driving the quantiser MA history with
+    the reference's own transmitted indices (the exact state the
+    reference encoder had), separating per-frame front-end fidelity
+    from propagation: locked all-four-LSP-indices agreement ALGTHM
+    51.4% / FIXED 90.8% / LSP 47.4% / PITCH 86.9% / SPEECH 61.8% /
+    TAME 39.8%. End-to-end floors re-pinned per vector (L1 exact up
+    to 67.5% on FIXED; T1±2 TAME 56→81%).
+  - Documented residuals (black-box-probed and excluded: search
+    structure, window timing, root precision, F1/F2 quantisation,
+    autocorrelation down-scaling, weight thresholds/caps): the
+    fixed-point eq (21)/(22) mode-selection behaviour on extreme
+    spectra (TAME prefers predictor 0 against a 3–10% float margin)
+    and the DPF Levinson/normalisation precision chain (locked L1
+    mismatch margins median ratio 1.21).
 - Round 382 builds the **entire clause-3 encoder analysis chain** —
   thirteen encoder stages, spec-cited from the Recommendation prose and
   equation rasters, closing with a working `.IN` → `.BIT` path:
