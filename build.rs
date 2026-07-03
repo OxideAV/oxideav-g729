@@ -338,6 +338,17 @@ const TABLES: &[Table] = &[
         stem: "postfilter-pitch-interpolation-long",
         shape: Shape::Flat { elements: 112 },
     },
+    // Taming-procedure pitch-delay zone partition (`tab_zone`, round
+    // 388). One Word16 zone id (0 … 3) per index of the pitch-delay
+    // axis `0 … PIT_MAX + L_INTERPOL − 1 = 152`; the taming test/update
+    // steps map a subframe's pitch delay (plus its 10-sample
+    // interpolation reach) onto the four per-zone worst-case
+    // excitation-error accumulators. Algorithm:
+    // `docs/audio/g729/taming-procedure.md`.
+    Table {
+        stem: "taming-test-err-zone-table",
+        shape: Shape::Flat { elements: 153 },
+    },
 ];
 
 /// Maps a CSV stem to its Rust-side `pub const` identifier. Kept here
@@ -377,6 +388,7 @@ fn const_ident(stem: &str) -> &'static str {
         "gain-quantizer-codebook-GB-thresholds-Q15" => "GAIN_QUANT_GB_THRESHOLDS_Q15",
         "postfilter-pitch-interpolation-short" => "POSTFILTER_PITCH_INTERP_SHORT_Q15",
         "postfilter-pitch-interpolation-long" => "POSTFILTER_PITCH_INTERP_LONG_Q15",
+        "taming-test-err-zone-table" => "TAMING_ZONE_TABLE",
         _ => panic!("unknown table stem: {stem}"),
     }
 }

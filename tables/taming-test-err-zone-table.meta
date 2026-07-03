@@ -1,0 +1,14 @@
+spec_name: taming-test-err-zone-table
+spec_role: Same as base — duplicated for convenience by ITU
+c_identifier: tab_zone
+c_type: Word16
+raw_dims: [PIT_MAX+L_INTERPOL-1]
+resolved_dims: [153]
+element_count: 153
+source_file: g729AnnexD/c_code/tab_ld8k.c
+source_sha256: 79e511a325e1fdedb93c90f701aeffd709936e8ba359373a09d24c0a82397ebb
+source_line_start: 590
+source_line_end: 598
+source_url: https://www.itu.int/rec/T-REC-G.729-201206-I/en
+source_zip_sha256: 979680ff3b52b13a5701453178efd32b53e340114638fd330fdb6669eec86620
+extractor: extract.py (pure data extraction; no algorithmic source read)

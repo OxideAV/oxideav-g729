@@ -115,10 +115,20 @@
 //!   slopes refining the in-segment fraction of the eq (18)
 //!   `ω = arccos(q)` lookup.
 //!
+//! Round 388 adds the taming-procedure zone partition (consumed by the
+//! encoder taming procedure, `taming` module):
+//!
+//! * [`TAMING_ZONE_TABLE`] (`tab_zone`) — 153 Word16 zone ids (0 … 3)
+//!   partitioning the pitch-delay index axis
+//!   `0 … PIT_MAX + L_INTERPOL − 1 = 152` into the four contiguous
+//!   zones (boundaries 40 / 80 / 120) whose per-zone worst-case
+//!   excitation-error accumulators drive the encoder taming test
+//!   (`docs/audio/g729/taming-procedure.md`).
+//!
 //! Still NOT compiled (gated on the docs collaborator specifier
 //! pass): gain-quantizer coefficient matrix (`coef` / `L_coef`),
-//! taming (`tab_zone`), Annex B DTX/CNG, the remaining LSF↔LSP
-//! cos/slope direction (`table2` / `slope_cos` / `slope_acos`).
+//! Annex B DTX/CNG, the remaining LSF↔LSP cos/slope direction
+//! (`table2` / `slope_cos` / `slope_acos`).
 //!
 //! ## Q-format convention reminder (G.729 §1.4)
 //!
@@ -217,6 +227,7 @@ include!(concat!(
     env!("OUT_DIR"),
     "/postfilter-pitch-interpolation-long.rs"
 ));
+include!(concat!(env!("OUT_DIR"), "/taming-test-err-zone-table.rs"));
 
 /// G.729 §4.1 transmitted parameter count per frame (spec `PRM_SIZE`).
 /// The bit-allocation table [`BIT_ALLOCATION_TABLE8`] carries 13
@@ -504,4 +515,27 @@ pub fn postfilter_interp_long(frac: usize) -> &'static [i16] {
     );
     let base = (frac - 1) * POSTFILTER_INTERP_LONG_TAPS;
     &POSTFILTER_PITCH_INTERP_LONG_Q15[base..base + POSTFILTER_INTERP_LONG_TAPS]
+}
+
+/// Number of taming-procedure pitch-delay zones — the four contiguous
+/// partitions of the pitch-delay axis whose per-zone accumulators track
+/// the worst-case decoder excitation error
+/// (`docs/audio/g729/taming-procedure.md` §1).
+pub const TAMING_ZONES: usize = 4;
+
+/// Returns the taming zone id (`0 … TAMING_ZONES − 1`) for an index on
+/// the pitch-delay axis (`0 … PIT_MAX + L_INTERPOL − 1 = 152`), via the
+/// staged `tab_zone` partition table.
+///
+/// # Panics
+///
+/// Panics if `delay_index` is past the end of the table.
+#[must_use]
+pub fn taming_zone(delay_index: usize) -> usize {
+    assert!(
+        delay_index < TAMING_ZONE_TABLE.len(),
+        "taming zone index {delay_index} out of 0..{}",
+        TAMING_ZONE_TABLE.len()
+    );
+    TAMING_ZONE_TABLE[delay_index] as usize
 }

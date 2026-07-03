@@ -959,3 +959,29 @@ fn lsf_lsp_conversion_pair_shape_and_shape_invariants() {
     assert!(i32::from(slope[0].abs()) > 4 * mid);
     assert!(i32::from(slope[63].abs()) > 4 * mid);
 }
+
+// ---------------------------------------------------------------------
+// Taming-procedure zone partition (round 388).
+// ---------------------------------------------------------------------
+
+/// `tab_zone` covers the pitch-delay index axis
+/// `0 … PIT_MAX + L_INTERPOL − 1 = 152` with exactly four contiguous,
+/// monotonically non-decreasing zones split at 40 / 80 / 120 (the
+/// partition read directly from the staged CSV — see
+/// `docs/audio/g729/taming-procedure.md` §1).
+#[test]
+fn taming_zone_table_shape_and_partition() {
+    let zones = &tables::TAMING_ZONE_TABLE;
+    assert_eq!(zones.len(), 153);
+    for pair in zones.windows(2) {
+        assert!(
+            pair[0] <= pair[1] && pair[1] - pair[0] <= 1,
+            "zones must be contiguous and non-decreasing: {pair:?}"
+        );
+    }
+    for (i, &z) in zones.iter().enumerate() {
+        let expect = (i / 40).min(tables::TAMING_ZONES - 1) as i16;
+        assert_eq!(z, expect, "zone[{i}]");
+        assert_eq!(tables::taming_zone(i), expect as usize);
+    }
+}
