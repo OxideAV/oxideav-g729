@@ -210,6 +210,18 @@ const TABLES: &[Table] = &[
         stem: "lsf-search-grid-cos-Q15",
         shape: Shape::Flat { elements: 61 },
     },
+    // §3.2.3/§3.2.4 LSP↔LSF conversion lookup: the 65-sample cos(ω)
+    // table on the uniform 64-segment ω grid over [0, π] (Q15) and the
+    // per-segment arccos slope (Q12) that linearly refines the segment
+    // fraction — the fixed-point eq (18) `ω_i = arccos(q_i)` path.
+    Table {
+        stem: "lsf-lsp-cos-table-Q15",
+        shape: Shape::Flat { elements: 65 },
+    },
+    Table {
+        stem: "lsf-lsp-acos-slope-Q12",
+        shape: Shape::Flat { elements: 64 },
+    },
     // §3.7 pitch interpolation filters.
     Table {
         stem: "pitch-interpolation-filter-analysis-Q15",
@@ -345,6 +357,8 @@ fn const_ident(stem: &str) -> &'static str {
         "lpc-autocorr-lag-window-high-Q15" => "LPC_LAG_WINDOW_HIGH_Q15",
         "lpc-autocorr-lag-window-low-Q15" => "LPC_LAG_WINDOW_LOW_Q15",
         "lsf-search-grid-cos-Q15" => "LSF_SEARCH_GRID_COS_Q15",
+        "lsf-lsp-cos-table-Q15" => "LSF_LSP_COS_TABLE_Q15",
+        "lsf-lsp-acos-slope-Q12" => "LSF_LSP_ACOS_SLOPE_Q12",
         "pitch-interpolation-filter-analysis-Q15" => "PITCH_INTERP_FILTER_ANALYSIS_Q15",
         "pitch-interpolation-filter-synthesis-Q15" => "PITCH_INTERP_FILTER_SYNTHESIS_Q15",
         "gain-quantizer-ma-predictor-Q13" => "GAIN_QUANT_MA_PREDICTOR_Q13",

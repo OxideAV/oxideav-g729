@@ -105,9 +105,20 @@
 //!   bounds-checked phase accessors borrowing the 4-/16-tap kernel for
 //!   a given non-integer fractional phase.
 //!
+//! Round 385 adds the §3.2.3 / §3.2.4 fixed-point LSP↔LSF conversion
+//! lookup pair (consumed by [`crate::lsf_conversion`]):
+//!
+//! * [`LSF_LSP_COS_TABLE_Q15`] (`table`) — 65 Q15 samples of `cos(ω)`
+//!   on the uniform 64-segment grid `ω = i·π/64`, strictly decreasing
+//!   `+32767 … −32768`.
+//! * [`LSF_LSP_ACOS_SLOPE_Q12`] (`slope`) — 64 per-segment Q12 arccos
+//!   slopes refining the in-segment fraction of the eq (18)
+//!   `ω = arccos(q)` lookup.
+//!
 //! Still NOT compiled (gated on the docs collaborator specifier
 //! pass): gain-quantizer coefficient matrix (`coef` / `L_coef`),
-//! taming (`tab_zone`), Annex B DTX/CNG, LSF↔LSP cos/slope tables.
+//! taming (`tab_zone`), Annex B DTX/CNG, the remaining LSF↔LSP
+//! cos/slope direction (`table2` / `slope_cos` / `slope_acos`).
 //!
 //! ## Q-format convention reminder (G.729 §1.4)
 //!
@@ -138,6 +149,8 @@ include!(concat!(
     "/lpc-autocorr-lag-window-low-Q15.rs"
 ));
 include!(concat!(env!("OUT_DIR"), "/lsf-search-grid-cos-Q15.rs"));
+include!(concat!(env!("OUT_DIR"), "/lsf-lsp-cos-table-Q15.rs"));
+include!(concat!(env!("OUT_DIR"), "/lsf-lsp-acos-slope-Q12.rs"));
 include!(concat!(
     env!("OUT_DIR"),
     "/pitch-interpolation-filter-analysis-Q15.rs"

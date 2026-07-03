@@ -314,6 +314,7 @@ pub mod long_term_postfilter;
 pub mod lp_analysis;
 pub mod lp_synthesis;
 pub mod lp_to_lsp;
+pub mod lsf_conversion;
 pub mod lsp_interpolate;
 pub mod lsp_quantize;
 pub mod lsp_reconstruct;

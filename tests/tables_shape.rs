@@ -929,3 +929,33 @@ fn postfilter_interp_phase_layout_and_unity_gain() {
         assert!((ls - 32768).abs() < 400, "long frac={p} sum {ls}");
     }
 }
+
+// ---------------------------------------------------------------------
+// §3.2.3 / §3.2.4 LSP↔LSF conversion lookup pair (round 385).
+// ---------------------------------------------------------------------
+
+/// The eq (18) arccos lookup pair: the cos table carries 65 Q15
+/// samples on the uniform 64-segment `ω = i·π/64` grid (strictly
+/// decreasing, exact Q15 saturation endpoints); the slope table
+/// carries one negative Q12 arccos slope per segment, largest in
+/// magnitude at the two ends of the domain where `d(arccos)/dx`
+/// blows up.
+#[test]
+fn lsf_lsp_conversion_pair_shape_and_shape_invariants() {
+    let cos = &tables::LSF_LSP_COS_TABLE_Q15;
+    let slope = &tables::LSF_LSP_ACOS_SLOPE_Q12;
+    assert_eq!(cos.len(), 65);
+    assert_eq!(slope.len(), 64);
+    assert_eq!(cos[0], 32767);
+    assert_eq!(cos[64], -32768);
+    for pair in cos.windows(2) {
+        assert!(pair[0] > pair[1], "cos table not strictly decreasing");
+    }
+    for (i, &s) in slope.iter().enumerate() {
+        assert!(s < 0, "slope[{i}] must be negative (cos decreasing)");
+    }
+    // End-segment slopes dominate the mid-domain slopes.
+    let mid = i32::from(slope[32].abs());
+    assert!(i32::from(slope[0].abs()) > 4 * mid);
+    assert!(i32::from(slope[63].abs()) > 4 * mid);
+}
