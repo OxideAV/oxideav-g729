@@ -264,12 +264,23 @@
 //!
 //! See [`tables`] for the full inventory and Q-format conventions.
 //!
+//! Round 388 wires the **registry codec surface** ([`codec`]): the
+//! [`oxideav_core::Decoder`] / [`oxideav_core::Encoder`] trait
+//! implementations over the raw 10-octet G.729 wire framing, the
+//! `register` hook (id `"g729"`, decode + encode), and the direct
+//! dual-API endpoints [`decoder::make_decoder`] /
+//! [`encoder::make_encoder`]. The same round lands the taming
+//! procedure ([`taming`], from the newly-staged
+//! `docs/audio/g729/taming-procedure.md`) wired into the §3.9.2 gain
+//! search, and the measured residual-domain split-stage metric in the
+//! §3.2.4 quantiser ([`lsp_quantize`]).
+//!
 //! ## What is NOT wired up
 //!
-//! The registry-side codec factory (the `register` hook is a no-op and
-//! the trait-surface codec entry point returns [`Error::NotImplemented`])
-//! and the full encoder remain unwired. The decode path itself is
-//! implemented end-to-end to post-processed PCM through
+//! Bit-exactness against the fixed-point reference (the decode path is
+//! close-but-not-exact; the encoder's parameter agreement is measured
+//! and floor-pinned in `tests/encoder_conformance.rs`). The decode
+//! path is implemented end-to-end to post-processed PCM through
 //! [`decode_chain::FrameDecoder`]
 //! (`decode_serial_frame_to_postfiltered`): beyond the first frame the
 //! amplitude is a bounded multiplicative over-gain because the float path
@@ -299,6 +310,7 @@ pub mod adaptive_gain_control;
 pub mod annex_b;
 pub mod closed_loop_pitch;
 pub mod cng;
+pub mod codec;
 pub mod concealment;
 pub mod decode_chain;
 pub mod encode_chain;
@@ -333,29 +345,23 @@ pub mod tables;
 pub mod taming;
 pub mod tilt_compensation;
 
-/// Crate-local error type. Until decode + encode are wired up, every
-/// public codec entry point returns [`Error::NotImplemented`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Error {
-    /// The crate has been reset to a scaffold pending clean-room
-    /// rebuild; no decoder or encoder functionality is wired up yet.
-    NotImplemented,
+/// Direct decoder factory endpoint (workspace dual-API convention:
+/// `oxideav_g729::decoder::make_decoder` alongside the registry path).
+pub mod decoder {
+    pub use crate::codec::{make_decoder, G729Decoder};
 }
 
-impl core::fmt::Display for Error {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "oxideav-g729: clean-room rebuild in progress — decoder/encoder not yet wired"
-        )
-    }
+/// Direct encoder factory endpoint (workspace dual-API convention:
+/// `oxideav_g729::encoder::make_encoder` alongside the registry path).
+pub mod encoder {
+    pub use crate::codec::{make_encoder, G729Encoder};
 }
 
-impl std::error::Error for Error {}
-
-/// No-op codec registration — the rebuild scaffold registers nothing
-/// runnable into the runtime context yet. The hook is preserved so
-/// downstream consumers can keep their `register!` graphs intact.
-pub fn register(_ctx: &mut RuntimeContext) {}
+/// Codec registration: installs the G.729 decoder + encoder into the
+/// runtime context's codec registry under the id `"g729"` (see
+/// [`codec::register`]).
+pub fn register(ctx: &mut RuntimeContext) {
+    codec::register(ctx);
+}
 
 oxideav_core::register!("g729", register);
