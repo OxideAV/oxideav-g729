@@ -70,11 +70,15 @@ pub const CLAMP_MIN_GAP: f32 = 0.0391;
 /// ω̂_{10} := 3.135`.
 pub const CLAMP_CEIL: f32 = 3.135;
 
-/// First rearrangement-pass minimum adjacent distance — spec §3.2.4.
-pub const REARRANGE_J1: f32 = 0.0012;
+/// First rearrangement-pass minimum adjacent distance — spec §3.2.4
+/// gives `J = 0.0012`; the Q13-radian grid of the 16-bit pipeline
+/// (clause 2.5) realises it as the integer `10` (`10/8192 ≈ 0.00122`).
+pub const REARRANGE_J1: f32 = 10.0 / 8192.0;
 
-/// Second rearrangement-pass minimum adjacent distance — spec §3.2.4.
-pub const REARRANGE_J2: f32 = 0.0006;
+/// Second rearrangement-pass minimum adjacent distance — spec §3.2.4
+/// gives `J = 0.0006`; on the Q13 grid the integer `5`
+/// (`5/8192 ≈ 0.00061`).
+pub const REARRANGE_J2: f32 = 5.0 / 8192.0;
 
 /// Q15 unit (`2^15`) used to convert Q15 `fg` literals to `f32`.
 const Q15_UNIT_F32: f32 = 32768.0;
