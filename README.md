@@ -10,9 +10,51 @@ from the published ITU-T G.729 Recommendation prose and the ITU
 electronic-attachment numeric data tables. The crate now carries
 **both directions**: the decode path end-to-end to post-processed PCM,
 and (round 382) the **entire clause-3 encoder analysis chain** with a
-working `.IN` → `.BIT` path. The registry hook (`register`) is still a
-no-op and the trait-surface codec entry point returns
-`Error::NotImplemented` pending registry wire-up.
+working `.IN` → `.BIT` path. As of round 388 the crate is **registered
+into the `oxideav-core` codec registry** (id `"g729"`, decode + encode
+over the raw 10-octet wire framing) with the dual-API
+`decoder::make_decoder` / `encoder::make_encoder` endpoints.
+
+## Round 388 — taming, the split-stage metric, registry wiring
+
+- **Taming procedure** (`taming` module) — the encoder-side
+  adaptive-codebook gain bound, implemented from the newly-staged
+  clean-room algorithm doc `docs/audio/g729/taming-procedure.md`
+  (docs commit `77b8440`): four per-zone worst-case excitation-error
+  accumulators over the compiled `tab_zone` partition (153 entries,
+  zones split at 40/80/120), the per-subframe `tameflag` test and
+  `E ← 1 + ĝ_p²·max(E_spanned)` update, and the
+  `GPCLIP = 15564/2^14 ≈ 0.95` ceiling enforced inside the §3.9.2
+  gain-VQ search. The doc's two unpinned constants are fixed
+  black-box, and the new `reference_taming_fingerprint` test shows the
+  reference **never actually tames on the staged corpus** (its own
+  bitstreams keep choosing `ĝ_p > GPCLIP` up to a simulated
+  accumulator of ≈ 18 186, always below the 60 000 threshold) — so our
+  identical never-tame behaviour is the conforming one, retiring the
+  r385 hypothesis that missing taming caused TAME's end-to-end L0 gap.
+- **§3.2.4 split-stage searches on the residual-domain weighted MSE**
+  — the round's headline conformance jump. The printed eq (21) is the
+  ω-domain error, but the bit-exact coder's L2/L3 stages measurably
+  minimise `Σ w_i·(l_i − l̂_i)²` (the same error without the
+  `(1 − ΣP̂)²` weight folding — the two domains differ only by that
+  factor, eq (20) being affine in `l̂`). Reference-locked
+  all-four-indices agreement: **ALGTHM 71.4 → 82.9%, FIXED
+  91.7 → 97.5%, LSP 74.9 → 77.5%, PITCH 88.6 → 92.8%, SPEECH
+  78.4 → 80.9%**, TAME flat at 80.5%; no vector degrades. The L1 stage
+  stays unweighted and the mode selection stays on the printed
+  ω-domain eq (21) (both probed — each alternative collapses
+  agreement). TAME's remaining locked-history misses are 24/25 pure
+  `L0` mode flips — the fixed-point mode-selection arithmetic is now
+  the single dominant open gap of the LSF chain.
+- **Registry codec surface** (`codec` module) — `G729Decoder` /
+  `G729Encoder` implementing `oxideav_core::Decoder`/`Encoder` over
+  the raw 10-octet frame packing (80 Table-8 bits, MSB-first octets;
+  multi-frame packets), a real `register(ctx)`, and the dual-API
+  factories. Corpus-tied: all 8 100 active `.BIT` frames convert
+  losslessly from the ITU serial format to the wire format and decode
+  through the registry surface **sample-identical** to the
+  `decode_chain` path; `reset()` restores the clause-4.3 start-up
+  state byte-identically.
 
 ## Encoder fixed-point grid (round 385)
 
@@ -246,23 +288,22 @@ gap as a regression guard. The decode stages:
   colour, so `AnnexBOutput::ComfortNoise` surfaces the raw excitation
   until that envelope can be reconstructed. (Docs-gap: SID-LSP VQ subset
   codebooks + `lspSid_reset`.)
-- **Bit-exact encoding** — round 385 moved the LSF chain onto the
-  reference's fixed-point grid (16-bit signal path, Q12 LP
-  coefficients, table-lookup eq (18)) but the decisions are not yet
-  exact. The two measured residuals: the fixed-point eq (21)/(22)
-  weighted mode-selection behaviour on extreme spectra (TAME), and
-  the DPF Levinson/normalisation precision chain (locked-history L1
-  mismatch margins have median ratio 1.21 — structural, not
-  knife-edge). The §3.9 decode-side Q-format gain saturation gap is
-  the same family.
-- Registry-side codec factory wiring (the codec entry point returns
-  `NotImplemented`).
+- **Bit-exact encoding** — rounds 385/388 moved the LSF chain onto the
+  reference's fixed-point grid and metric (16-bit signal path, Q12 LP
+  coefficients, table-lookup eq (18), residual-domain split-stage
+  MSE) but the decisions are not yet exact. The dominant measured
+  residual after round 388 is the **fixed-point §3.2.4 mode-selection
+  (`L0`) arithmetic** (TAME's locked-history misses are 24/25 pure
+  mode flips; probed and rejected: weight saturation/quantisation,
+  clamp-based mode rejection, residual-domain mode totals). The §3.9
+  decode-side Q-format gain saturation gap is the same family.
 - The remaining numeric tables (gain-quantizer coefficient matrix,
-  taming, Annex B SID-LSP VQ, the LSF→LSP cos direction
+  Annex B SID-LSP VQ, the LSF→LSP cos direction
   `table2`/`slope_cos`/`slope_acos`) are staged under
   `docs/audio/g729/tables/` but not yet compiled in. (The §4.2.1
-  postfilter interpolation filters and the round-385 eq (18) arccos
-  pair `table`/`slope` are now compiled.)
+  postfilter interpolation filters, the round-385 eq (18) arccos pair
+  `table`/`slope`, and the round-388 taming `tab_zone` are now
+  compiled.)
 
 ## Clean-room provenance
 

@@ -8,6 +8,53 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 388 lands the **taming procedure**, the **residual-domain
+  §3.2.4 split-stage metric**, and the **registry codec surface**:
+  - **Taming procedure** (`taming`, from the newly-staged clean-room
+    algorithm doc `docs/audio/g729/taming-procedure.md`) — the
+    per-zone worst-case excitation-error state over the compiled
+    `tab_zone` partition (`TAMING_ZONE_TABLE`, 153 entries, four
+    zones split at 40/80/120), the per-subframe test (`tameflag`) and
+    update (`E ← 1 + ĝ_p²·max(E_spanned)`), and the `GPCLIP = 15564/2^14`
+    ceiling enforced inside the §3.9.2 gain search
+    (`quantize_gains(…, tame)`), wired into `FrameEncoder`. The new
+    `reference_taming_fingerprint` conformance test pins the doc's
+    unpinned threshold black-box: replaying the recursion over the
+    reference's own decoded `(delay, ĝ_p)` streams, the reference
+    keeps choosing `ĝ_p > GPCLIP` up to a simulated accumulator of
+    ≈ 18 186 (TAME) and never crosses 60 000 anywhere — the reference
+    **never tames on the staged corpus**, and neither do we
+    (behaviourally identical; a forced-lower-threshold sweep degrades
+    TAME GB agreement). Retires the r385 hypothesis that missing
+    taming caused TAME's end-to-end L0 gap.
+  - **§3.2.4 split-stage searches on the residual-domain weighted
+    MSE** — black-box metric-domain discovery: the L2/L3 stages of
+    the bit-exact coder behave as `Σ w_i·(l_i − l̂_i)²` (no
+    `(1 − ΣP̂)²` folding of the printed ω-domain eq (21)).
+    Reference-locked all-four-indices agreement: ALGTHM 71.4 → 82.9%,
+    FIXED 91.7 → 97.5%, LSP 74.9 → 77.5%, PITCH 88.6 → 92.8%, SPEECH
+    78.4 → 80.9%, TAME flat; no vector degrades. L1 stays unweighted
+    and mode selection stays on the printed eq (21) (both probed —
+    each alternative collapses agreement). TAME's residual misses are
+    now 24/25 pure `L0` mode flips. Also lands the Word32-normalised
+    autocorrelation grid + truncated lag-window products and Q31/Q27
+    Levinson intermediate rounding (flat-to-marginal, kept for
+    clause-2.5 grid consistency). New pooled GA/GB gain-codeword
+    agreement columns in the conformance harness; locked floors
+    ratcheted to 78/93/73/89/77/74.
+  - **Registry codec surface** (`codec`) — `G729Decoder` /
+    `G729Encoder` implementing the `oxideav_core` traits over the raw
+    10-octet wire framing (80 Table-8 bits, MSB-first octets;
+    multi-frame packets), a real `register` hook (id `"g729"`,
+    decode + encode, lossy, 8 kHz mono S16), and the dual-API
+    endpoints `decoder::make_decoder` / `encoder::make_encoder`. The
+    scaffold `Error::NotImplemented` type is retired. New
+    `codec_registry` conformance test: all 8 100 active corpus frames
+    convert losslessly from the ITU serial format to the wire format
+    and decode through the registry `Decoder` sample-identical to the
+    `decode_chain` path; `reset()` verified to restore the clause-4.3
+    start-up state byte-identically.
+
 - Round 385 moves the **encoder LSF chain onto the reference's
   fixed-point grid** — clause 2.5 makes the 16-bit arithmetic the
   conformance ground truth, and the §3.2.4 quantiser's razor-thin
