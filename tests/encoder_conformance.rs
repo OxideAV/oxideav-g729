@@ -155,6 +155,105 @@ fn parameter_agreement_floors() {
     }
 }
 
+/// Reference-locked §3.2.4 agreement: re-runs the LSP front end +
+/// quantiser search with the MA history driven by the **reference's
+/// own transmitted indices** every frame (the exact quantiser state
+/// the reference encoder had, since its MA feedback is built from its
+/// chosen indices). This removes error propagation and measures pure
+/// per-frame front-end + search fidelity — the number the fixed-point
+/// work ratchets. Measured (round 385): ALL-four-indices agreement
+/// ALGTHM 51.4%, FIXED 90.8%, LSP 47.4%, PITCH 86.4%, SPEECH 61.6%,
+/// TAME 39.8%.
+#[test]
+fn locked_history_lsp_agreement_floors() {
+    use oxideav_g729::levinson::levinson;
+    use oxideav_g729::lp_analysis::analyze_window;
+    use oxideav_g729::lp_to_lsp::lp_to_lsp;
+    use oxideav_g729::lsf_conversion::lsp_to_lsf_q13;
+    use oxideav_g729::lsp_quantize::search_lsp_indices;
+    use oxideav_g729::lsp_reconstruct::LspReconstructor;
+    use oxideav_g729::preprocess::Preprocessor;
+    use oxideav_g729::tables::{L_WINDOW, M};
+
+    let Some(root) = conformance_root() else {
+        eprintln!("skip: conformance corpus not present");
+        return;
+    };
+    // (vector, ALL-four-indices agreement floor %).
+    let floors: [(&str, f64); 6] = [
+        ("ALGTHM", 45.0),
+        ("FIXED", 85.0),
+        ("LSP", 42.0),
+        ("PITCH", 81.0),
+        ("SPEECH", 56.0),
+        ("TAME", 34.0),
+    ];
+    for (name, floor) in floors {
+        let samples = read_pcm(&root.join(format!("g729-core/{name}.IN")));
+        let bit_bytes = std::fs::read(root.join(format!("g729-core/{name}.BIT"))).unwrap();
+        let n_frames = (samples.len() / SAMPLES_PER_FRAME).min(bit_bytes.len() / FRAME_BYTES);
+
+        // The clause-3.2 front end, stage for stage as FrameEncoder
+        // runs it (pre-processing, Figure-5 buffer, eqs (3)-(9), Q12
+        // rounding, root search, table eq (18)).
+        let mut preproc = Preprocessor::new();
+        let mut speech = [0.0f32; L_WINDOW];
+        let mut prev_q: [f32; M] =
+            std::array::from_fn(|i| ((i + 1) as f32 * std::f32::consts::PI / 11.0).cos());
+        let mut locked = LspReconstructor::new();
+
+        let (mut tot, mut hit) = (0usize, 0usize);
+        for f in 0..n_frames {
+            let mut frame = [0.0f32; SAMPLES_PER_FRAME];
+            frame.copy_from_slice(&samples[f * SAMPLES_PER_FRAME..(f + 1) * SAMPLES_PER_FRAME]);
+            let s_new = preproc.process_frame(&frame);
+            speech.copy_within(SAMPLES_PER_FRAME.., 0);
+            speech[L_WINDOW - SAMPLES_PER_FRAME..].copy_from_slice(&s_new);
+            let r = analyze_window(&speech);
+            let lev = levinson(&r);
+            let a_q12: [f32; M] = std::array::from_fn(|i| (lev.a[i] * 4096.0).round() / 4096.0);
+            let q = match lp_to_lsp(&a_q12) {
+                Some(q) => {
+                    prev_q = q;
+                    q
+                }
+                None => prev_q,
+            };
+            let omega: [f32; M] = std::array::from_fn(|i| lsp_to_lsf_q13(q[i]) as f32 / 8192.0);
+
+            let rf = parse_frame(&bit_bytes[f * FRAME_BYTES..(f + 1) * FRAME_BYTES]).unwrap();
+            let FrameKind::Active(_) = rf else { continue };
+            let rp = unpack_parameters(&rf).unwrap();
+
+            let ours = search_lsp_indices(&omega, locked.history());
+            tot += 1;
+            if ours.l0 == rp.l0 as usize
+                && ours.l1 == rp.l1 as usize
+                && ours.l2 == rp.l2 as usize
+                && ours.l3 == rp.l3 as usize
+            {
+                hit += 1;
+            }
+
+            // Lock the MA history to the reference's transmitted indices.
+            locked
+                .reconstruct_frame(
+                    rp.l0 as usize,
+                    rp.l1 as usize,
+                    rp.l2 as usize,
+                    rp.l3 as usize,
+                )
+                .expect("reference indices are in range");
+        }
+        let rate = pct(hit, tot);
+        println!("{name}: locked-history LSP ALL-indices agreement {rate:.1}% ({hit}/{tot})");
+        assert!(
+            rate >= floor,
+            "{name}: locked LSP agreement regressed to {rate:.1}% (floor {floor})"
+        );
+    }
+}
+
 /// Frame alignment is 1:1: shifting our parameter stream by ±1 frame
 /// against the reference must strictly reduce the L1 agreement on the
 /// long SPEECH vector.
