@@ -147,8 +147,17 @@ pub struct GainQuantResult {
 /// eq (63) (via the decode-side eq (73)/(74) reconstruction).
 ///
 /// `g_c_prime` is the §3.9.1 predicted gain `g′_c` for this subframe.
+///
+/// `tame` is the taming flag ([`crate::taming::Taming::test`]): when
+/// raised, every candidate pair whose reconstructed `ĝ_p` exceeds the
+/// taming ceiling [`crate::taming::GPCLIP`] is excluded from the
+/// search, so the quantiser returns the best *legal* pair with
+/// `ĝ_p ≤ GPCLIP` (doc `docs/audio/g729/taming-procedure.md` §4). If
+/// the 4 × 8 preselected cluster holds no legal pair, the search falls
+/// back to the full 8 × 16 grid under the same restriction (both
+/// codebooks carry low-`ĝ_p` rows, so a legal pair always exists).
 #[must_use]
-pub fn quantize_gains(terms: &GainTerms, g_c_prime: f32) -> GainQuantResult {
+pub fn quantize_gains(terms: &GainTerms, g_c_prime: f32, tame: bool) -> GainQuantResult {
     let (gp_opt, gc_opt) = terms.optimal();
     // The GA preselection target: the optimal correction factor.
     let gamma_opt = if g_c_prime.abs() > 1e-9 {
@@ -174,33 +183,52 @@ pub fn quantize_gains(terms: &GainTerms, g_c_prime: f32) -> GainQuantResult {
         da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let mut best: Option<(f32, GainQuantResult)> = None;
-    for &ga in ga_rank.iter().take(GA_CANDIDATES) {
-        for &gb in gb_rank.iter().take(GB_CANDIDATES) {
-            let q = reconstruct_gains(ga, gb).expect("indices in codebook range");
-            let gp_hat = q.g_p_hat;
-            let gamma_hat = q.gamma_hat;
-            let gc_hat = gamma_hat * g_c_prime;
-            let e = terms.error(gp_hat, gc_hat);
-            let better = match &best {
-                None => true,
-                Some((be, _)) => e < *be,
-            };
-            if better {
-                best = Some((
-                    e,
-                    GainQuantResult {
-                        ga,
-                        gb,
-                        gp_hat,
-                        gamma_hat,
-                        gc_hat,
-                    },
-                ));
+    let score = |ga_set: &[usize], gb_set: &[usize]| -> Option<(f32, GainQuantResult)> {
+        let mut best: Option<(f32, GainQuantResult)> = None;
+        for &ga in ga_set {
+            for &gb in gb_set {
+                let q = reconstruct_gains(ga, gb).expect("indices in codebook range");
+                let gp_hat = q.g_p_hat;
+                // Taming bound (doc §4): while tameflag is raised the
+                // reconstructed pitch gain may not exceed GPCLIP.
+                if tame && gp_hat > crate::taming::GPCLIP {
+                    continue;
+                }
+                let gamma_hat = q.gamma_hat;
+                let gc_hat = gamma_hat * g_c_prime;
+                let e = terms.error(gp_hat, gc_hat);
+                let better = match &best {
+                    None => true,
+                    Some((be, _)) => e < *be,
+                };
+                if better {
+                    best = Some((
+                        e,
+                        GainQuantResult {
+                            ga,
+                            gb,
+                            gp_hat,
+                            gamma_hat,
+                            gc_hat,
+                        },
+                    ));
+                }
             }
         }
+        best
+    };
+
+    if let Some((_, r)) = score(
+        &ga_rank[..GA_CANDIDATES],
+        &gb_rank[..GB_CANDIDATES.min(gb_rank.len())],
+    ) {
+        return r;
     }
-    best.expect("non-empty candidate grid").1
+    // Taming excluded every preselected pair: search the full grid
+    // under the same ĝ_p ≤ GPCLIP restriction.
+    score(&ga_rank, &gb_rank)
+        .expect("codebooks carry low-gain rows, a taming-legal pair exists")
+        .1
 }
 
 #[cfg(test)]
@@ -256,7 +284,7 @@ mod tests {
             let x: [f32; L_SUBFR] =
                 std::array::from_fn(|n| q0.g_p_hat * y[n] + q0.gamma_hat * g_c_prime * z[n]);
             let t = GainTerms::compute(&x, &y, &z);
-            let got = quantize_gains(&t, g_c_prime);
+            let got = quantize_gains(&t, g_c_prime, false);
 
             // Brute force over all 128 pairs.
             let mut best_e = f32::INFINITY;
@@ -285,11 +313,54 @@ mod tests {
         let y: [f32; L_SUBFR] = std::array::from_fn(|n| ((n * 29 % 59) as f32) - 29.0);
         let z: [f32; L_SUBFR] = std::array::from_fn(|n| ((n * 31 % 61) as f32) - 30.0);
         let t = GainTerms::compute(&x, &y, &z);
-        let res = quantize_gains(&t, 2.0);
+        let res = quantize_gains(&t, 2.0, false);
         let q = reconstruct_gains(res.ga, res.gb).unwrap();
         assert_eq!(res.gp_hat, q.g_p_hat);
         assert_eq!(res.gamma_hat, q.gamma_hat);
         assert_eq!(res.gc_hat, q.gamma_hat * 2.0);
+    }
+
+    /// With the taming flag raised, the returned pair never
+    /// reconstructs `ĝ_p` above the GPCLIP ceiling — even when the
+    /// unrestricted optimum wants a high pitch gain — and the result
+    /// is the best pair of the restricted grid.
+    #[test]
+    fn taming_bounds_the_pitch_gain() {
+        use crate::taming::GPCLIP;
+        let y: [f32; L_SUBFR] = std::array::from_fn(|n| ((n * 5 % 31) as f32) - 15.0);
+        let z: [f32; L_SUBFR] = std::array::from_fn(|n| ((n * 17 % 41) as f32) - 20.0);
+        // A target built with gp well above the ceiling.
+        let x: [f32; L_SUBFR] = std::array::from_fn(|n| 1.15 * y[n] + 0.8 * z[n]);
+        let t = GainTerms::compute(&x, &y, &z);
+
+        let free = quantize_gains(&t, 1.0, false);
+        assert!(
+            free.gp_hat > GPCLIP,
+            "untamed search should chase the high gain, got {}",
+            free.gp_hat
+        );
+        let tamed = quantize_gains(&t, 1.0, true);
+        assert!(
+            tamed.gp_hat <= GPCLIP,
+            "tamed ĝ_p {} exceeds GPCLIP",
+            tamed.gp_hat
+        );
+        // Best-of-restricted-grid: no legal pair scores strictly better.
+        let mut best_e = f32::INFINITY;
+        for ga in 0..NCODE1 {
+            for gb in 0..NCODE2 {
+                let q = reconstruct_gains(ga, gb).unwrap();
+                if q.g_p_hat > GPCLIP {
+                    continue;
+                }
+                best_e = best_e.min(t.error(q.g_p_hat, q.gamma_hat));
+            }
+        }
+        let got_e = t.error(tamed.gp_hat, tamed.gc_hat);
+        assert!(
+            got_e <= best_e + 1e-3 * (1.0 + best_e.abs()),
+            "tamed search error {got_e} > restricted brute force {best_e}"
+        );
     }
 
     /// The selected indices survive the §3.9.3 transmission mapping
@@ -301,7 +372,7 @@ mod tests {
         let y: [f32; L_SUBFR] = std::array::from_fn(|n| ((n * 41 % 71) as f32) - 35.0);
         let z: [f32; L_SUBFR] = std::array::from_fn(|n| ((n * 43 % 73) as f32) - 36.0);
         let t = GainTerms::compute(&x, &y, &z);
-        let res = quantize_gains(&t, 1.0);
+        let res = quantize_gains(&t, 1.0, false);
         let tx_ga = map_ga(res.ga).unwrap();
         let tx_gb = map_gb(res.gb).unwrap();
         assert_eq!(demap_ga(tx_ga).unwrap(), res.ga);

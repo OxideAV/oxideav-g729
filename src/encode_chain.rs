@@ -69,6 +69,7 @@ use crate::pitch_decode::{derive_t_min, encode_p1, encode_p2, PitchDelay};
 use crate::pitch_sharpen::{clamp_beta, sharpen};
 use crate::preprocess::Preprocessor;
 use crate::tables::{L_WINDOW, M};
+use crate::taming::Taming;
 
 use crate::levinson::levinson;
 
@@ -111,6 +112,9 @@ pub struct FrameEncoder {
     prev_gp_hat: f32,
     /// Past-speech tail `s(−1) … s(−10)` for the eq (36) residual.
     s_past: [f32; M],
+    /// Taming-procedure per-zone worst-case excitation-error state
+    /// (`docs/audio/g729/taming-procedure.md`).
+    taming: Taming,
 }
 
 /// One encoded frame: the 15 Table-8 codewords (as the shared
@@ -153,6 +157,7 @@ impl FrameEncoder {
             gain_pred: GainPredictor::new(),
             prev_gp_hat: 0.8,
             s_past: [0.0; M],
+            taming: Taming::new(),
         }
     }
 
@@ -377,13 +382,20 @@ impl FrameEncoder {
             // h — the sharpening is already inside c).
             let z = filter_through_h(&c, &h);
 
-            // §3.9: gains.
+            // §3.9: gains. The taming test bounds the quantised
+            // adaptive gain when the long-term loop for this delay has
+            // accumulated too much worst-case decoder error
+            // (docs/audio/g729/taming-procedure.md §3/§4).
             let pred = self.gain_pred.predict_only(&c);
             let terms = GainTerms::compute(&x, &y, &z);
-            let gq = quantize_gains(&terms, pred.g_c_prime);
+            let tame = self.taming.test(cl.delay.int_t, cl.delay.frac);
+            let gq = quantize_gains(&terms, pred.g_c_prime, tame);
             self.gain_pred.push_quantised_error(gq.gamma_hat);
             self.prev_gp_hat = gq.gp_hat;
             gains[sub] = (gq.gp_hat, gq.gc_hat);
+            // Taming update: propagate the worst-case error one pitch
+            // period through the loop at the chosen gain (doc §2).
+            self.taming.update(cl.delay.int_t, cl.delay.frac, gq.gp_hat);
 
             // §3.10: excitation + memory updates.
             let u: [f32; L_SUBFR] = std::array::from_fn(|n| gq.gp_hat * v[n] + gq.gc_hat * c[n]);

@@ -131,12 +131,24 @@ fn parameter_agreement_floors() {
                 (ot.int_t - rt.int_t).abs() <= 2
             })
             .count();
+        // §3.9.2 gain-codeword agreement (both subframes pooled) — the
+        // taming procedure acts directly on these decisions.
+        let ga = pairs
+            .iter()
+            .map(|(o, r)| usize::from(o.ga1 == r.ga1) + usize::from(o.ga2 == r.ga2))
+            .sum::<usize>();
+        let gb = pairs
+            .iter()
+            .map(|(o, r)| usize::from(o.gb1 == r.gb1) + usize::from(o.gb2 == r.gb2))
+            .sum::<usize>();
 
         println!(
-            "{name}: frames={total} L0={:.1}% L1={:.1}% T1±2={:.1}%",
+            "{name}: frames={total} L0={:.1}% L1={:.1}% T1±2={:.1}% GA={:.1}% GB={:.1}%",
             pct(l0, total),
             pct(l1, total),
-            pct(t1, total)
+            pct(t1, total),
+            pct(ga, 2 * total),
+            pct(gb, 2 * total)
         );
         assert!(
             pct(l0, total) >= f_l0,
@@ -254,6 +266,77 @@ fn locked_history_lsp_agreement_floors() {
             "{name}: locked LSP agreement regressed to {rate:.1}% (floor {floor})"
         );
     }
+}
+
+/// Taming-procedure fingerprint of the reference encoder, read off its
+/// own `.BIT` streams (docs/audio/g729/taming-procedure.md leaves the
+/// trigger threshold unpinned; this test pins the corpus-consistent
+/// region).
+///
+/// Replaying the documented accumulator recursion
+/// (`E ← 1 + ĝ_p²·max(E_spanned)`, per-zone via `tab_zone`) over the
+/// reference's own decoded `(pitch delay, ĝ_p)` sequence:
+///
+/// * the reference keeps choosing `ĝ_p > GPCLIP` while the simulated
+///   accumulator climbs past 15 000 (peak ≈ 18 200 on TAME) — so the
+///   reference's threshold in these units is **above** 18 200 and any
+///   lower-threshold variant is contradicted by the corpus;
+/// * the simulated accumulator never reaches 60 000 anywhere in the
+///   corpus — so with the commonly-attributed 60 000 threshold the
+///   reference **never tames** on these vectors, and neither do we
+///   (behaviourally identical, which is what the flat agreement deltas
+///   with taming wired confirm).
+#[test]
+fn reference_taming_fingerprint() {
+    use oxideav_g729::gain_index_map::{demap_ga, demap_gb};
+    use oxideav_g729::gain_reconstruct::reconstruct_gains;
+    use oxideav_g729::pitch_decode::{decode_t2_from_p2, derive_t_min};
+    use oxideav_g729::taming::{Taming, GPCLIP, THRESH_ERR};
+
+    let Some(root) = conformance_root() else {
+        eprintln!("skip: conformance corpus not present");
+        return;
+    };
+    let mut corpus_peak = 0.0f64;
+    for name in VECTORS {
+        let bit_bytes = std::fs::read(root.join(format!("g729-core/{name}.BIT"))).unwrap();
+        let mut tam = Taming::new();
+        let mut peak_acc_with_high_gp = 0.0f64;
+        for chunk in bit_bytes.chunks_exact(FRAME_BYTES) {
+            let frame = parse_frame(chunk).unwrap();
+            let FrameKind::Active(_) = frame else {
+                continue;
+            };
+            let p = unpack_parameters(&frame).unwrap();
+            let t1 = decode_t1_from_p1(p.p1);
+            let t2 = decode_t2_from_p2(p.p2, derive_t_min(t1.int_t));
+            for (d, ga_tx, gb_tx) in [(t1, p.ga1, p.gb1), (t2, p.ga2, p.gb2)] {
+                let ga = demap_ga(ga_tx as usize).unwrap();
+                let gb = demap_gb(gb_tx as usize).unwrap();
+                let gp = reconstruct_gains(ga, gb).unwrap().g_p_hat;
+                let acc = tam.accumulators().iter().cloned().fold(0.0f64, f64::max);
+                if gp > GPCLIP {
+                    peak_acc_with_high_gp = peak_acc_with_high_gp.max(acc);
+                }
+                corpus_peak = corpus_peak.max(acc);
+                tam.update(d.int_t, d.frac, gp);
+            }
+        }
+        println!(
+            "{name}: peak simulated accumulator with ĝ_p > GPCLIP = {peak_acc_with_high_gp:.1}"
+        );
+        if name == "TAME" {
+            assert!(
+                peak_acc_with_high_gp > 15_000.0,
+                "TAME should pin the threshold lower bound above 15000, got {peak_acc_with_high_gp:.1}"
+            );
+        }
+    }
+    println!("corpus peak simulated accumulator = {corpus_peak:.1}");
+    assert!(
+        corpus_peak < THRESH_ERR,
+        "reference never tames on the staged corpus; peak {corpus_peak:.1} crossed {THRESH_ERR}"
+    );
 }
 
 /// Frame alignment is 1:1: shifting our parameter stream by ±1 frame
