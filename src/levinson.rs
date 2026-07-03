@@ -85,13 +85,15 @@ pub fn levinson(r: &[f64; M + 1]) -> LevinsonResult {
         };
     }
 
+    const K_GRID: f64 = (1u64 << 31) as f64;
+    const A_GRID: f64 = (1u64 << 27) as f64;
     for i in 1..=M {
         // Eq (8): k_i = −(r'(i) + Σ_{j=1}^{i−1} a_j·r'(i−j)) / E.
         let mut acc = r[i];
         for j in 1..i {
             acc += a[j] * r[i - j];
         }
-        let k = -acc / energy;
+        let k = ((-acc / energy) * K_GRID).round() / K_GRID;
         reflection[i - 1] = k;
 
         // Eq (9): a_j^{(i)} = a_j^{(i−1)} + k·a_{i−j}^{(i−1)} for
@@ -100,7 +102,7 @@ pub fn levinson(r: &[f64; M + 1]) -> LevinsonResult {
         // (correct for both even and odd i, including the middle term).
         let prev = a;
         for j in 1..i {
-            a[j] = prev[j] + k * prev[i - j];
+            a[j] = ((prev[j] + k * prev[i - j]) * A_GRID).round() / A_GRID;
         }
         a[i] = k;
 

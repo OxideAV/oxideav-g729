@@ -162,15 +162,46 @@ pub fn apply_lag_window(r: &mut [f64; N_LAGS]) {
     }
 }
 
+/// Normalises the autocorrelations to the 32-bit fixed-point grid of
+/// the clause-2.5 pipeline: every `r(k)` is scaled by the power of two
+/// that brings `r(0)` into `[2^30, 2^31)` (the normalised Word32
+/// mantissa range) and truncated to an integer (the arithmetic-shift
+/// truncation of the 16/32-bit signal path). Levinson-Durbin is
+/// scale-invariant in `r`, so the common factor drops out of the LP
+/// coefficients; what changes is the *precision floor* — sub-LSB
+/// detail of the float accumulation that the 32-bit reference never
+/// saw is discarded here too.
+fn normalize_to_word32(r: &mut [f64; N_LAGS]) {
+    let mut scale = 0i32;
+    while r[0] * (2f64).powi(scale) >= (2f64).powi(31) {
+        scale -= 1;
+    }
+    while r[0] * (2f64).powi(scale) < (2f64).powi(30) {
+        scale += 1;
+    }
+    let factor = (2f64).powi(scale);
+    for v in r.iter_mut() {
+        *v = (*v * factor).floor();
+    }
+}
+
 /// Convenience: run the whole §3.2.1 front-end — window (eq (4)),
-/// autocorrelate (eq (5)) with the `r(0)` guard, and lag-window
-/// (eqs (6)/(7)) — over one 240-sample analysis block, returning the
-/// modified autocorrelations `r'(0 … M)`.
+/// autocorrelate (eq (5)) with the `r(0)` guard, normalisation to the
+/// 32-bit grid, and lag-window (eqs (6)/(7)) with the product
+/// truncated back to that grid — over one 240-sample analysis block,
+/// returning the modified autocorrelations `r'(0 … M)` (scaled by a
+/// common power of two; Levinson-Durbin is scale-invariant).
 #[must_use]
 pub fn analyze_window(window: &[f32; L_WINDOW]) -> [f64; N_LAGS] {
     let windowed = apply_window(window);
     let mut r = autocorrelate(&windowed);
+    normalize_to_word32(&mut r);
     apply_lag_window(&mut r);
+    // The 32-bit pipeline truncates each lag-windowed product back to
+    // the normalised Word32 grid.
+    for v in r.iter_mut() {
+        *v = v.floor();
+    }
     r
 }
 

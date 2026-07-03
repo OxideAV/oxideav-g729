@@ -44,17 +44,39 @@
 //!    the *unweighted* MSE to `l` over all ten coordinates.
 //! 3. Search **L2** (32, lower five coordinates): for each candidate,
 //!    form the partial residual `l̂ = L1 + L2`, rearrange it to a minimum
-//!    adjacent distance of 0.0012, reconstruct `ω̂_{1..5}` via eq (20),
-//!    and keep the candidate with the lowest weighted MSE over `i = 1…5`.
+//!    adjacent distance of 0.0012, and keep the candidate with the
+//!    lowest **weighted residual-domain MSE** `Σ w_i·(l_i − l̂_i)²`
+//!    over `i = 1…5` (see the round-388 note below).
 //! 4. Search **L3** (32, upper five): analogously over `i = 6…10`.
 //! 5. Reconstruct the full quantised vector (rearrange twice — 0.0012
-//!    then 0.0006 — then eq (20)) and compute the total weighted MSE.
+//!    then 0.0006 — then eq (20)) and compute the total eq (21)
+//!    weighted MSE `Σ w_i·(ω_i − ω̂_i)²`.
 //!
 //! The predictor `L0` giving the lowest total weighted MSE wins. The
 //! selected indices are then run through the wrapped `LspReconstructor`
 //! (which repeats the exact decode reconstruction and advances the MA
 //! history), so the encoder's future targets are computed against the
 //! same residual history the decoder will see.
+//!
+//! ## Round-388 note — the split-stage metric domain (measured)
+//!
+//! The printed eq (21) is the ω-domain error `Σ w_i·(ω_i − ω̂_i)²`, and
+//! the §3.2.4 prose describes the L2/L3 stages as reconstructing `ω̂`
+//! via eq (20) before computing it. Because eq (20) is affine in `l̂`,
+//! the two domains differ only by a per-coordinate `(1 − Σ_k P̂_{i,k})²`
+//! folding of the weights: `ω_i − ω̂_i = (1 − Σ P̂_{i,k})·(l_i − l̂_i)`.
+//! Clause 2.5 makes the bit-exact fixed-point coder the normative
+//! ground truth, and against its conformance corpus the split-stage
+//! searches **measurably behave as the residual-domain form** (no
+//! `(1 − ΣP̂)²` folding): switching stages 3–4 to
+//! `Σ w_i·(l_i − l̂_i)²` raises the reference-locked all-four-indices
+//! agreement on every affected vector — ALGTHM 71.4 → 82.9%, FIXED
+//! 91.7 → 97.5%, LSP 74.9 → 77.5%, PITCH 88.6 → 92.8%, SPEECH
+//! 78.4 → 80.9%, TAME unchanged — with no vector degrading. The L1
+//! stage stays unweighted (probed: weighting it collapses agreement)
+//! and the step-5 mode selection stays on the printed ω-domain
+//! eq (21) (probed: residual-domain mode selection collapses
+//! agreement).
 
 use core::f32::consts::PI;
 
@@ -202,7 +224,9 @@ pub fn search_lsp_indices(omega: &[f32; M], history: &[[f32; M]; tables::MA_NP])
         }
         let l1_row = tables::lsp_l1_entry(l1);
 
-        // Stage 2 lower — L2: weighted MSE over i = 0..5.
+        // Stage 2 lower — L2: weighted residual-domain MSE over
+        // i = 0..5 (round-388 note: the bit-exact coder's measured
+        // metric — no (1 − ΣP̂)² folding of the weights).
         let mut l2 = 0usize;
         let mut best_l2 = f32::INFINITY;
         for c in 0..NC1 {
@@ -215,11 +239,9 @@ pub fn search_lsp_indices(omega: &[f32; M], history: &[[f32; M]; tables::MA_NP])
                 l_hat[i] += f32::from(v) / Q13;
             }
             rearrange_pass(&mut l_hat, REARRANGE_J1);
-            let mut omega_hat = [0.0f32; M];
-            reconstruct_omega(&l_hat, &fg, &fg_sum, history, &mut omega_hat);
             let mut e = 0.0f32;
             for i in 0..M / 2 {
-                let d = omega[i] - omega_hat[i];
+                let d = target[i] - l_hat[i];
                 e += weights[i] * d * d;
             }
             if e < best_l2 {
@@ -229,7 +251,8 @@ pub fn search_lsp_indices(omega: &[f32; M], history: &[[f32; M]; tables::MA_NP])
         }
         let l2_lo = tables::lsp_l2_entry(l2);
 
-        // Stage 2 upper — L3: weighted MSE over i = 5..10.
+        // Stage 2 upper — L3: weighted residual-domain MSE over
+        // i = 5..10.
         let mut l3 = 0usize;
         let mut best_l3 = f32::INFINITY;
         for c in 0..NC1 {
@@ -245,11 +268,9 @@ pub fn search_lsp_indices(omega: &[f32; M], history: &[[f32; M]; tables::MA_NP])
                 l_hat[M / 2 + j] += f32::from(v) / Q13;
             }
             rearrange_pass(&mut l_hat, REARRANGE_J1);
-            let mut omega_hat = [0.0f32; M];
-            reconstruct_omega(&l_hat, &fg, &fg_sum, history, &mut omega_hat);
             let mut e = 0.0f32;
             for i in M / 2..M {
-                let d = omega[i] - omega_hat[i];
+                let d = target[i] - l_hat[i];
                 e += weights[i] * d * d;
             }
             if e < best_l3 {
