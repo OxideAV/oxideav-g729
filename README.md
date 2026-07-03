@@ -1,5 +1,7 @@
 # oxideav-g729
 
+[![CI](https://github.com/OxideAV/oxideav-g729/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-g729/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-g729.svg)](https://crates.io/crates/oxideav-g729) [![docs.rs](https://docs.rs/oxideav-g729/badge.svg)](https://docs.rs/oxideav-g729) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust ITU-T **G.729** (CS-ACELP, 8 kbit/s) narrowband speech codec.
 Zero C dependencies, no FFI, no `*-sys` crates.
 
