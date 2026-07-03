@@ -61,17 +61,20 @@
 //!
 //! ## Numeric domain
 //!
-//! Windowing is done in `f32` (matching the pre-processed sample
-//! domain); the autocorrelation sum is accumulated in `f64` (the
-//! reference computes `r(k)` with an extended-precision accumulator, so
-//! `f64` is the closest float analogue) and returned as `f64`.
+//! The clause-2.5 signal path is 16-bit fixed point, and the
+//! conformance corpus was produced by that arithmetic, so (round 385)
+//! the windowing applies the Q15 multiply **with the fixed-point
+//! rounding to the 16-bit grid**: `s'(n) = ⌊(s(n)·w(n) + 2^14)·2^−15⌋`.
+//! Both `s(n)` (rounded by [`crate::preprocess`]) and `s'(n)` are then
+//! integer-valued, so accumulating the eq (5) autocorrelation in `f64`
+//! is *exact* integer arithmetic (products ≤ 2^30, 240-term sums ≤
+//! 2^38 ≪ the 2^53 f64 mantissa) — bit-identical to a 64-bit integer
+//! accumulator.
 
 use crate::tables::{
     LPC_HAMMING_WINDOW_Q15, LPC_LAG_WINDOW_HIGH_Q15, LPC_LAG_WINDOW_LOW_Q15, L_WINDOW, M,
 };
 
-/// Q15 scale for the analysis window (`2^15`).
-const Q15: f32 = 32_768.0;
 /// High-half Q15 scale for the lag window (`2^15`).
 const LAG_HIGH_SCALE: f64 = 32_768.0;
 /// Combined scale for the low-half split-double lag window (`2^31`).
@@ -95,7 +98,12 @@ pub fn apply_window(window: &[f32; L_WINDOW]) -> [f32; L_WINDOW] {
         .iter_mut()
         .zip(window.iter().zip(LPC_HAMMING_WINDOW_Q15.iter()))
     {
-        *o = s * (f32::from(w) / Q15);
+        // Fixed-point Q15 windowing with rounding: the 16-bit signal
+        // path (clause 2.5) computes s'(n) = round(s(n)·w(n)·2^−15),
+        // i.e. ⌊(s·w + 2^14)·2^−15⌋ — the windowed sample every later
+        // stage sees is itself a 16-bit integer.
+        let prod = f64::from(s) * f64::from(w);
+        *o = ((prod + 16_384.0) / 32_768.0).floor() as f32;
     }
     out
 }
@@ -173,18 +181,29 @@ mod tests {
     /// The eq (3) window: first sample of the half-Hamming part is
     /// `0.54 − 0.46 = 0.08`, the window peaks at `1.0` where the Hamming
     /// half meets its maximum, and the look-ahead tail descends toward 0.
+    /// Probed with a constant full-scale-ish integer signal so the Q15
+    /// rounding step stays small relative to the window shape.
     #[test]
     fn window_shape_matches_eq3() {
-        let ones = [1.0f32; L_WINDOW];
-        let w = apply_window(&ones);
-        // n = 0: 0.54 − 0.46·cos(0) = 0.08.
-        assert!((w[0] - 0.08).abs() < 2e-3, "w[0]={}", w[0]);
-        // Somewhere in 0..199 the Hamming half reaches ~1.0.
+        let amp = 10_000.0f32;
+        let flat = [amp; L_WINDOW];
+        let w = apply_window(&flat);
+        // n = 0: 0.54 − 0.46·cos(0) = 0.08 → ≈ 800 at amp 10000.
+        assert!((w[0] - 0.08 * amp).abs() < 2.0, "w[0]={}", w[0]);
+        // Somewhere in 0..199 the Hamming half reaches ~1.0·amp.
         let peak = w[..200].iter().cloned().fold(0.0f32, f32::max);
-        assert!(peak > 0.999, "hamming half should reach ~1, peak={peak}");
+        assert!(
+            peak > 0.999 * amp,
+            "hamming half should reach ~amp, peak={peak}"
+        );
         // The last look-ahead sample is well below the peak (cosine
         // taper descending toward 0).
         assert!(w[239] < peak, "taper tail w[239]={} peak={peak}", w[239]);
+        // Round-385 fixed-point grid: every windowed sample is an
+        // integer (the 16-bit windowed-speech domain).
+        for (n, &v) in w.iter().enumerate() {
+            assert_eq!(v, v.trunc(), "windowed[{n}] = {v} not on integer grid");
+        }
     }
 
     /// Silence: the `r(0) ≥ 1.0` guard makes a zero input yield a

@@ -125,7 +125,14 @@ impl Preprocessor {
 
     /// Processes one input sample through the eq (1) high-pass filter,
     /// advancing the four delay taps. Returns the pre-processed sample
-    /// `s(n)`.
+    /// `s(n)`, **rounded to the 16-bit integer PCM grid** (clause 2.5:
+    /// the signal path of the bit-exact coder is 16-bit fixed point, so
+    /// the `s(n)` every later stage consumes is an integer sample; the
+    /// filter's own feedback memory keeps the unrounded value, matching
+    /// the double-precision recursion state of a fixed-point IIR).
+    ///
+    /// Rounding is round-half-up (`⌊x + ½⌋`, the fixed-point
+    /// `round()` convention) with saturation to `[−32768, 32767]`.
     #[must_use]
     pub fn process_sample(&mut self, x: f32) -> f32 {
         // s(n) = b0·x(n) + b1·x(n−1) + b2·x(n−2)
@@ -135,12 +142,13 @@ impl Preprocessor {
             + self.b[2] * self.x_hist[1]
             + self.a[0] * self.y_hist[0]
             + self.a[1] * self.y_hist[1];
-        // Advance delay lines.
+        // Advance delay lines (feedback keeps the unrounded value).
         self.x_hist[1] = self.x_hist[0];
         self.x_hist[0] = x;
         self.y_hist[1] = self.y_hist[0];
         self.y_hist[0] = s;
-        s
+        // Output lands on the saturated 16-bit integer grid.
+        (f64::from(s) + 0.5).floor().clamp(-32_768.0, 32_767.0) as f32
     }
 
     /// Processes one 80-sample frame in place, returning the
@@ -231,6 +239,23 @@ mod tests {
             (gain - 0.5).abs() < 0.1,
             "1 kHz passband gain should be ~0.5 (÷2 folded in), got {gain}"
         );
+    }
+
+    /// Round-385 fixed-point grid: every pre-processed sample is an
+    /// integer within the saturated 16-bit range, while the feedback
+    /// memory keeps the unrounded recursion value (probed indirectly:
+    /// two impulse responses launched from different phases stay on the
+    /// integer grid yet differ below the integer step in their unrounded
+    /// tails — i.e. rounding must not feed back).
+    #[test]
+    fn output_is_integer_grid_16bit() {
+        let mut p = Preprocessor::new();
+        for n in 0..500 {
+            let x = 13_000.0 * (std::f32::consts::TAU * (n as f32) / 37.0).sin();
+            let s = p.process_sample(x);
+            assert_eq!(s, s.trunc(), "sample {n} = {s} not integer");
+            assert!((-32_768.0..=32_767.0).contains(&s));
+        }
     }
 
     /// Processing a frame sample-by-sample and via `process_frame` must
