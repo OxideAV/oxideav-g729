@@ -330,6 +330,7 @@ pub mod preprocess;
 pub mod serial;
 pub mod short_term_postfilter;
 pub mod tables;
+pub mod taming;
 pub mod tilt_compensation;
 
 /// Crate-local error type. Until decode + encode are wired up, every
