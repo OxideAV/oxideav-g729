@@ -90,7 +90,8 @@ fn pct(hits: usize, total: usize) -> f64 {
 ///
 /// Measured rates after the round-385 fixed-point-grid work (16-bit
 /// pre-processing/windowing, Q12 LP coefficients, table-lookup
-/// eq (18)): L0 62.5–94.1%, L1 31.3–67.5%, T1±2 77.7–90.8%. The
+/// eq (18), measured-effective unity white-noise correction):
+/// L0 62.5–97.1%, L1 31.0–100%, T1±2 78.1–90.4%. The
 /// floors sit ~4–6 points under the measured rates so a regression
 /// (not float jitter) trips them; ratchet them upward as the encoder
 /// closes on the reference.
@@ -108,12 +109,12 @@ fn parameter_agreement_floors() {
     };
     // (vector, L0 floor, L1 floor, T1±2 floor).
     let floors: [(&str, f64, f64, f64); 6] = [
-        ("ALGTHM", 85.0, 50.0, 76.0),
+        ("ALGTHM", 90.0, 68.0, 79.0),
         ("FIXED", 87.0, 61.0, 72.0),
         ("LSP", 82.0, 39.0, 85.0),
         ("PITCH", 89.0, 26.0, 76.0),
-        ("SPEECH", 80.0, 43.0, 72.0),
-        ("TAME", 56.0, 56.0, 72.0),
+        ("SPEECH", 80.0, 44.0, 72.0),
+        ("TAME", 56.0, 94.0, 72.0),
     ];
     for (name, f_l0, f_l1, f_t1) in floors {
         let pairs = encode_vector(&root, name);
@@ -161,9 +162,10 @@ fn parameter_agreement_floors() {
 /// the reference encoder had, since its MA feedback is built from its
 /// chosen indices). This removes error propagation and measures pure
 /// per-frame front-end + search fidelity — the number the fixed-point
-/// work ratchets. Measured (round 385): ALL-four-indices agreement
-/// ALGTHM 51.4%, FIXED 90.8%, LSP 47.4%, PITCH 86.4%, SPEECH 61.6%,
-/// TAME 39.8%.
+/// work ratchets. Measured (round 385, after the fixed-point-grid +
+/// effective-unity white-noise-correction work): ALL-four-indices
+/// agreement ALGTHM 71.4%, FIXED 91.7%, LSP 74.9%, PITCH 88.6%,
+/// SPEECH 78.4%, TAME 80.5%.
 #[test]
 fn locked_history_lsp_agreement_floors() {
     use oxideav_g729::levinson::levinson;
@@ -181,12 +183,12 @@ fn locked_history_lsp_agreement_floors() {
     };
     // (vector, ALL-four-indices agreement floor %).
     let floors: [(&str, f64); 6] = [
-        ("ALGTHM", 45.0),
-        ("FIXED", 85.0),
-        ("LSP", 42.0),
-        ("PITCH", 81.0),
-        ("SPEECH", 56.0),
-        ("TAME", 34.0),
+        ("ALGTHM", 60.0),
+        ("FIXED", 86.0),
+        ("LSP", 69.0),
+        ("PITCH", 83.0),
+        ("SPEECH", 73.0),
+        ("TAME", 74.0),
     ];
     for (name, floor) in floors {
         let samples = read_pcm(&root.join(format!("g729-core/{name}.IN")));
