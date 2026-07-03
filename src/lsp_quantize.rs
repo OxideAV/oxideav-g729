@@ -321,8 +321,16 @@ impl LspQuantizer {
         // eq (18): ω_i = arccos(q_i). `q` is clamped into the valid acos
         // domain defensively (the LP→LSP roots already lie in (−1, 1)).
         let omega: [f32; M] = std::array::from_fn(|i| q_in[i].clamp(-1.0, 1.0).acos());
+        self.quantize_lsf(&omega)
+    }
 
-        let indices = search_lsp_indices(&omega, self.reconstructor.history());
+    /// Quantises one frame of LSF coefficients `omega[i−1] = ω_i`
+    /// (radians, increasing) directly — the entry point for callers
+    /// that already evaluated eq (18) themselves (e.g. through the
+    /// fixed-point [`crate::lsf_conversion`] table path, which is how
+    /// the clause-3 encode chain reaches the reference's LSF grid).
+    pub fn quantize_lsf(&mut self, omega: &[f32; M]) -> LspQuantized {
+        let indices = search_lsp_indices(omega, self.reconstructor.history());
 
         // Delegate the exact reconstruction + MA-history advance to the
         // decode-side reconstructor so encoder/decoder stay in lock-step.

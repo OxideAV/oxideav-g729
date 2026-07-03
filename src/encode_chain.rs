@@ -215,7 +215,14 @@ impl FrameEncoder {
         // §3.2.1/2/3: LP analysis over the whole 240-sample window.
         let r = analyze_window(&self.speech);
         let lev = levinson(&r);
-        let q_unq = match lp_to_lsp(&lev.a) {
+        // Clause 2.5: the bit-exact coder stores the LP coefficients as
+        // 16-bit Q12 values; every LSP root the reference finds is a
+        // root of the *Q12-rounded* A(z). Rounding here moves the whole
+        // LSF chain onto the reference grid (black-box-validated: the
+        // §3.2.4 codebook decisions measurably align with the
+        // conformance corpus once a_i is Q12).
+        let a_q12: [f32; M] = std::array::from_fn(|i| (lev.a[i] * 4096.0).round() / 4096.0);
+        let q_unq = match lp_to_lsp(&a_q12) {
             Some(q) => {
                 self.prev_q_unq = q;
                 q
@@ -226,7 +233,12 @@ impl FrameEncoder {
         };
 
         // §3.2.4: quantise (advances the decoder-consistent MA state).
-        let lsp_out = self.lsp_quant.quantize(&q_unq);
+        // eq (18) runs through the fixed-point arccos lookup so the
+        // quantiser sees LSFs on the reference's Q13 grid.
+        let omega_unq: [f32; M] = std::array::from_fn(|i| {
+            crate::lsf_conversion::lsp_to_lsf_q13(q_unq[i]) as f32 / 8192.0
+        });
+        let lsp_out = self.lsp_quant.quantize_lsf(&omega_unq);
         let q_quant = omega_to_q(&lsp_out.omega_hat);
 
         // §3.2.5: per-subframe interpolation of both tracks.
