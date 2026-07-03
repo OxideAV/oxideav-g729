@@ -150,6 +150,148 @@ pub fn lsf_weights(omega: &[f32; M]) -> [f32; M] {
     w
 }
 
+/// Pure §3.2.4 index search: given the unquantised LSF `omega`
+/// (radians) and an explicit MA history of past residuals
+/// `l̂^(m−1) … l̂^(m−4)` (slot 0 = most recent), runs the staged
+/// L1 → L2 → L3 search over both `L0` predictor modes and returns the
+/// winning indices.
+///
+/// This is the stateless core of [`LspQuantizer::quantize`], exposed so
+/// conformance harnesses can evaluate the search against an
+/// externally-maintained (e.g. reference-index-driven) history.
+#[must_use]
+pub fn search_lsp_indices(omega: &[f32; M], history: &[[f32; M]; tables::MA_NP]) -> LspIndices {
+    let weights = lsf_weights(omega);
+
+    let mut best: Option<(f32, LspIndices)> = None;
+
+    for mode in 0..2 {
+        let fg = fg_plane_f32(mode);
+        let fg_sum = fg_sum_f32(mode);
+
+        // eq (23): target residual l_i for this predictor mode.
+        let mut target = [0.0f32; M];
+        for i in 0..M {
+            let mut pred = 0.0f32;
+            for k in 0..tables::MA_NP {
+                pred += fg[k][i] * history[k][i];
+            }
+            // fg_sum is (1 − Σ P̂); guard against a zero divisor.
+            let denom = if fg_sum[i].abs() < 1e-9 {
+                1e-9
+            } else {
+                fg_sum[i]
+            };
+            target[i] = (omega[i] - pred) / denom;
+        }
+
+        // Stage 1 — L1: minimise the unweighted MSE to the target.
+        let mut l1 = 0usize;
+        let mut best_l1 = f32::INFINITY;
+        for c in 0..NC0 {
+            let row = tables::lsp_l1_entry(c);
+            let mut e = 0.0f32;
+            for i in 0..M {
+                let d = target[i] - f32::from(row[i]) / Q13;
+                e += d * d;
+            }
+            if e < best_l1 {
+                best_l1 = e;
+                l1 = c;
+            }
+        }
+        let l1_row = tables::lsp_l1_entry(l1);
+
+        // Stage 2 lower — L2: weighted MSE over i = 0..5.
+        let mut l2 = 0usize;
+        let mut best_l2 = f32::INFINITY;
+        for c in 0..NC1 {
+            let lo = tables::lsp_l2_entry(c);
+            let mut l_hat = [0.0f32; M];
+            for i in 0..M {
+                l_hat[i] = f32::from(l1_row[i]) / Q13;
+            }
+            for (i, &v) in lo.iter().enumerate() {
+                l_hat[i] += f32::from(v) / Q13;
+            }
+            rearrange_pass(&mut l_hat, REARRANGE_J1);
+            let mut omega_hat = [0.0f32; M];
+            reconstruct_omega(&l_hat, &fg, &fg_sum, history, &mut omega_hat);
+            let mut e = 0.0f32;
+            for i in 0..M / 2 {
+                let d = omega[i] - omega_hat[i];
+                e += weights[i] * d * d;
+            }
+            if e < best_l2 {
+                best_l2 = e;
+                l2 = c;
+            }
+        }
+        let l2_lo = tables::lsp_l2_entry(l2);
+
+        // Stage 2 upper — L3: weighted MSE over i = 5..10.
+        let mut l3 = 0usize;
+        let mut best_l3 = f32::INFINITY;
+        for c in 0..NC1 {
+            let hi = tables::lsp_l3_entry(c);
+            let mut l_hat = [0.0f32; M];
+            for i in 0..M {
+                l_hat[i] = f32::from(l1_row[i]) / Q13;
+            }
+            for (i, &v) in l2_lo.iter().enumerate() {
+                l_hat[i] += f32::from(v) / Q13;
+            }
+            for (j, &v) in hi.iter().enumerate() {
+                l_hat[M / 2 + j] += f32::from(v) / Q13;
+            }
+            rearrange_pass(&mut l_hat, REARRANGE_J1);
+            let mut omega_hat = [0.0f32; M];
+            reconstruct_omega(&l_hat, &fg, &fg_sum, history, &mut omega_hat);
+            let mut e = 0.0f32;
+            for i in M / 2..M {
+                let d = omega[i] - omega_hat[i];
+                e += weights[i] * d * d;
+            }
+            if e < best_l3 {
+                best_l3 = e;
+                l3 = c;
+            }
+        }
+
+        // Full reconstruction (rearrange twice + eq (20)) for the
+        // mode-selection total error. `codebook_sum` + the decode
+        // rearrangement mirror `LspReconstructor` exactly.
+        let mut l_hat = codebook_sum(l1, l2, l3).expect("indices in range");
+        rearrange_pass(&mut l_hat, REARRANGE_J1);
+        rearrange_pass(&mut l_hat, crate::lsp_reconstruct::REARRANGE_J2);
+        let mut omega_hat = [0.0f32; M];
+        reconstruct_omega(&l_hat, &fg, &fg_sum, history, &mut omega_hat);
+        let mut total = 0.0f32;
+        for i in 0..M {
+            let d = omega[i] - omega_hat[i];
+            total += weights[i] * d * d;
+        }
+
+        let is_better = match best {
+            None => true,
+            Some((e, _)) => total < e,
+        };
+        if is_better {
+            best = Some((
+                total,
+                LspIndices {
+                    l0: mode,
+                    l1,
+                    l2,
+                    l3,
+                },
+            ));
+        }
+    }
+
+    best.expect("two modes always evaluated").1
+}
+
 /// The switched-predictor two-stage LSP quantiser. Holds the MA history
 /// of previously selected residuals inside a wrapped
 /// [`LspReconstructor`], so the encoder and decoder MA states stay
@@ -179,137 +321,8 @@ impl LspQuantizer {
         // eq (18): ω_i = arccos(q_i). `q` is clamped into the valid acos
         // domain defensively (the LP→LSP roots already lie in (−1, 1)).
         let omega: [f32; M] = std::array::from_fn(|i| q_in[i].clamp(-1.0, 1.0).acos());
-        let weights = lsf_weights(&omega);
 
-        let history = *self.reconstructor.history();
-
-        let mut best: Option<(f32, LspIndices)> = None;
-
-        for mode in 0..2 {
-            let fg = fg_plane_f32(mode);
-            let fg_sum = fg_sum_f32(mode);
-
-            // eq (23): target residual l_i for this predictor mode.
-            let mut target = [0.0f32; M];
-            for i in 0..M {
-                let mut pred = 0.0f32;
-                for k in 0..tables::MA_NP {
-                    pred += fg[k][i] * history[k][i];
-                }
-                // fg_sum is (1 − Σ P̂); guard against a zero divisor.
-                let denom = if fg_sum[i].abs() < 1e-9 {
-                    1e-9
-                } else {
-                    fg_sum[i]
-                };
-                target[i] = (omega[i] - pred) / denom;
-            }
-
-            // Stage 1 — L1: minimise the unweighted MSE to the target.
-            let mut l1 = 0usize;
-            let mut best_l1 = f32::INFINITY;
-            for c in 0..NC0 {
-                let row = tables::lsp_l1_entry(c);
-                let mut e = 0.0f32;
-                for i in 0..M {
-                    let d = target[i] - f32::from(row[i]) / Q13;
-                    e += d * d;
-                }
-                if e < best_l1 {
-                    best_l1 = e;
-                    l1 = c;
-                }
-            }
-            let l1_row = tables::lsp_l1_entry(l1);
-
-            // Stage 2 lower — L2: weighted MSE over i = 0..5.
-            let mut l2 = 0usize;
-            let mut best_l2 = f32::INFINITY;
-            for c in 0..NC1 {
-                let lo = tables::lsp_l2_entry(c);
-                let mut l_hat = [0.0f32; M];
-                for i in 0..M {
-                    l_hat[i] = f32::from(l1_row[i]) / Q13;
-                }
-                for (i, &v) in lo.iter().enumerate() {
-                    l_hat[i] += f32::from(v) / Q13;
-                }
-                rearrange_pass(&mut l_hat, REARRANGE_J1);
-                let mut omega_hat = [0.0f32; M];
-                reconstruct_omega(&l_hat, &fg, &fg_sum, &history, &mut omega_hat);
-                let mut e = 0.0f32;
-                for i in 0..M / 2 {
-                    let d = omega[i] - omega_hat[i];
-                    e += weights[i] * d * d;
-                }
-                if e < best_l2 {
-                    best_l2 = e;
-                    l2 = c;
-                }
-            }
-            let l2_lo = tables::lsp_l2_entry(l2);
-
-            // Stage 2 upper — L3: weighted MSE over i = 5..10.
-            let mut l3 = 0usize;
-            let mut best_l3 = f32::INFINITY;
-            for c in 0..NC1 {
-                let hi = tables::lsp_l3_entry(c);
-                let mut l_hat = [0.0f32; M];
-                for i in 0..M {
-                    l_hat[i] = f32::from(l1_row[i]) / Q13;
-                }
-                for (i, &v) in l2_lo.iter().enumerate() {
-                    l_hat[i] += f32::from(v) / Q13;
-                }
-                for (j, &v) in hi.iter().enumerate() {
-                    l_hat[M / 2 + j] += f32::from(v) / Q13;
-                }
-                rearrange_pass(&mut l_hat, REARRANGE_J1);
-                let mut omega_hat = [0.0f32; M];
-                reconstruct_omega(&l_hat, &fg, &fg_sum, &history, &mut omega_hat);
-                let mut e = 0.0f32;
-                for i in M / 2..M {
-                    let d = omega[i] - omega_hat[i];
-                    e += weights[i] * d * d;
-                }
-                if e < best_l3 {
-                    best_l3 = e;
-                    l3 = c;
-                }
-            }
-
-            // Full reconstruction (rearrange twice + eq (20)) for the
-            // mode-selection total error. `codebook_sum` + the decode
-            // rearrangement mirror `LspReconstructor` exactly.
-            let mut l_hat = codebook_sum(l1, l2, l3).expect("indices in range");
-            rearrange_pass(&mut l_hat, REARRANGE_J1);
-            rearrange_pass(&mut l_hat, crate::lsp_reconstruct::REARRANGE_J2);
-            let mut omega_hat = [0.0f32; M];
-            reconstruct_omega(&l_hat, &fg, &fg_sum, &history, &mut omega_hat);
-            let mut total = 0.0f32;
-            for i in 0..M {
-                let d = omega[i] - omega_hat[i];
-                total += weights[i] * d * d;
-            }
-
-            let is_better = match best {
-                None => true,
-                Some((e, _)) => total < e,
-            };
-            if is_better {
-                best = Some((
-                    total,
-                    LspIndices {
-                        l0: mode,
-                        l1,
-                        l2,
-                        l3,
-                    },
-                ));
-            }
-        }
-
-        let indices = best.expect("two modes always evaluated").1;
+        let indices = search_lsp_indices(&omega, self.reconstructor.history());
 
         // Delegate the exact reconstruction + MA-history advance to the
         // decode-side reconstructor so encoder/decoder stay in lock-step.
