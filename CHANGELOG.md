@@ -35,14 +35,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
     profile. `LspQuantizer` gains the LSF-domain `quantize_lsf` entry
     point; the §3.2.4 search core is extracted as the pure
     `search_lsp_indices` (explicit MA history).
+  - **eq (7) white-noise correction at measured-effective unity** —
+    black-box sweep of the `r(0)` factor over the whole corpus (the
+    prose 1.0001, 1+2^−13 … 1+2^−19, 1.0) shows the literal 1.0001 at
+    float precision over-inflates `r(0)` vs the 16-bit reference and
+    was the single largest remaining LSF divergence; unity maximises
+    corpus-wide agreement (locked ALGTHM 51.4→71.4%, LSP 47.4→74.9%,
+    SPEECH 61.8→78.4%, TAME 39.8→80.5%; end-to-end TAME L1
+    62.5→100%).
   - **Reference-locked conformance floors** — new
     `encoder_conformance` test driving the quantiser MA history with
     the reference's own transmitted indices (the exact state the
     reference encoder had), separating per-frame front-end fidelity
     from propagation: locked all-four-LSP-indices agreement ALGTHM
-    51.4% / FIXED 90.8% / LSP 47.4% / PITCH 86.9% / SPEECH 61.8% /
-    TAME 39.8%. End-to-end floors re-pinned per vector (L1 exact up
-    to 67.5% on FIXED; T1±2 TAME 56→81%).
+    71.4% / FIXED 91.7% / LSP 74.9% / PITCH 88.6% / SPEECH 78.4% /
+    TAME 80.5%. End-to-end floors re-pinned per vector (L1 exact up
+    to 100% on TAME; T1±2 TAME 56→79%).
   - Documented residuals (black-box-probed and excluded: search
     structure, window timing, root precision, F1/F2 quantisation,
     autocorrelation down-scaling, weight thresholds/caps): the

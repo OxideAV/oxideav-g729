@@ -24,26 +24,31 @@ grid: §3.1 pre-processing output rounded to the saturated 16-bit PCM
 grid (IIR feedback keeps the unrounded recursion value), eq (4)
 windowing as `⌊(s·w + 2^14)·2^−15⌋` (making the eq (5)
 autocorrelation exact integer arithmetic), the Levinson output rounded
-to **Q12** before the §3.2.3 root search, and eq (18) evaluated through
+to **Q12** before the §3.2.3 root search, eq (18) evaluated through
 the newly-compiled 64-segment arccos lookup (`lsf_conversion`,
 `lsf-lsp-cos-table-Q15` + `lsf-lsp-acos-slope-Q12`, with
-`LspQuantizer::quantize_lsf` as the LSF-domain entry point). A new
-reference-locked conformance harness (MA history driven by the
-reference's own transmitted indices — the exact state the reference
-encoder had) pins per-frame front-end fidelity separately from error
-propagation: locked all-four-LSP-indices agreement is now ALGTHM
-51.4% / FIXED 90.8% / LSP 47.4% / PITCH 86.9% / SPEECH 61.8% / TAME
-39.8% (TAME was **0.8%** before the Q12 step). End-to-end (own
-history) the ratchet moved to L1 exact 31–80% with T1±2 78–91%.
+`LspQuantizer::quantize_lsf` as the LSF-domain entry point), and the
+eq (7) white-noise correction at its **measured-effective unity**
+(black-box sweep 1.0001 / 1+2^−13 … 1+2^−19 / 1.0: the literal 1.0001
+at float precision over-inflates `r(0)` vs the 16-bit reference and
+was the single largest LSF divergence). A new reference-locked
+conformance harness (MA history driven by the reference's own
+transmitted indices — the exact state the reference encoder had) pins
+per-frame front-end fidelity separately from error propagation:
+locked all-four-LSP-indices agreement is now ALGTHM 71.4% / FIXED
+91.7% / LSP 74.9% / PITCH 88.6% / SPEECH 78.4% / TAME 80.5% (TAME was
+**0.8%** before the Q12 step). End-to-end (own history) the ratchet
+moved to L1 exact 31–100% (TAME 100%, ALGTHM 74.3%) with T1±2 78–90%.
 Remaining measured gaps (black-box-probed and excluded: search
 structure, window timing, root-search precision ±4 Q15 LSB,
-F1/F2-coefficient quantisation, autocorrelation down-scaling,
-weight thresholds/caps): the exact fixed-point eq (21)/(22) weighted
-mode-selection behaviour on extreme spectra (the reference prefers
-predictor 0 where the float metric says predictor 1 wins by 3–10% —
-the TAME outlier) and the residual ~15% per-frame L1 disagreement
-whose margins (median ratio 1.21) point at the DPF
-Levinson/normalisation precision chain.
+F1/F2-coefficient quantisation, autocorrelation down-scaling, weight
+thresholds/caps): the exact fixed-point eq (21)/(22) weighted
+mode-selection behaviour on extreme spectra (TAME end-to-end L0 62.5%
+— the reference prefers predictor 0 against a 3–10% float margin; the
+TAME white-noise sweep peaking at 1+2^−17 points the same way, at a
+magnitude-dependent truncation) and the residual per-frame
+disagreement pointing at the DPF Levinson/normalisation precision
+chain.
 
 ## Encoder (round 382)
 
@@ -71,8 +76,8 @@ frames).
 Measured against the reference `.BIT` encoder outputs
 (`tests/encoder_conformance.rs`, floors pinned per vector as
 regression guards, round-385 numbers): frame alignment exactly 1:1,
-L0 agreement 62–94%, L1 exact-match 31–80%, subframe-1 `int(T1)`
-within ±2 on 78–91% of active frames; the whole 3750-frame SPEECH
+L0 agreement 62–97%, L1 exact-match 31–100%, subframe-1 `int(T1)`
+within ±2 on 78–90% of active frames; the whole 3750-frame SPEECH
 vector encoded by us decodes cleanly through our own decoder.
 
 ## What is wired up
