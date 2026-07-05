@@ -8,6 +8,51 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 390 lands the **fixed-point Q13 §3.2.4 quantiser search**
+  (`lsp_quantize::search_lsp_indices_q13`), implementing the L0
+  MA-predictor mode selection exactly as described by the newly-staged
+  clean-room algorithm doc `docs/audio/g729/l0-mode-selection.md`
+  (docs commit `b9e48a4`): eq (23) targets via the Q12 `fg_sum_inv`
+  reciprocal, integer split-stage searches, eq (20) reconstruction on
+  the Q13 grid, and the ω-domain eq (21) argmin over the two
+  predictors — with the doc's three unpinned fixed-point latitude
+  points exposed as `FxLatitude` and pinned black-box against the
+  conformance corpus (320+ configurations swept):
+  - **Pinned latitude** (`FxLatitude::default`): the eq (20)/(23)
+    `Q28 → Q13` prediction shift *rounds* (`+2^14`), the eq (23)
+    reciprocal shift and the rearrangement midpoint *truncate*, the
+    eq (21) per-term combine is the exact wide product, weights on a
+    `2^11` grid, mode ties hold mode 0. `LspQuantizer::quantize_lsf`
+    now runs this search over an integer MA history
+    (`startup_history_q13` / `advance_history_q13`); the returned
+    reconstruction still delegates to `LspReconstructor`, keeping the
+    encode → decode index contract intact.
+  - **Measured** (reference-locked all-four-indices agreement):
+    LSP 77.5 → 77.7%, SPEECH 80.9 → 81.2%, ALGTHM 82.9%, FIXED 97.5%,
+    PITCH 92.8%, TAME 80.5% (corpus 82.9 → 83.1%); end-to-end FIXED
+    L0 88.3 → 90.8% and L1 64.2 → 70.0%, PITCH L1 31.3 → 32.9%, LSP
+    L1 48.1 → 47.2% (error-propagation reshuffle; its locked number
+    rises). Floors ratcheted in both conformance harnesses; the
+    locked harness now drives the fixed-point search directly.
+  - **Negative results, measured precisely** (the round's main
+    finding): TAME's 24 residual L0 flips are *not* fixed-point
+    rounding near-ties. Every swept rounding/truncation/tie-break
+    combination leaves them intact; the per-term truncating combine
+    shapes (`HiWord`, `Mpy32x16`) never beat the exact product; the
+    alternative mode totals (`StageSum`, `ResidualFull`, the
+    single-folded `Product`) and the `Lsp_pre_select`-style
+    pre-selection metrics (`PreTarget[W]`, `PreOmega[W]`) each
+    collapse corpus agreement to 34–65%. Dissection shows the flips
+    sit in a self-sustaining 5-frame reference index cycle on the
+    stationary TAME input — (0,72,12,5) → (0,80,8,5) → (0,80,29,5) ×2
+    → (1,80,29,5) — where the reference emits mode 1 against a
+    *systematic* ~2.1% ω-domain margin with identical stage indices
+    under both modes; flipping it would need ~100 Q13-LSB input
+    perturbations, three orders beyond any rounding latitude. The
+    staged doc's round-vs-truncate/tie-break hypothesis is therefore
+    measured-insufficient for these frames — an unstaged structural
+    element of the reference's final mode compare remains (docs gap,
+    reported upstream).
 - Round 388 lands the **taming procedure**, the **residual-domain
   §3.2.4 split-stage metric**, and the **registry codec surface**:
   - **Taming procedure** (`taming`, from the newly-staged clean-room
