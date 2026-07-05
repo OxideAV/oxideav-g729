@@ -88,19 +88,22 @@ fn pct(hits: usize, total: usize) -> f64 {
 
 /// Whole-corpus parameter-agreement floors, pinned per vector.
 ///
-/// Measured rates after the round-388 residual-domain split-stage
-/// metric (on top of the round-385 fixed-point grid):
-/// L0 62.5–97.1%, L1 31.3–100%, T1±2 75.0–90.6%, with the largest
-/// end-to-end L1 moves on ALGTHM 74.3 → 80.0% and LSP 44.7 → 48.1%.
-/// The floors sit ~4–6 points under the measured rates so a
+/// Measured rates after the round-390 fixed-point Q13 quantiser
+/// search (on top of the round-388 residual-domain split-stage
+/// metric): L0 62.5–97.1%, L1 32.9–100%, T1±2 75.0–90.5%. The largest
+/// end-to-end moves vs round 388 are FIXED L0 88.3 → 90.8% and
+/// L1 64.2 → 70.0%; LSP L1 gives back 0.9 (48.1 → 47.2%,
+/// error-propagation reshuffling — its locked-history number rises).
+/// The floors sit ~3–6 points under the measured rates so a
 /// regression (not float jitter) trips them; ratchet them upward as
 /// the encoder closes on the reference.
 ///
-/// TAME is the outlier (L0/L1 62.5%): its extreme spectra expose a
-/// still-unmodelled fixed-point behaviour in the §3.2.4 weighted-MSE
-/// mode selection (the reference systematically prefers predictor 0
-/// where the eq (21)/(22) float metric says predictor 1 wins by
-/// 3–10%) — documented as the standing gap of the LSF push.
+/// TAME is the outlier (L0 62.5%): its stationary extreme-spectra
+/// input locks the reference into a 5-frame index cycle whose L0
+/// choice is systematically ~2% away from the eq (21) ω-domain
+/// argmin — measured to be outside the staged fixed-point latitude
+/// (round-390 CHANGELOG) and left as the documented gap of the LSF
+/// chain.
 #[test]
 fn parameter_agreement_floors() {
     let Some(root) = conformance_root() else {
@@ -109,12 +112,12 @@ fn parameter_agreement_floors() {
     };
     // (vector, L0 floor, L1 floor, T1±2 floor).
     let floors: [(&str, f64, f64, f64); 6] = [
-        ("ALGTHM", 90.0, 74.0, 77.0),
-        ("FIXED", 84.0, 60.0, 72.0),
-        ("LSP", 84.0, 43.0, 85.0),
-        ("PITCH", 90.0, 26.0, 77.0),
-        ("SPEECH", 80.0, 45.0, 73.0),
-        ("TAME", 56.0, 94.0, 71.0),
+        ("ALGTHM", 91.0, 74.0, 77.0),
+        ("FIXED", 87.0, 65.0, 74.0),
+        ("LSP", 84.0, 44.0, 87.0),
+        ("PITCH", 91.0, 29.0, 79.0),
+        ("SPEECH", 82.0, 47.0, 75.0),
+        ("TAME", 59.0, 96.0, 71.0),
     ];
     for (name, f_l0, f_l1, f_t1) in floors {
         let pairs = encode_vector(&root, name);
@@ -174,22 +177,25 @@ fn parameter_agreement_floors() {
 /// the reference encoder had, since its MA feedback is built from its
 /// chosen indices). This removes error propagation and measures pure
 /// per-frame front-end + search fidelity — the number the fixed-point
-/// work ratchets. Measured (round 388, after the residual-domain
-/// split-stage metric discovery — see the `lsp_quantize` module docs):
-/// ALL-four-indices agreement ALGTHM 82.9%, FIXED 97.5%, LSP 77.5%,
-/// PITCH 92.8%, SPEECH 80.9%, TAME 80.5% (round-385 baselines were
-/// 71.4 / 91.7 / 74.9 / 88.6 / 78.4 / 80.5). TAME's residual misses
-/// are almost entirely `L0` mode-selection flips (24 of its 25
-/// misses) — the standing eq (21)/(22) fixed-point mode-selection gap
-/// on extreme spectra.
+/// work ratchets. Round 390 moves the harness onto the fixed-point
+/// Q13 search (`search_lsp_indices_q13` under the corpus-pinned
+/// `FxLatitude::default`, integer MA history). Measured:
+/// ALL-four-indices agreement ALGTHM 82.9%, FIXED 97.5%, LSP 77.7%,
+/// PITCH 92.8%, SPEECH 81.2%, TAME 80.5% (round-388 float baselines
+/// 82.9 / 97.5 / 77.5 / 92.8 / 80.9 / 80.5). TAME's residual misses
+/// stay 24/25 pure `L0` mode flips — measured to be *systematic*
+/// ~2.1% ω-domain margins inside a self-sustaining 5-frame reference
+/// index cycle, not fixed-point near-ties (see the round-390
+/// CHANGELOG entry for the full negative-result matrix).
 #[test]
 fn locked_history_lsp_agreement_floors() {
     use oxideav_g729::levinson::levinson;
     use oxideav_g729::lp_analysis::analyze_window;
     use oxideav_g729::lp_to_lsp::lp_to_lsp;
     use oxideav_g729::lsf_conversion::lsp_to_lsf_q13;
-    use oxideav_g729::lsp_quantize::search_lsp_indices;
-    use oxideav_g729::lsp_reconstruct::LspReconstructor;
+    use oxideav_g729::lsp_quantize::{
+        advance_history_q13, search_lsp_indices_q13, startup_history_q13, FxLatitude,
+    };
     use oxideav_g729::preprocess::Preprocessor;
     use oxideav_g729::tables::{L_WINDOW, M};
 
@@ -199,13 +205,14 @@ fn locked_history_lsp_agreement_floors() {
     };
     // (vector, ALL-four-indices agreement floor %).
     let floors: [(&str, f64); 6] = [
-        ("ALGTHM", 78.0),
-        ("FIXED", 93.0),
-        ("LSP", 73.0),
-        ("PITCH", 89.0),
-        ("SPEECH", 77.0),
-        ("TAME", 74.0),
+        ("ALGTHM", 80.0),
+        ("FIXED", 96.0),
+        ("LSP", 76.5),
+        ("PITCH", 91.5),
+        ("SPEECH", 80.0),
+        ("TAME", 78.0),
     ];
+    let lat = FxLatitude::default();
     for (name, floor) in floors {
         let samples = read_pcm(&root.join(format!("g729-core/{name}.IN")));
         let bit_bytes = std::fs::read(root.join(format!("g729-core/{name}.BIT"))).unwrap();
@@ -218,7 +225,7 @@ fn locked_history_lsp_agreement_floors() {
         let mut speech = [0.0f32; L_WINDOW];
         let mut prev_q: [f32; M] =
             std::array::from_fn(|i| ((i + 1) as f32 * std::f32::consts::PI / 11.0).cos());
-        let mut locked = LspReconstructor::new();
+        let mut history = startup_history_q13();
 
         let (mut tot, mut hit) = (0usize, 0usize);
         for f in 0..n_frames {
@@ -237,13 +244,13 @@ fn locked_history_lsp_agreement_floors() {
                 }
                 None => prev_q,
             };
-            let omega: [f32; M] = std::array::from_fn(|i| lsp_to_lsf_q13(q[i]) as f32 / 8192.0);
+            let omega_q13: [i32; M] = std::array::from_fn(|i| lsp_to_lsf_q13(q[i]));
 
             let rf = parse_frame(&bit_bytes[f * FRAME_BYTES..(f + 1) * FRAME_BYTES]).unwrap();
             let FrameKind::Active(_) = rf else { continue };
             let rp = unpack_parameters(&rf).unwrap();
 
-            let ours = search_lsp_indices(&omega, locked.history());
+            let ours = search_lsp_indices_q13(&omega_q13, &history, &lat);
             tot += 1;
             if ours.l0 == rp.l0 as usize
                 && ours.l1 == rp.l1 as usize
@@ -254,14 +261,13 @@ fn locked_history_lsp_agreement_floors() {
             }
 
             // Lock the MA history to the reference's transmitted indices.
-            locked
-                .reconstruct_frame(
-                    rp.l0 as usize,
-                    rp.l1 as usize,
-                    rp.l2 as usize,
-                    rp.l3 as usize,
-                )
-                .expect("reference indices are in range");
+            advance_history_q13(
+                &mut history,
+                rp.l1 as usize,
+                rp.l2 as usize,
+                rp.l3 as usize,
+                &lat,
+            );
         }
         let rate = pct(hit, tot);
         println!("{name}: locked-history LSP ALL-indices agreement {rate:.1}% ({hit}/{tot})");
