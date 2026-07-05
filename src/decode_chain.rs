@@ -550,6 +550,24 @@ impl FrameDecoder {
         Ok(self.synthesizer.synthesize_frame(&frame))
     }
 
+    /// As [`Self::decode_parameters_to_speech`], additionally returning
+    /// the §4.1 [`DecodedFrame`] alongside the synthesized speech — the
+    /// pair an external post-processing cascade (e.g. the Annex A
+    /// [`crate::annex_a::AnnexAPostfilterCascade`]) needs to run in
+    /// place of the built-in §4.2 cascade.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::decode_parameters`].
+    pub fn decode_parameters_with_speech(
+        &mut self,
+        params: &Parameters,
+    ) -> Result<(DecodedFrame, SynthesizedFrame), FrameDecodeError> {
+        let frame = self.decode_parameters(params)?;
+        let speech = self.synthesizer.synthesize_frame(&frame);
+        Ok((frame, speech))
+    }
+
     /// Decode one 164-byte ITU serial frame all the way to the §4.2
     /// post-processed decoder output `sf′(n)`.
     ///

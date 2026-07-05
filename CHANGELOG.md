@@ -8,6 +8,30 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 390 lands the **Annex A (reduced-complexity) decoder**
+  (`annex_a`): the §A.4 decoder-side deltas over the unchanged §4.1
+  parameter chain + §4.1.6 synthesis, transcribed from the in-repo
+  Recommendation Annex A prose + equation rasters (eqs (A.11)–(A.15)):
+  the §A.4.2.1 **integer-delay** long-term postfilter (search
+  `[T_cl − 3, T_cl + 3]` on the *current subframe's* transmitted
+  delay, `T_cl ≤ 140`), the §A.4.2.2 short-term postfilter without
+  `1/g_f`, the §A.4.2.3 tilt without `1/g_t` (eq (A.14) `k′_1` from
+  the length-22 truncated impulse response; `γ_t = 0.8` iff
+  `k′_1 < 0`, else disabled), the Annex A cascade order (numerator →
+  tilt → synthesis), and the eq (A.15) **energy-ratio** AGC
+  (`√(Σŝ²/Σsf²)`, smoothing 0.9/0.1). `AnnexADecoder` +
+  `AnnexAPostfilterCascade` (with `FrameDecoder::
+  decode_parameters_with_speech` exposing the frame + synthesis pair).
+  Validated black-box against the staged `g729a` corpus
+  (`tests/annex_a_conformance.rs`): first-subframe deviations 2.4–4.5
+  PCM units across all six clean vectors (same 8-unit band as the base
+  harness), whole-vector RMS ratios 7.1–10.6 under the same bounded
+  §3.9-gain-gap ceiling, and per-frame gain-normalised shape distance
+  at parity with the base cascade (3.577 vs 3.552 summed; the §3.9
+  gain gap dominates both at current fidelity, so the harness pins
+  parity + a regression ceiling). Encoder-side §A.3 deltas are not
+  implemented: the §A.3.8.1 depth-first ACELP pulse schedule is
+  prose-unpinned (deferred to the barred reference C — docs gap).
 - Round 390 lands the **fixed-point Q13 §3.2.4 quantiser search**
   (`lsp_quantize::search_lsp_indices_q13`), implementing the L0
   MA-predictor mode selection exactly as described by the newly-staged
