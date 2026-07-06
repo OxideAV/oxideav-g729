@@ -8,6 +8,28 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 390 lands the **Annex A (reduced-complexity) encoder**
+  (`annex_a_encoder`): the §A.3 analysis chain assembled from the
+  unchanged main-body stages plus the five prose-pinned
+  simplifications (eqs (A.1)–(A.10)): the fixed `γ = 0.75`
+  quantized-LP weighting (`W(z)/Â(z) = 1/Â(z/γ)` — single all-pole
+  impulse response + target filter), the eq (A.2)/(A.3) low-pass
+  weighted speech `1/[Â(z/γ)(1 − 0.7z⁻¹)]` for the open-loop
+  correlation, the §A.3.4 **fast open-loop pitch** (eq (A.4)
+  even-sample decimated correlation, eq (A.5) normalisation,
+  even-delays-first + ±1 refinement in `[80, 143]`, favour-lower
+  cascade), the §A.3.7 **fast adaptive-codebook search** (eq (A.7)
+  backward-filtered target × unfiltered past excitation, ±⅓ fractions
+  via the eq (A.8) `b30` interpolation), and the §A.3.10
+  filtering-free eq (A.10) memory update. §A.3.2.5 interpolates only
+  the quantized LSP track. Measured against the G.729A reference
+  `.BIT` corpus (`annex_a_encoder_parameter_floors`): L0 62.5–94.6%,
+  L1 33.8–100%, T1±2 57.8–86.4% (floors pinned per vector); the whole
+  3750-frame g729a SPEECH vector encoded by us decodes finitely
+  through both the main-body and Annex A decoders (§A.1 bit-stream
+  interoperability). Documented gap: the §A.3.8.1 depth-first ACELP
+  pulse schedule is prose-unpinned (Annex A defers it to the barred
+  reference C); the main-body focused search is used instead.
 - Round 390 lands the **Annex A (reduced-complexity) decoder**
   (`annex_a`): the §A.4 decoder-side deltas over the unchanged §4.1
   parameter chain + §4.1.6 synthesis, transcribed from the in-repo

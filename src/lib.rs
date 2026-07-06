@@ -308,6 +308,7 @@ use oxideav_core::RuntimeContext;
 
 pub mod adaptive_gain_control;
 pub mod annex_a;
+pub mod annex_a_encoder;
 pub mod annex_b;
 pub mod closed_loop_pitch;
 pub mod cng;
