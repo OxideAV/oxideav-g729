@@ -25,8 +25,11 @@
 use std::path::{Path, PathBuf};
 
 use oxideav_g729::annex_a::AnnexADecoder;
+use oxideav_g729::annex_a_encoder::AnnexAEncoder;
 use oxideav_g729::decode_chain::FrameDecoder;
-use oxideav_g729::serial::{self, FrameKind, FRAME_BYTES};
+use oxideav_g729::parameters::unpack_parameters;
+use oxideav_g729::pitch_decode::decode_t1_from_p1;
+use oxideav_g729::serial::{self, parse_frame, FrameKind, FRAME_BYTES};
 
 const SAMPLES_PER_FRAME: usize = 80;
 const SUBFRAME: usize = 40;
@@ -248,4 +251,115 @@ fn annex_a_cascade_tracks_reference_at_base_parity() {
         sum_a < 4.5,
         "Annex A summed shape distance regressed to {sum_a:.4} (ceiling 4.5)"
     );
+}
+
+/// Reads a 16-bit little-endian PCM `.IN` file as f32 sample values.
+fn read_pcm(path: &Path) -> Vec<f32> {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    bytes
+        .chunks_exact(2)
+        .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])))
+        .collect()
+}
+
+/// §A.3 encoder parameter-agreement floors against the G.729A
+/// reference `.BIT` streams, pinned per vector.
+///
+/// Measured (round 390, first Annex A encoder cut — fast open-loop /
+/// fast closed-loop / γ = 0.75 quantized-LP weighting, main-body
+/// focused fixed-codebook search in place of the prose-unpinned
+/// depth-first schedule): L0 62.5–94.6%, L1 33.8–100%,
+/// T1±2 57.8–86.4%. Floors sit ~3–6 points under the measured rates;
+/// ratchet as the Annex A chain closes on the reference.
+#[test]
+fn annex_a_encoder_parameter_floors() {
+    let Some(root) = conformance_root() else {
+        eprintln!("corpus absent — skip");
+        return;
+    };
+    // (vector, L0 floor, L1 floor, T1±2 floor).
+    let floors: [(&str, f64, f64, f64); 6] = [
+        ("ALGTHM", 88.0, 74.0, 77.0),
+        ("FIXED", 87.0, 63.0, 58.0),
+        ("LSP", 84.0, 42.0, 83.0),
+        ("PITCH", 91.0, 30.0, 76.0),
+        ("SPEECH", 83.0, 48.0, 72.0),
+        ("TAME", 59.0, 96.0, 53.0),
+    ];
+    for (name, f_l0, f_l1, f_t1) in floors {
+        let samples = read_pcm(&root.join(format!("g729a/{name}.IN")));
+        let bit_bytes = std::fs::read(root.join(format!("g729a/{name}.BIT"))).unwrap();
+        let n_frames = (samples.len() / SAMPLES_PER_FRAME).min(bit_bytes.len() / FRAME_BYTES);
+
+        let mut enc = AnnexAEncoder::new();
+        let (mut tot, mut l0, mut l1, mut t1) = (0usize, 0usize, 0usize, 0usize);
+        for f in 0..n_frames {
+            let mut frame = [0.0f32; SAMPLES_PER_FRAME];
+            frame.copy_from_slice(&samples[f * SAMPLES_PER_FRAME..(f + 1) * SAMPLES_PER_FRAME]);
+            let out = enc.encode_frame(&frame);
+            let rf = parse_frame(&bit_bytes[f * FRAME_BYTES..(f + 1) * FRAME_BYTES]).unwrap();
+            let FrameKind::Active(_) = rf else { continue };
+            let rp = unpack_parameters(&rf).unwrap();
+            tot += 1;
+            if out.params.l0 == rp.l0 {
+                l0 += 1;
+            }
+            if out.params.l1 == rp.l1 {
+                l1 += 1;
+            }
+            let ot = decode_t1_from_p1(out.params.p1);
+            let rt = decode_t1_from_p1(rp.p1);
+            if (ot.int_t - rt.int_t).abs() <= 2 {
+                t1 += 1;
+            }
+        }
+        let pct = |h: usize| 100.0 * h as f64 / tot.max(1) as f64;
+        println!(
+            "g729a/{name}: frames={tot} L0={:.1}% L1={:.1}% T1±2={:.1}%",
+            pct(l0),
+            pct(l1),
+            pct(t1)
+        );
+        assert!(pct(l0) >= f_l0, "{name}: L0 {:.1}% < {f_l0}", pct(l0));
+        assert!(pct(l1) >= f_l1, "{name}: L1 {:.1}% < {f_l1}", pct(l1));
+        assert!(pct(t1) >= f_t1, "{name}: T1 {:.1}% < {f_t1}", pct(t1));
+    }
+}
+
+/// Every frame the Annex A encoder emits over the whole g729a SPEECH
+/// vector decodes cleanly through BOTH decoders (bit-stream
+/// interoperability, §A.1) with finite output.
+#[test]
+fn annex_a_own_stream_decodes_cleanly_corpus() {
+    let Some(root) = conformance_root() else {
+        eprintln!("corpus absent — skip");
+        return;
+    };
+    let samples = read_pcm(&root.join("g729a/SPEECH.IN"));
+    let n_frames = samples.len() / SAMPLES_PER_FRAME;
+
+    let mut enc = AnnexAEncoder::new();
+    let mut dec_main = FrameDecoder::new();
+    let mut dec_a = AnnexADecoder::new();
+    let mut peak = 0.0f32;
+    for f in 0..n_frames {
+        let mut frame = [0.0f32; SAMPLES_PER_FRAME];
+        frame.copy_from_slice(&samples[f * SAMPLES_PER_FRAME..(f + 1) * SAMPLES_PER_FRAME]);
+        let wire = enc.encode_frame_to_serial(&frame);
+        let synth = dec_main
+            .decode_serial_frame_to_speech(&wire)
+            .unwrap_or_else(|e| panic!("frame {f}: main decoder rejected: {e:?}"));
+        for s in synth.speech() {
+            assert!(s.is_finite(), "frame {f}: non-finite main decode");
+        }
+        let out = dec_a
+            .decode_serial_frame_to_postfiltered(&wire)
+            .unwrap_or_else(|e| panic!("frame {f}: Annex A decoder rejected: {e:?}"));
+        for s in out {
+            assert!(s.is_finite(), "frame {f}: non-finite Annex A decode");
+            peak = peak.max(s.abs());
+        }
+    }
+    println!("decoded {n_frames} own-encoded g729a frames, peak |s| = {peak}");
+    assert!(peak > 0.0, "reconstruction should be non-silent");
 }
