@@ -17,6 +17,51 @@ into the `oxideav-core` codec registry** (id `"g729"`, decode + encode
 over the raw 10-octet wire framing) with the dual-API
 `decoder::make_decoder` / `encoder::make_encoder` endpoints.
 
+## Round 390 — fixed-point L0 search, Annex A decoder + encoder
+
+- **Fixed-point Q13 §3.2.4 quantiser search** (`search_lsp_indices_q13`)
+  — the L0 MA-predictor mode selection implemented exactly per the
+  staged clean-room algorithm doc `docs/audio/g729/l0-mode-selection.md`
+  (docs commit `b9e48a4`): eq (23) targets through the Q12 `fg_sum_inv`
+  reciprocal, integer split-stage searches, eq (20) reconstruction on
+  the Q13 grid, ω-domain eq (21) argmin over both predictors. The
+  doc's unpinned fixed-point latitude (reconstruction-shift rounding,
+  eq (21) per-term combine, tie-break) is exposed as `FxLatitude` and
+  pinned black-box (320+ configs swept): prediction shift *rounds*,
+  reciprocal/rearrangement shifts *truncate*, exact wide product,
+  mode 0 holds ties. Locked-history all-indices agreement:
+  LSP 77.5 → 77.7%, SPEECH 80.9 → 81.2% (corpus 82.9 → 83.1%);
+  end-to-end FIXED L0 88.3 → 90.8%, L1 64.2 → 70.0%. **Measured
+  negative result:** TAME's 24 residual L0 flips are *not* fixed-point
+  near-ties — they sit in a self-sustaining 5-frame reference index
+  cycle with systematic ~2.1% ω-domain margins under identical stage
+  indices (flipping needs ~100 Q13-LSB input perturbations), so an
+  unstaged structural element of the reference's final mode compare
+  remains (docs gap; every alternative mode total — stage-sum,
+  residual-full, single-folded product, `Lsp_pre_select`-style
+  pre-selection — collapses corpus agreement to 34–65%).
+- **Annex A decoder** (`annex_a`) — the §A.4.2 reduced-complexity
+  postfilter cascade (eqs (A.11)–(A.15)): integer-delay harmonic
+  postfilter (`[T_cl − 3, T_cl + 3]`, per-subframe anchor, ≤ 140), no
+  `1/g_f`/`1/g_t`, length-22 tilt impulse response with
+  `γ_t = 0.8/0`, numerator → tilt → synthesis order, energy-ratio
+  AGC (`√(Σŝ²/Σsf²)`, 0.9/0.1). Validated on the staged `g729a`
+  corpus: first-subframe deviations 2.4–4.5 PCM units (8-unit band),
+  RMS ratios 7.1–10.6 under the bounded §3.9-gain-gap ceiling, shape
+  distance at base-cascade parity.
+- **Annex A encoder** (`annex_a_encoder`) — the §A.3 fast analysis
+  chain: fixed `γ = 0.75` quantized-LP weighting
+  (`W(z)/Â(z) = 1/Â(z/γ)`), eq (A.2)/(A.3) low-pass weighted speech,
+  eq (A.4)/(A.5) decimated fast open-loop pitch (even-first + ±1 in
+  `[80, 143]`), eq (A.7)/(A.8) fast closed-loop search
+  (backward-filtered target, `b30` fractions), eq (A.10)
+  filtering-free memory update. Measured vs the G.729A reference
+  `.BIT` corpus: L0 62.5–94.6%, L1 33.8–100%, T1±2 57.8–86.4%
+  (floors pinned); its whole SPEECH stream decodes through both
+  decoders (§A.1 interoperability). The §A.3.8.1 depth-first ACELP
+  pulse schedule is prose-unpinned (docs gap) — the main-body focused
+  search stands in.
+
 ## Round 388 — taming, the split-stage metric, registry wiring
 
 - **Taming procedure** (`taming` module) — the encoder-side
@@ -290,15 +335,24 @@ gap as a regression guard. The decode stages:
   colour, so `AnnexBOutput::ComfortNoise` surfaces the raw excitation
   until that envelope can be reconstructed. (Docs-gap: SID-LSP VQ subset
   codebooks + `lspSid_reset`.)
-- **Bit-exact encoding** — rounds 385/388 moved the LSF chain onto the
-  reference's fixed-point grid and metric (16-bit signal path, Q12 LP
-  coefficients, table-lookup eq (18), residual-domain split-stage
-  MSE) but the decisions are not yet exact. The dominant measured
-  residual after round 388 is the **fixed-point §3.2.4 mode-selection
-  (`L0`) arithmetic** (TAME's locked-history misses are 24/25 pure
-  mode flips; probed and rejected: weight saturation/quantisation,
-  clamp-based mode rejection, residual-domain mode totals). The §3.9
-  decode-side Q-format gain saturation gap is the same family.
+- **Bit-exact encoding** — rounds 385/388/390 moved the LSF chain onto
+  the reference's fixed-point grid, metric, and (round 390) the full
+  integer Q13 search. Two measured residuals remain: (1) TAME's 24
+  locked-history `L0` flips, now **measured to be outside the staged
+  fixed-point latitude** (systematic ~2.1% ω-domain margins in a
+  5-frame reference index cycle; every swept rounding/tie-break/
+  mode-total alternative fails) — an unstaged structural element of
+  the reference's final mode compare (docs gap); (2) the remaining
+  LSP/SPEECH stage misses trace to front-end ω divergence whose exact
+  fixed-point internals (the DPF Levinson recursion, the Word32
+  Chebyshev root-search arithmetic) are not staged (docs gap). The
+  §3.9 decode-side Q-format gain saturation gap is the same family.
+- **Annex A depth-first ACELP search** (§A.3.8.1) — the Annex A prose
+  pins only the search's existence and fixed complexity; the
+  pulse-combination schedule lives only in the barred reference C
+  (docs gap). The Annex A encoder uses the main-body focused search
+  (bit-stream legal, non-matching `C/S` choices). §A.4.4 concealment
+  (clause 4.4 without voicing detection) is also not yet wired.
 - The remaining numeric tables (gain-quantizer coefficient matrix,
   Annex B SID-LSP VQ, the LSF→LSP cos direction
   `table2`/`slope_cos`/`slope_acos`) are staged under
