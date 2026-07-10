@@ -17,6 +17,31 @@ into the `oxideav-core` codec registry** (id `"g729"`, decode + encode
 over the raw 10-octet wire framing) with the dual-API
 `decoder::make_decoder` / `encoder::make_encoder` endpoints.
 
+## Round 410 — the γ̂ reconstruction grid: the "§3.9 gain gap" was a scale error
+
+- **Root cause found and fixed.** The long-documented ≈ 7–10× whole-vector
+  decode over-gain (previously attributed to a missing fixed-point
+  saturation of the §3.9.1 gain predictor) was actually the **eq (74)
+  γ̂ reconstruction grid**: the GA/GB codebook `γ` columns sum to the
+  correction factor on a **2^13 grid**, not the 2^12 grid the staged
+  table annotation suggests. The Recommendation never states the codebook
+  column scaling (Table 12 gives only array dimensions), so the grid was
+  pinned **black-box** against the ITU conformance corpus: a 2^12 reading
+  over-gains every clean vector by exactly `2^(1+Σb_i)` = 2^2.79 ≈ 6.9×
+  (the γ̂ scale error compounds through the eq (69)/(72) MA feedback
+  `Û^(m) = 20·log10 γ̂`; measured 7.0–9.4×), a 2^14 reading under-gains by
+  the inverse (0.16–0.20×), and the 2^13 reading collapses the
+  whole-corpus RMS ratio to **0.97–1.36** (TAME 2.85 base / 1.60 g729a).
+  The encoder's GA preselection ranks on the same grid.
+- **Exactness metrics harness** — `tests/pcm_conformance.rs` now tracks
+  per-vector sample correlation / max |Δ| / bit-exact share against the
+  `.PST` references with pinned correlation floors, and pins the RMS
+  ratio inside a `[0.7, 3.2)` window (a single-Q-step γ̂ regression lands
+  at ≈ 6.9× or ≈ 0.15×, far outside). Long vectors still decorrelate
+  (SPEECH corr ≈ 0.11) because float rounding drift compounds through
+  the adaptive-codebook feedback — closing that is the fixed-point
+  decode path's job, not a gain-scale issue.
+
 ## Round 390 — fixed-point L0 search, Annex A decoder + encoder
 
 - **Fixed-point Q13 §3.2.4 quantiser search** (`search_lsp_indices_q13`)
@@ -179,13 +204,12 @@ cascade; the `*_to_speech` entry points return the pre-postfilter `ŝ(n)`;
 and the `*_concealed` entry points add §4.4 frame-erasure concealment.
 From the clause-4.3 zero state the first 5 ms subframe reconstructs to
 within a few PCM units of the staged `.PST` references on every clean
-vector of both corpora. Beyond the first frame the amplitude is a
-**bounded** multiplicative over-gain (whole-vector RMS ratio ≈ 7–10×):
-the float path omits the fixed-point reference's Q-format saturation of
-the §3.9.1 gain predictor (a documented docs-gap — the §3.9 gain
-fixed-point saturation), so the predicted energy `Ẽ^(m)` over-predicts
-without diverging. `tests/pcm_conformance.rs` measures and bounds this
-gap as a regression guard. The decode stages:
+vector of both corpora, and with the round-410 γ̂-grid fix the
+whole-vector RMS ratio sits at ≈ 0.97–1.36 (TAME 2.85). The remaining
+sample-level divergence is float-vs-16-bit rounding drift compounding
+through the adaptive-codebook feedback; `tests/pcm_conformance.rs`
+tracks per-vector correlation / max |Δ| / bit-exact share as the
+ratchet toward the fixed-point decode path. The decode stages:
 
 - **Bit-exact numeric-tables foundation** — the LP-analysis windowing,
   LSF cosine grid, pitch interpolation filters, MA gain-prediction
@@ -310,17 +334,17 @@ gap as a regression guard. The decode stages:
 
 ### What is NOT yet wired up
 
-- **PCM-bit-exact decode** — beyond the first frame the amplitude is a
-  bounded multiplicative over-gain (whole-vector RMS ratio ≈ 7–10×, up to
-  ≈ 18× on the TAME vector) because the float path omits the fixed-point
-  reference's Q-format saturation of the §3.9.1 gain predictor. The spec
-  prose (clause 3.9.1, eqs (66)–(72)) specifies **no** such clamp — it is
-  reference-code-only, so this is a hard docs-gap (the §3.9 gain
-  fixed-point saturation). `tests/pcm_conformance.rs` bounds the gap as a
-  regression guard. The §4.2 cascade — including the §4.2.1 two-pass
-  long-term postfilter wired this round — is chained end-to-end into
-  `decode_*_to_postfiltered`; the `*_to_speech` entry points
-  intentionally return the pre-postfilter reconstructed speech `ŝ(n)`.
+- **PCM-bit-exact decode** — the round-410 γ̂-grid fix closed the
+  historical amplitude gap (whole-vector RMS ratio now ≈ 0.97–1.36,
+  TAME 2.85), but sample-level agreement still drifts over long vectors
+  (SPEECH correlation ≈ 0.11 over 3750 frames) because the float decode
+  arithmetic diverges from the reference's 16-bit fixed-point grid and
+  the error compounds through the adaptive-codebook past-excitation
+  feedback. Bit-exactness requires the decode chain on the Word16/Word32
+  operator grid (Recommendation clause 5, Tables 10/11). The §4.2
+  cascade is chained end-to-end into `decode_*_to_postfiltered`; the
+  `*_to_speech` entry points intentionally return the pre-postfilter
+  reconstructed speech `ŝ(n)`.
 - **Annex B comfort-noise spectral envelope** (§B.4.2.2 SID-LSP VQ
   dequant) — blocked on absent numeric tables. The SID-LSP VQ subset
   codebooks (the §B.4.2.2 32-address first-stage subset + the two

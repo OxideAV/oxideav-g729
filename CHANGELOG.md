@@ -6,6 +6,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Round 410 **fixes the eq (74) γ̂ reconstruction grid** — the GA/GB
+  codebook `γ` columns sum to the fixed-codebook gain correction factor
+  on a 2^13 grid (not 2^12): the Recommendation never states the column
+  scaling (Table 12 lists only dimensions), and the black-box divisor
+  sweep over the ITU conformance corpus lands at 6.9–10× / ≈ 1.0× /
+  0.15–0.2× whole-vector RMS ratio for 2^12 / 2^13 / 2^14 (the scale
+  error compounds through the eq (69)/(72) MA feedback to exactly
+  `2^(1+Σb_i)` ≈ 6.9×). This retires the historical "§3.9 gain-
+  saturation gap": decode RMS ratios collapse from ≈ 7–10× (TAME 18.5×)
+  to 0.97–1.36 (TAME 2.85). The encoder GA preselection ranks on the
+  same grid. `tests/pcm_conformance.rs` now pins the RMS ratio inside a
+  `[0.7, 3.2)` window and tracks per-vector correlation / max |Δ| /
+  bit-exact share with pinned correlation floors.
+
 ### Added
 
 - Round 390 lands the **Annex A (reduced-complexity) encoder**

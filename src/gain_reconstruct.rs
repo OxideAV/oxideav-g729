@@ -36,8 +36,22 @@
 //!
 //! - GA / GB column-0 entries are Q14, so the per-row contribution
 //!   to `ĝ_p` is interpreted as `v / 2^14`.
-//! - GA / GB column-1 entries are Q12, so the per-row contribution
-//!   to `γ̂` is interpreted as `v / 2^12`.
+//! - GA / GB column-1 entries sum to the correction factor `γ̂` on a
+//!   **2^13 grid** (`v / 2^13`) relative to the §3.9.1 predictor
+//!   constants the prose pins exactly (eq (66) energy over a ±1-pulse
+//!   codevector, `Ē = 30 dB`, eq (71)). The Recommendation itself
+//!   never states the codebook column scaling (Table 12 gives only
+//!   the array dimensions), so the grid was pinned **black-box**
+//!   against the ITU conformance corpus: a 2^12 reading over-gains
+//!   every clean vector by exactly `2^(1+Σb_i)` = 2^2.79 ≈ 6.9×
+//!   (the γ̂ scale error compounds through the eq (69)/(72) MA
+//!   feedback `Û^(m) = 20·log10 γ̂`, measured whole-vector RMS
+//!   ratios 7.0–9.4×), a 2^14 reading under-gains by the inverse
+//!   (measured 0.16–0.20×), and the 2^13 reading collapses the
+//!   whole-corpus RMS ratio to ≈ 1.0. The staged CSV `.meta`
+//!   annotation records the column as "Q12"; that annotation
+//!   describes a different internal convention than the effective
+//!   eq (74)→eq (65) reconstruction grid measured here.
 //!
 //! Each stage's contribution is summed in its own Q-format and the
 //! result is converted to the same `f32` boundary type that the
@@ -56,9 +70,15 @@ use crate::tables::{gain_ga_entry, gain_gb_entry, GAIN_VQ_COL_GC, GAIN_VQ_COL_GP
 /// GA / GB codebooks.
 const Q14_DIVISOR: f32 = 16384.0;
 
-/// Q12 scaling divisor (`2^12 = 4096`) for the `γ` columns of the
-/// GA / GB codebooks.
-const Q12_DIVISOR: f32 = 4096.0;
+/// Effective scaling divisor (`2^13 = 8192`) for the `γ` columns of
+/// the GA / GB codebooks — the grid on which the eq (74) sum becomes
+/// the dimensionless correction factor `γ̂` that eq (65) multiplies
+/// into the §3.9.1 predicted gain. Pinned black-box against the ITU
+/// conformance corpus (see the module-level Q-format notes: the
+/// 2^12 / 2^13 / 2^14 sweep lands at 6.9–10× / ≈ 1.0× / 0.15–0.2×
+/// whole-vector RMS ratio, and the MA-feedback exponent `1 + Σb_i`
+/// exactly explains the 2^12 reading's ≈ 6.9× signature).
+const GC_DIVISOR: f32 = 8192.0;
 
 /// Quantised gain pair reconstructed from one (GA, GB) index pair.
 ///
@@ -146,8 +166,9 @@ impl From<GainIndexMapError> for GainReconstructError {
 /// Reconstructs the quantised `(ĝ_p, γ̂)` pair from a (GA, GB)
 /// codebook-index pair per spec eqs (73) / (74).
 ///
-/// The summation is done in the per-component Q-format (Q14 for
-/// column 0, Q12 for column 1) using `i32` intermediates, then
+/// The summation is done in the per-component grid (Q14 for
+/// column 0, the black-box-pinned 2^13 grid for column 1) using
+/// `i32` intermediates, then
 /// scaled to `f32` at the boundary. Out-of-range indices return a
 /// typed error rather than panicking, so the function is safe to
 /// call directly on raw codeword integers.
@@ -171,12 +192,13 @@ pub fn reconstruct_gains(ga: usize, gb: usize) -> Result<QuantisedGains, GainRec
 
     // eq (73): ĝ_p = GA[GA].gp + GB[GB].gp (column 0; Q14 in both stages).
     let gp_sum_q14 = i32::from(ga_row[GAIN_VQ_COL_GP]) + i32::from(gb_row[GAIN_VQ_COL_GP]);
-    // eq (74): γ̂ = GA[GA].gc + GB[GB].gc (column 1; Q12 in both stages).
-    let gc_sum_q12 = i32::from(ga_row[GAIN_VQ_COL_GC]) + i32::from(gb_row[GAIN_VQ_COL_GC]);
+    // eq (74): γ̂ = GA[GA].gc + GB[GB].gc (column 1; summed on the
+    // common 2^13 grid, black-box-pinned — see `GC_DIVISOR`).
+    let gc_sum = i32::from(ga_row[GAIN_VQ_COL_GC]) + i32::from(gb_row[GAIN_VQ_COL_GC]);
 
     Ok(QuantisedGains {
         g_p_hat: gp_sum_q14 as f32 / Q14_DIVISOR,
-        gamma_hat: gc_sum_q12 as f32 / Q12_DIVISOR,
+        gamma_hat: gc_sum as f32 / GC_DIVISOR,
     })
 }
 
@@ -249,14 +271,14 @@ mod tests {
     };
 
     /// Per the staged CSVs GA[0] = (1, 1516) and GB[0] = (826, 2005)
-    /// (both rows column 0 = Q14, column 1 = Q12). The reconstruction
-    /// at (GA = 0, GB = 0) sums the column values and divides by the
-    /// per-column Q divisors.
+    /// (column 0 = Q14, column 1 on the black-box-pinned 2^13 grid).
+    /// The reconstruction at (GA = 0, GB = 0) sums the column values
+    /// and divides by the per-column divisors.
     #[test]
     fn reconstruct_at_zero_zero_matches_first_rows() {
         let g = reconstruct_gains(0, 0).expect("indices in range");
         let expected_gp = (1 + 826) as f32 / 16384.0;
-        let expected_gc = (1516 + 2005) as f32 / 4096.0;
+        let expected_gc = (1516 + 2005) as f32 / 8192.0;
         assert!((g.g_p_hat - expected_gp).abs() < 1e-7);
         assert!((g.gamma_hat - expected_gc).abs() < 1e-7);
     }
@@ -272,7 +294,7 @@ mod tests {
         let ga_row = GAIN_QUANT_CODEBOOK_GA_Q14_Q12[ga];
         let gb_row = GAIN_QUANT_CODEBOOK_GB_Q14_Q12[gb];
         let expected_gp = (i32::from(ga_row[0]) + i32::from(gb_row[0])) as f32 / 16384.0;
-        let expected_gc = (i32::from(ga_row[1]) + i32::from(gb_row[1])) as f32 / 4096.0;
+        let expected_gc = (i32::from(ga_row[1]) + i32::from(gb_row[1])) as f32 / 8192.0;
         assert!((g.g_p_hat - expected_gp).abs() < 1e-7);
         assert!((g.gamma_hat - expected_gc).abs() < 1e-7);
     }
@@ -335,18 +357,19 @@ mod tests {
     }
 
     /// γ̂ is the fixed-codebook gain *correction factor* per spec
-    /// §3.9.1 / §3.9.2; the codebook tabulates it in Q12, so the
+    /// §3.9.1 / §3.9.2; on the black-box-pinned 2^13 grid the
     /// reconstructed value over all 128 (GA, GB) pairs lands in a
-    /// generous plausibility window of `0.0..=11.0` (worst-case row
-    /// pairs hit ≈10.12). A Q14 / Q12 divisor confusion would push
-    /// the result well outside this window (≈40 or ≈2.5 respectively).
+    /// plausibility window of `0.0..=5.5` (worst-case row pairs hit
+    /// ≈5.06, the smallest non-degenerate pair ≈0.214). A divisor
+    /// confusion by one Q step would push the extremes to ≈10.1 or
+    /// ≈2.53 respectively.
     #[test]
     fn gamma_hat_lies_in_plausible_range() {
         for ga in 0..NCODE1 {
             for gb in 0..NCODE2 {
                 let g = reconstruct_gains(ga, gb).unwrap();
                 assert!(
-                    (0.0..=11.0).contains(&g.gamma_hat),
+                    (0.0..=5.5).contains(&g.gamma_hat),
                     "γ̂ = {} out of range at ({ga}, {gb})",
                     g.gamma_hat,
                 );
@@ -358,7 +381,7 @@ mod tests {
     /// the table column convention; the round-trip property
     /// `reconstruct(ga, gb) ==
     ///     (GA[ga][0] + GB[gb][0]) / 2^14
-    ///   + (GA[ga][1] + GB[gb][1]) / 2^12` is exercised explicitly
+    ///   + (GA[ga][1] + GB[gb][1]) / 2^13` is exercised explicitly
     /// for a hand-picked pair distinct from `(0, 0)`.
     #[test]
     fn reconstruct_hand_picked_pair() {
@@ -368,7 +391,7 @@ mod tests {
         let ga_row = GAIN_QUANT_CODEBOOK_GA_Q14_Q12[ga];
         let gb_row = GAIN_QUANT_CODEBOOK_GB_Q14_Q12[gb];
         let expected_gp = (i32::from(ga_row[0]) + i32::from(gb_row[0])) as f32 / 16384.0;
-        let expected_gc = (i32::from(ga_row[1]) + i32::from(gb_row[1])) as f32 / 4096.0;
+        let expected_gc = (i32::from(ga_row[1]) + i32::from(gb_row[1])) as f32 / 8192.0;
         assert!((g.g_p_hat - expected_gp).abs() < 1e-7);
         assert!((g.gamma_hat - expected_gc).abs() < 1e-7);
     }
@@ -519,11 +542,12 @@ mod tests {
 
     /// Column convention: column 0 (`GAIN_VQ_COL_GP`) is Q14 and is
     /// the adaptive-codebook-gain half; column 1
-    /// (`GAIN_VQ_COL_GC`) is Q12 and is the fixed-codebook-gain
-    /// correction half. Confirm by changing GA but holding GB
-    /// constant: the reconstructed `ĝ_p` change should match the
-    /// GA row's column-0 delta divided by 2^14, the reconstructed
-    /// `γ̂` change should match column-1 delta divided by 2^12.
+    /// (`GAIN_VQ_COL_GC`) is on the 2^13 grid and is the
+    /// fixed-codebook-gain correction half. Confirm by changing GA
+    /// but holding GB constant: the reconstructed `ĝ_p` change should
+    /// match the GA row's column-0 delta divided by 2^14, the
+    /// reconstructed `γ̂` change should match column-1 delta divided
+    /// by 2^13.
     #[test]
     fn per_column_q_format_isolation() {
         let gb = 0;
@@ -533,10 +557,10 @@ mod tests {
         let g_b = reconstruct_gains(ga_b, gb).unwrap();
         let dgp_q14 = i32::from(GAIN_QUANT_CODEBOOK_GA_Q14_Q12[ga_b][0])
             - i32::from(GAIN_QUANT_CODEBOOK_GA_Q14_Q12[ga_a][0]);
-        let dgc_q12 = i32::from(GAIN_QUANT_CODEBOOK_GA_Q14_Q12[ga_b][1])
+        let dgc = i32::from(GAIN_QUANT_CODEBOOK_GA_Q14_Q12[ga_b][1])
             - i32::from(GAIN_QUANT_CODEBOOK_GA_Q14_Q12[ga_a][1]);
         assert!(((g_b.g_p_hat - g_a.g_p_hat) - dgp_q14 as f32 / 16384.0).abs() < 1e-6);
-        assert!(((g_b.gamma_hat - g_a.gamma_hat) - dgc_q12 as f32 / 4096.0).abs() < 1e-6);
+        assert!(((g_b.gamma_hat - g_a.gamma_hat) - dgc as f32 / 8192.0).abs() < 1e-6);
     }
 
     /// Pin that the codebook width matches the published [`GAIN_VQ_DIM`]
