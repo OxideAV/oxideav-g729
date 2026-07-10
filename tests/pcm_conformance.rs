@@ -260,23 +260,23 @@ fn per_vector_exactness_metrics() {
     };
 
     /// Pinned correlation floors (round-410 measurements minus a small
-    /// safety margin). The long vectors (LSP / PITCH / SPEECH) sit low
-    /// because float rounding drift compounds through the adaptive-
-    /// codebook past-excitation feedback over thousands of frames —
-    /// the drive to 1.0 is the fixed-point decode path.
+    /// safety margin — post eq (40) fraction-fold fix the float chain
+    /// measures 0.87–0.99, except g729a/TAME at 0.66 where the float
+    /// arithmetic still departs from the reference's saturating grid;
+    /// the fixed-point decode path is the drive to 1.0).
     fn corr_floor(corpus: &str, name: &str) -> f64 {
         match (corpus, name) {
-            ("g729-core", "ALGTHM") => 0.90,
-            ("g729-core", "FIXED") => 0.94,
-            ("g729-core", "LSP") => 0.60,
-            ("g729-core", "PITCH") => 0.48,
-            ("g729-core", "SPEECH") => 0.05,
+            ("g729-core", "ALGTHM") => 0.95,
+            ("g729-core", "FIXED") => 0.95,
+            ("g729-core", "LSP") => 0.84,
+            ("g729-core", "PITCH") => 0.90,
+            ("g729-core", "SPEECH") => 0.90,
             ("g729-core", "TAME") => 0.90,
-            ("g729a", "ALGTHM") => 0.88,
-            ("g729a", "FIXED") => 0.88,
-            ("g729a", "LSP") => 0.68,
-            ("g729a", "PITCH") => 0.50,
-            ("g729a", "SPEECH") => 0.04,
+            ("g729a", "ALGTHM") => 0.96,
+            ("g729a", "FIXED") => 0.93,
+            ("g729a", "LSP") => 0.94,
+            ("g729a", "PITCH") => 0.90,
+            ("g729a", "SPEECH") => 0.90,
             ("g729a", "TAME") => 0.60,
             _ => 0.0,
         }

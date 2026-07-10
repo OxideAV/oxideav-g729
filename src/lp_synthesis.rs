@@ -181,26 +181,31 @@ impl Synthesizer {
 
     /// Map a decoder fractional pitch delay `(int_t, frac)` —
     /// `frac ∈ {−1, 0, 1}`, `T = int_t + frac/3` — onto the eq (40)
-    /// `(k, t)` form where `t ∈ {0, 1, 2}` and `T = k + t/3`.
+    /// `(k, t)` form the [`Self::adaptive_sample`] read geometry
+    /// consumes.
     ///
-    /// Per the eq (39) / eq (40) fraction convention (clause 3.7,
-    /// "`t = 0, 1, 2` corresponds to the fractions 0, 1/3, 2/3"):
+    /// The two-branch b30 read in `adaptive_sample` evaluates the
+    /// band-limited past excitation at position `n − k + t/3` (write
+    /// `b30(j) ≈ sinc(j/3)` and expand either branch: the coefficient
+    /// of `u(m)` is `sinc(m − (n − k + t/3))` in both), so the phase
+    /// axis runs *against* the delay axis — the effective delay is
+    /// `k − t/3`, and `T = int_t + frac/3` folds with a negated
+    /// fraction and an upward borrow:
     ///
-    /// * `frac = 0`  → `k = int_t`,     `t = 0`  (`T = int_t`)
-    /// * `frac = 1`  → `k = int_t`,     `t = 1`  (`T = int_t + 1/3`)
-    /// * `frac = −1` → `k = int_t − 1`, `t = 2`  (`T = int_t − 1/3 =
-    ///   (int_t − 1) + 2/3`)
+    /// * `frac = 0`  → `k = int_t`,     `t = 0`
+    /// * `frac = −1` → `k = int_t`,     `t = 1`  (`T = int_t − 1/3`)
+    /// * `frac = +1` → `k = int_t + 1`, `t = 2`  (`T = (int_t+1) − 2/3`)
     ///
-    /// Both `t = 1` and `t = 2` are non-negative fractions of a single
-    /// base integer `k`, so the eq (40) sums always read past
-    /// excitation at non-negative offsets relative to `k`.
+    /// (Round 410: the previous `T = k + t/3` reading was measured
+    /// against the conformance corpus to interpolate every fractional
+    /// subframe 2/3 of a sample off, decorrelating voiced material.)
     #[inline]
     fn delay_to_kt(int_t: i32, frac: i32) -> (i32, i32) {
         match frac {
             0 => (int_t, 0),
-            1 => (int_t, 1),
-            // frac == -1
-            _ => (int_t - 1, 2),
+            -1 => (int_t, 1),
+            // frac == +1
+            _ => (int_t + 1, 2),
         }
     }
 
@@ -419,12 +424,15 @@ mod tests {
         assert!(sub.excitation.iter().all(|&x| x == 0.0));
     }
 
-    /// `delay_to_kt` realises the eq (39)/(40) fraction convention.
+    /// `delay_to_kt` realises the eq (40) read-geometry fold: the
+    /// effective delay of the `(k, t)` pair is `k − t/3` (see the
+    /// helper's doc comment), so the transmitted fraction negates and
+    /// the `frac = +1` case borrows upward.
     #[test]
     fn delay_to_kt_fraction_convention() {
         assert_eq!(Synthesizer::delay_to_kt(50, 0), (50, 0));
-        assert_eq!(Synthesizer::delay_to_kt(50, 1), (50, 1));
-        assert_eq!(Synthesizer::delay_to_kt(50, -1), (49, 2));
+        assert_eq!(Synthesizer::delay_to_kt(50, -1), (50, 1));
+        assert_eq!(Synthesizer::delay_to_kt(50, 1), (51, 2));
     }
 
     /// eq (77) with all-zero LP coefficients is the identity
