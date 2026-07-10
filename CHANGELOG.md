@@ -6,7 +6,39 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Round 410 lands the **fixed-point §4.1 decode chain** (`fx` module
+  tree): the clause-5 Table 10/11 Word16/Word32 basic-operator set,
+  the Table 15 `log2`/`pow2`/`inv_sqrt` over the staged 33/33/49-entry
+  data tables plus the double-precision (hi, lo) helpers, the Q13
+  LSF → Q15 LSP → Q12 LP parameter decode (sharing the round-390
+  encoder-search integer arithmetic via
+  `lsp_quantize::reconstruct_lsf_q13`; two newly compiled conversion
+  tables `lsf-lsp-cos-table2-Q15` / `lsf-lsp-cos-slope-Q19`), the Q10
+  gain predictor with the eq (71) exponent identity
+  `(log2(10)/20)·(10·log10 2) = 1/2`, the eq (40) adaptive vector on
+  the corrected fraction fold, the Q13/Q14 codevector + sharpening,
+  the Q15-accumulator excitation and Q12 synthesis with the specified
+  saturation, §4.1.2 parity T1-substitution, §4.4 concealment
+  primitives, and the black-box-pinned §4.1.6 overflow-rescale
+  protocol (excitation + synthesis memory ÷4 on Word32 overflow).
+  Measured through the fx-§4.1 + float-§4.2 hybrid against the ITU
+  `.PST` references (`tests/fx_conformance.rs`): corr 0.995–0.9998 on
+  all 12 clean vectors, PARITY 0.9987, ERASURE 0.91/0.94, OVERFLOW
+  0.78 (base corpus), RMS 0.96–1.07.
+
 ### Fixed
+
+- Round 410 **fixes the eq (40) fraction fold** — the two-branch
+  `b30` interpolation evaluates the past excitation at
+  `n − k + t/3`, so the effective delay of the `(k, t)` pair is
+  `k − t/3` and the transmitted fraction folds negated with an upward
+  borrow (`frac = +1 → (t0 + 1, 2)`). The previous `T = k + t/3`
+  fold read every fractional subframe 2/3 of a sample off; float
+  decode-chain correlation against the `.PST` references moved
+  SPEECH 0.11 → 0.93, PITCH 0.54 → 0.93, LSP 0.65 → 0.87/0.97
+  (floors ratcheted).
 
 - Round 410 **fixes the eq (74) γ̂ reconstruction grid** — the GA/GB
   codebook `γ` columns sum to the fixed-codebook gain correction factor

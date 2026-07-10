@@ -17,7 +17,56 @@ into the `oxideav-core` codec registry** (id `"g729"`, decode + encode
 over the raw 10-octet wire framing) with the dual-API
 `decoder::make_decoder` / `encoder::make_encoder` endpoints.
 
-## Round 410 — the γ̂ reconstruction grid: the "§3.9 gain gap" was a scale error
+## Round 410 — decoder conformance drive: three root causes + the fixed-point §4.1 chain
+
+Round 410's single goal was ITU conformance exactness for the decoder.
+Three long-standing structural divergences were root-caused black-box
+against the conformance corpus, and the whole §4.1 chain now runs on
+the clause-5 Word16/Word32 operator grid (`fx` module tree):
+
+- **eq (74) γ̂ grid** (see below) — retired the ≈ 7–10× over-gain.
+- **eq (40) fraction fold** — the two-branch `b30` read evaluates the
+  past excitation at `n − k + t/3` (expand `b30(j) ≈ sinc(j/3)`: the
+  coefficient of `u(m)` is `sinc(m − (n − k + t/3))` in both
+  branches), so the effective delay is `k − t/3` and the transmitted
+  fraction folds **negated with an upward borrow**
+  (`frac = +1 → (t0+1, 2)`). The previous `T = k + t/3` fold read
+  every fractional subframe 2/3 of a sample off and decorrelated
+  voiced material: float-chain SPEECH corr 0.11 → 0.93, PITCH
+  0.54 → 0.93 after the fix.
+- **Word16 saturation inside eq (74)** — the worst-case γ column sum
+  (27162 + 14276, γ̂ ≈ 5.06 — exactly the well-conditioned top of the
+  γ̂ range on the 2^13 grid) overflows Word16; the fixed-point gain
+  decode multiplies the two stage contributions into `g'_c`
+  separately and takes the eq (72) logarithm of the 32-bit sum.
+- **Fixed-point §4.1 chain** (`fx::{ops, dsp, lsp, gains, excitation,
+  decoder}`) — the Table 10/11 operator set, the Table 15 log2 / pow2 /
+  inv_sqrt over the staged 33/33/49-entry tables, Q13 LSF → Q15 LSP →
+  Q12 LP (new `lsf-lsp-cos-table2-Q15` + `lsf-lsp-cos-slope-Q19`
+  compiled), Q10 gain-predictor memory with the eq (71) exponent
+  identity `K·10log10(2) = 1/2`, Q13 codevector with Q14 sharpening,
+  Q15-accumulator excitation, Q12 synthesis with the specified 16-bit
+  saturation, §4.1.2 parity **T1-substitution** (not erasure), the
+  §4.4 concealment primitives, and the black-box-pinned
+  **overflow-rescale protocol** (Word32 overflow in the synthesis
+  accumulation → excitation buffer + synthesis memory ÷4 and
+  re-synthesize; plain saturation measures 2.5–3.3× RMS on the
+  OVERFLOW vectors, the rescale ≈ 1.0×). The eq (66) energy is pinned
+  to the eq (48)-sharpened codevector (plain-pulse variant over-gains
+  7–13%).
+- **Measured, fx §4.1 + float §4.2 hybrid vs `.PST`**
+  (`tests/fx_conformance.rs`, floors pinned): correlation
+  **0.995–0.9998 on all 12 clean vectors** (SPEECH 0.9984/0.9989,
+  TAME 0.9998/0.9994), RMS 0.96–1.07, bit-exact share 0.4–34%
+  (FIXED 34.3%); PARITY 0.9987, ERASURE 0.91/0.94, OVERFLOW 0.78
+  base (g729a decodes with the Annex A reduced decoder, not yet
+  modelled: 0.25). The remaining distance to bit-exact is dominated
+  by the not-yet-fixed-point §4.2 cascade and the unpublished
+  reference operator schedules (docs-gaps: the §3.9.1 fixed-point
+  gain-decode schedule, the §4.2 postfilter internal scaling, the
+  exact overflow protocol, the §4.4 erased-frame MA-memory handling).
+
+### The γ̂ reconstruction grid: the "§3.9 gain gap" was a scale error
 
 - **Root cause found and fixed.** The long-documented ≈ 7–10× whole-vector
   decode over-gain (previously attributed to a missing fixed-point

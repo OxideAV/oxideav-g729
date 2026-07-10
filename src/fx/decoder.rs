@@ -178,6 +178,10 @@ impl FrameDecoderFx {
             let code = build_codevector_q13(&positions, &signs, self.sharp_q14, delay.int_t);
 
             // §4.1.5: gains (transmitted indices demapped per §3.9.3).
+            // The eq (66) energy runs over the eq (48)-SHARPENED
+            // codevector — pinned black-box (the plain-pulse variant
+            // over-gains: SPEECH/TAME/PITCH whole-vector RMS 1.07–1.13
+            // vs 0.99–1.01, corr and bit-exact share both drop).
             let (tga, tgb) = if s == 0 {
                 (params.ga1, params.gb1)
             } else {
