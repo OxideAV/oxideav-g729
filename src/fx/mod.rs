@@ -27,4 +27,5 @@
 //! adaptive-codebook feedback until long vectors decorrelate.
 
 pub mod dsp;
+pub mod lsp;
 pub mod ops;

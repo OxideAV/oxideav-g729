@@ -215,6 +215,14 @@ const TABLES: &[Table] = &[
     // per-segment arccos slope (Q12) that linearly refines the segment
     // fraction — the fixed-point eq (18) `ω_i = arccos(q_i)` path.
     Table {
+        stem: "lsf-lsp-cos-table2-Q15",
+        shape: Shape::Flat { elements: 64 },
+    },
+    Table {
+        stem: "lsf-lsp-cos-slope-Q19",
+        shape: Shape::Flat { elements: 64 },
+    },
+    Table {
         stem: "lsf-lsp-cos-table-Q15",
         shape: Shape::Flat { elements: 65 },
     },
@@ -369,6 +377,8 @@ fn const_ident(stem: &str) -> &'static str {
         "lpc-autocorr-lag-window-low-Q15" => "LPC_LAG_WINDOW_LOW_Q15",
         "lsf-search-grid-cos-Q15" => "LSF_SEARCH_GRID_COS_Q15",
         "lsf-lsp-cos-table-Q15" => "LSF_LSP_COS_TABLE_Q15",
+        "lsf-lsp-cos-table2-Q15" => "LSF_LSP_COS_TABLE2_Q15",
+        "lsf-lsp-cos-slope-Q19" => "LSF_LSP_COS_SLOPE_Q19",
         "lsf-lsp-acos-slope-Q12" => "LSF_LSP_ACOS_SLOPE_Q12",
         "pitch-interpolation-filter-analysis-Q15" => "PITCH_INTERP_FILTER_ANALYSIS_Q15",
         "pitch-interpolation-filter-synthesis-Q15" => "PITCH_INTERP_FILTER_SYNTHESIS_Q15",

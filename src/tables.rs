@@ -160,6 +160,8 @@ include!(concat!(
 ));
 include!(concat!(env!("OUT_DIR"), "/lsf-search-grid-cos-Q15.rs"));
 include!(concat!(env!("OUT_DIR"), "/lsf-lsp-cos-table-Q15.rs"));
+include!(concat!(env!("OUT_DIR"), "/lsf-lsp-cos-table2-Q15.rs"));
+include!(concat!(env!("OUT_DIR"), "/lsf-lsp-cos-slope-Q19.rs"));
 include!(concat!(env!("OUT_DIR"), "/lsf-lsp-acos-slope-Q12.rs"));
 include!(concat!(
     env!("OUT_DIR"),

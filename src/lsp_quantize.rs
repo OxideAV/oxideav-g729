@@ -631,6 +631,38 @@ pub fn advance_history_q13(
     history[0] = std::array::from_fn(|i| residual[i] as i16);
 }
 
+/// Decode-side §3.2.4 / §4.1.1 fixed-point LSF reconstruction on the
+/// Q13 grid: eq (19) codebook sum for `(l1, l2, l3)`, the twice-run
+/// rearrangement (`J = 10` then `5`), and the eq (20) MA-predicted
+/// reconstruction under predictor `l0` — the exact integer arithmetic
+/// the round-390 encoder search uses in lock-step, exposed for the
+/// fixed-point decoder.
+///
+/// Returns `(lsf_q13, residual_q13)`: the reconstructed LSF vector
+/// (pre-stability-clamp) and the rearranged residual the caller pushes
+/// into its MA history for the next frame (spec eq (20) references the
+/// residuals `l̂^(m−k)`, not the reconstructed output).
+///
+/// # Panics
+///
+/// Panics if `l0 >= 2` or the stage indices exceed their Table-8 field
+/// ranges (`l1 >= 128`, `l2`/`l3 >= 32`).
+#[must_use]
+pub fn reconstruct_lsf_q13(
+    l0: usize,
+    l1: usize,
+    l2: usize,
+    l3: usize,
+    history: &[[i16; M]; MA_NP],
+    lat: &FxLatitude,
+) -> ([i32; M], [i16; M]) {
+    let mut residual = codebook_sum_q13(l1, l2, l3);
+    rearrange_pass_q13(&mut residual, REARRANGE_J1_Q13, lat.round_rearrange);
+    rearrange_pass_q13(&mut residual, REARRANGE_J2_Q13, lat.round_rearrange);
+    let lsf = reconstruct_omega_q13(l0, &residual, history, lat.round_predict);
+    (lsf, std::array::from_fn(|i| residual[i] as i16))
+}
+
 /// Fixed-point §3.2.4 index search on the Q13 grid: the staged
 /// L1 → L2 → L3 search run under both `L0` predictor modes, with the
 /// mode selected as the argmin of the full eq (21) ω-domain weighted
