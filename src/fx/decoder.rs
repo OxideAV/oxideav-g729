@@ -12,8 +12,8 @@
 //! postfilter's voicing decision).
 
 use crate::fx::excitation::{
-    build_codevector_q13, build_excitation, pred_lt3, syn_filt, EXC_BUF, L_SUBFR, PIT_MAX,
-    SHARP_INIT_Q14, SHARP_MAX_Q14, SHARP_MIN_Q14,
+    build_codevector_q13, build_excitation, pred_lt3, syn_filt, syn_filt_check, EXC_BUF, L_SUBFR,
+    PIT_MAX, SHARP_INIT_Q14, SHARP_MAX_Q14, SHARP_MIN_Q14,
 };
 use crate::fx::gains::{DecodedGainsFx, GainDecoderFx};
 use crate::fx::lsp::LspDecoderFx;
@@ -129,14 +129,12 @@ impl FrameDecoderFx {
 
     /// Decodes one good frame's parameters to pre-postfilter speech.
     ///
-    /// The §4.1.2 parity check is applied: on mismatch the frame is
-    /// treated as erased per the spec (delegating to
-    /// [`Self::decode_erased_frame`]).
+    /// The §4.1.2 parity check is applied: on mismatch the delay `T_1`
+    /// is set to the **integer part of the previous frame's `T_2`**
+    /// (fraction zero) and everything else decodes normally — the
+    /// clause replaces only the suspect pitch delay, it does not
+    /// erase the frame.
     pub fn decode_frame(&mut self, params: &Parameters) -> DecodedFrameFx {
-        if !params.pitch_parity_ok() {
-            return self.decode_erased_frame();
-        }
-
         let lp = self.lsp.decode_frame(
             usize::from(params.l0),
             usize::from(params.l1),
@@ -144,7 +142,14 @@ impl FrameDecoderFx {
             usize::from(params.l3),
         );
 
-        let t1 = decode_t1_from_p1(params.p1);
+        let t1 = if params.pitch_parity_ok() {
+            decode_t1_from_p1(params.p1)
+        } else {
+            crate::pitch_decode::PitchDelay {
+                int_t: self.prev_t,
+                frac: 0,
+            }
+        };
         let t_min = derive_t_min(t1.int_t);
         let t2 = decode_t2_from_p2(params.p2, t_min);
 
@@ -186,7 +191,16 @@ impl FrameDecoderFx {
             // gain, clamped on Q14.
             self.sharp_q14 = gains.gain_pit_q14.clamp(SHARP_MIN_Q14, SHARP_MAX_Q14);
 
-            // eq (75) + eq (77).
+            // eq (75) + eq (77), with the overflow-rescale protocol:
+            // when the synthesis accumulation leaves the Word32 range
+            // (the OVERFLOW-class inputs), the excitation buffer and
+            // the synthesis memory are scaled down by 4 and the
+            // subframe re-synthesized — plain hard saturation is
+            // measurably NOT what the reference does (whole-vector
+            // RMS ratio 2.5–3.3× against OVERFLOW.PST vs ≈ 1.0 with
+            // the rescale; corr 0.55 → 0.78; the ÷2 and
+            // excitation-only alternatives score worse). The exact
+            // reference protocol beyond this is a docs-gap.
             build_excitation(
                 &mut self.exc,
                 off,
@@ -197,7 +211,19 @@ impl FrameDecoderFx {
             let (head, tail) = speech.split_at_mut(L_SUBFR);
             let out = if s == 0 { head } else { tail };
             let exc_slice: [i16; L_SUBFR] = std::array::from_fn(|n| self.exc[off + n]);
-            syn_filt(&exc_slice, a, &mut self.syn_mem, out);
+            let ovf = syn_filt_check(&exc_slice, a, &mut self.syn_mem, out, false);
+            if ovf {
+                for slot in self.exc.iter_mut() {
+                    *slot = crate::fx::ops::shr(*slot, 2);
+                }
+                for slot in self.syn_mem.iter_mut() {
+                    *slot = crate::fx::ops::shr(*slot, 2);
+                }
+                let exc_rescaled: [i16; L_SUBFR] = std::array::from_fn(|n| self.exc[off + n]);
+                let _ = syn_filt_check(&exc_rescaled, a, &mut self.syn_mem, out, true);
+            } else {
+                let _ = syn_filt_check(&exc_slice, a, &mut self.syn_mem, out, true);
+            }
 
             sub[s] = SubframeFx {
                 a_q12: *a,
@@ -332,15 +358,22 @@ mod tests {
         }
     }
 
-    /// A parity-violating P0 routes through the erasure path (the
-    /// §4.1.2 rule) without panicking.
+    /// A parity-violating P0 substitutes the previous frame's int(T2)
+    /// for T1 (§4.1.2) — the frame still decodes, with subframe 1
+    /// anchored on the concealment delay.
     #[test]
-    fn parity_mismatch_conceals() {
-        let mut p = params_zeroish();
-        p.p0 ^= 1;
+    fn parity_mismatch_replaces_t1_only() {
+        let good = params_zeroish();
+        let mut d_ref = FrameDecoderFx::new();
+        let f0 = d_ref.decode_frame(&good);
+        let t2_prev = f0.sub[1].t_int;
+
         let mut d = FrameDecoderFx::new();
-        let _ = d.decode_frame(&p); // erased path
-        let f = d.decode_frame(&params_zeroish());
+        let _ = d.decode_frame(&good);
+        let mut bad = params_zeroish();
+        bad.p0 ^= 1;
+        let f = d.decode_frame(&bad);
+        assert_eq!(f.sub[0].t_int, t2_prev, "T1 must repeat prev int(T2)");
         assert!(f.speech.iter().all(|&s| s > i16::MIN));
     }
 

@@ -147,20 +147,43 @@ pub fn build_excitation(
 /// The Q12 accumulator shifts up 3 and rounds onto the Q0 grid;
 /// saturation on loud material is the specified 16-bit behaviour.
 pub fn syn_filt(exc: &[i16], a: &[i16; M + 1], mem: &mut [i16; M], out: &mut [i16]) {
+    let _ = syn_filt_check(exc, a, mem, out, true);
+}
+
+/// [`syn_filt`] with 32-bit overflow detection: runs the eq (77)
+/// filter and reports whether any accumulator step left the Word32
+/// range or the final `<< 3` rescale would (the saturating behaviour
+/// still applies to the produced output). When `update_mem` is false
+/// the filter memory is left untouched — callers dry-run the filter
+/// to decide on the overflow rescale before committing state.
+pub fn syn_filt_check(
+    exc: &[i16],
+    a: &[i16; M + 1],
+    mem: &mut [i16; M],
+    out: &mut [i16],
+    update_mem: bool,
+) -> bool {
     debug_assert_eq!(exc.len(), out.len());
+    let mut overflowed = false;
     for n in 0..exc.len() {
         let mut acc = l_mac(0, exc[n], a[0]); // u(n)·a0 on Q13
+        let mut wide = i64::from(acc);
         for i in 1..=M {
             let s = if n >= i { out[n - i] } else { mem[M - (i - n)] };
             acc = crate::fx::ops::l_msu(acc, a[i], s);
+            wide -= 2 * i64::from(a[i]) * i64::from(s);
+        }
+        if wide != i64::from(acc) || wide.abs() >= (1i64 << 28) {
+            overflowed = true;
         }
         acc = l_shl(acc, 3);
         out[n] = round(acc);
     }
-    let n = exc.len();
-    for i in 0..M {
-        mem[i] = out[n - M + i];
+    if update_mem {
+        let n = exc.len();
+        mem[..M].copy_from_slice(&out[n - M..n]);
     }
+    overflowed
 }
 
 #[cfg(test)]
