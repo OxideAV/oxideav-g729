@@ -319,6 +319,7 @@ pub mod encode_chain;
 pub mod encode_target;
 pub mod fixed_codebook;
 pub mod fixed_codebook_search;
+pub mod fx;
 pub mod gain_index_map;
 pub mod gain_predict;
 pub mod gain_quantize;
