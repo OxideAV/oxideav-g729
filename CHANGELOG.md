@@ -6,6 +6,17 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The in-flux internal modules (the per-clause §3/§4 processing-chain
+  stages, the `fx` fixed-point operator grid, the numeric-table
+  accessors, and the Annex B stream-decoder state machines) are now
+  `#[doc(hidden)]`, shrinking the documented/semver-checked API to the
+  stable surface: the registry codec (`codec`, root `register`), the
+  dual-API `decoder`/`encoder` endpoints, the ITU serial-format
+  helpers (`serial`), and the Annex B serial-framing parse surface.
+  No signatures changed; the hidden items remain `pub` and callable.
+
 ### Added
 
 - Round 410 lands the **fixed-point §4.1 decode chain** (`fx` module

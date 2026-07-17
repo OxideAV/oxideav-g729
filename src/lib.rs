@@ -306,46 +306,94 @@
 
 use oxideav_core::RuntimeContext;
 
+// The stable public surface of this crate is: the registry codec
+// surface ([`codec`] + the crate-root `register`), the dual-API
+// [`decoder`] / [`encoder`] factory endpoints, the ITU serial-format
+// helpers ([`serial`]), and the Annex B serial-framing parse surface
+// (the non-hidden items of [`annex_b`]). Every other module below is
+// the in-flux clean-room rebuild of the spec's per-clause processing
+// chain, kept `pub` so integration tests / benches can drive each
+// stage directly; `#[doc(hidden)]` keeps that churning internal
+// surface out of the documented, semver-checked API.
+
+#[doc(hidden)] // internal: §4.2.4 adaptive-gain-control cascade stage
 pub mod adaptive_gain_control;
+#[doc(hidden)] // internal: Annex A reduced-complexity decoder chain
 pub mod annex_a;
+#[doc(hidden)] // internal: Annex A reduced-complexity encoder chain
 pub mod annex_a_encoder;
 pub mod annex_b;
+#[doc(hidden)] // internal: §3.7 closed-loop pitch search stage
 pub mod closed_loop_pitch;
+#[doc(hidden)] // internal: §B.4.4 comfort-noise excitation synthesis
 pub mod cng;
 pub mod codec;
+#[doc(hidden)] // internal: §4.4 frame-erasure concealment primitives
 pub mod concealment;
+#[doc(hidden)] // internal: §4.1 per-frame decode parameter chain
 pub mod decode_chain;
+#[doc(hidden)] // internal: clause-3 per-frame encode analysis chain
 pub mod encode_chain;
+#[doc(hidden)] // internal: §3.6 target-signal computation stage
 pub mod encode_target;
+#[doc(hidden)] // internal: §3.8/§4.1.4 algebraic-codebook decode stage
 pub mod fixed_codebook;
+#[doc(hidden)] // internal: §3.8 algebraic-codebook search stage
 pub mod fixed_codebook_search;
+#[doc(hidden)] // internal: clause-5 fixed-point operator grid + fx chain
 pub mod fx;
+#[doc(hidden)] // internal: §3.9.3 gain-index permutation layer
 pub mod gain_index_map;
+#[doc(hidden)] // internal: §3.9.1/§4.1.5 MA gain-prediction stage
 pub mod gain_predict;
+#[doc(hidden)] // internal: §3.9.2 gain-VQ search stage
 pub mod gain_quantize;
+#[doc(hidden)] // internal: §3.9.2/§4.1.5 gain-VQ reconstruction stage
 pub mod gain_reconstruct;
+#[doc(hidden)] // internal: §3.2.2 Levinson-Durbin recursion stage
 pub mod levinson;
+#[doc(hidden)] // internal: §4.2.1 long-term-postfilter stage
 pub mod long_term_postfilter;
+#[doc(hidden)] // internal: §3.2.1 windowing/autocorrelation stage
 pub mod lp_analysis;
+#[doc(hidden)] // internal: §4.1.6 LP synthesis-filter stage
 pub mod lp_synthesis;
+#[doc(hidden)] // internal: §3.2.3 LP-to-LSP root search stage
 pub mod lp_to_lsp;
+#[doc(hidden)] // internal: LSF↔LSP domain-conversion helpers
 pub mod lsf_conversion;
+#[doc(hidden)] // internal: §3.2.5 per-subframe LSP interpolation stage
 pub mod lsp_interpolate;
+#[doc(hidden)] // internal: §3.2.4 LSP quantiser search stage
 pub mod lsp_quantize;
+#[doc(hidden)] // internal: §3.2.4/§4.1.1 LSP reconstruction stage
 pub mod lsp_reconstruct;
+#[doc(hidden)] // internal: §3.2.6 LSP-to-LP conversion stage
 pub mod lsp_to_lp;
+#[doc(hidden)] // internal: §3.4 open-loop pitch estimation stage
 pub mod open_loop_pitch;
+#[doc(hidden)] // internal: §4.1/Table-8 parameter (un)packing layer
 pub mod parameters;
+#[doc(hidden)] // internal: §3.3 perceptual-weighting filter stage
 pub mod perceptual_weighting;
+#[doc(hidden)] // internal: §4.1.3 pitch-delay decode stage
 pub mod pitch_decode;
+#[doc(hidden)] // internal: §3.8 eq (48) pitch-sharpening stage
 pub mod pitch_sharpen;
+#[doc(hidden)] // internal: §4.2.5 output high-pass + upscale stage
 pub mod post_process;
+#[doc(hidden)] // internal: §4.2 postfilter-cascade glue
 pub mod postfilter_cascade;
+#[doc(hidden)] // internal: §3.1 signal-conditioning pre-processor
 pub mod preprocess;
 pub mod serial;
+#[doc(hidden)] // internal: §4.2.2 short-term-postfilter stage
 pub mod short_term_postfilter;
+#[doc(hidden)] // internal: build.rs-compiled numeric-table accessors
 pub mod tables;
+#[doc(hidden)] // internal: §3.8 taming-procedure stage
 pub mod taming;
+#[doc(hidden)] // internal: §4.2.3 tilt-compensation stage
 pub mod tilt_compensation;
 
 /// Direct decoder factory endpoint (workspace dual-API convention:

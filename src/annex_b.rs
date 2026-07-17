@@ -457,6 +457,7 @@ pub fn dequant_sid_energy_db(index: u8) -> f32 {
 /// noise / speech synthesis stage needs.
 ///
 /// Carries `f32` energies, so it is [`PartialEq`] but not [`Eq`].
+#[doc(hidden)] // internal: §B.4.1/§B.4.5 routing layer, still in flux
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedFrame {
     /// Active speech: decode through the §4.1 base chain. Carries the
@@ -494,6 +495,7 @@ pub enum ResolvedFrame {
 /// This is the routing layer; the actual §4.1 speech synthesis and the
 /// §B.4.4 CNG synthesis (blocked on absent tables) plug in downstream by
 /// matching on the [`ResolvedFrame`] this returns.
+#[doc(hidden)] // internal: §B.4.1/§B.4.5 routing state machine, still in flux
 #[derive(Debug, Clone)]
 pub struct AnnexBDecoder {
     /// The previous frame's resolved transmission class (whether it was
@@ -572,9 +574,11 @@ impl AnnexBDecoder {
 }
 
 /// Number of PCM samples in one G.729 frame (10 ms at 8 kHz).
+#[doc(hidden)] // internal: only used by the hidden stream-decoder surface
 pub const FRAME_SAMPLES: usize = 2 * crate::fixed_codebook::SUBFRAME_SIZE;
 
 /// What the §B stream decoder produced for one frame.
+#[doc(hidden)] // internal: ComfortNoise shape changes when the SID-LSP VQ lands
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnnexBOutput {
     /// Active speech, reconstructed bit-exactly through the §4.1 →
@@ -619,6 +623,7 @@ pub enum AnnexBOutput {
 /// [`AnnexBOutput::ComfortNoise`] (the eqs (B.19)–(B.26) excitation path
 /// is wired; the LP-filtered PCM still awaits the §B.4.2.2 SID-LSP VQ
 /// tables — see the module-level docs-gap note).
+#[doc(hidden)] // internal: drives the hidden §4.1 chain; output type in flux
 #[derive(Debug, Clone)]
 pub struct AnnexBStreamDecoder {
     router: AnnexBDecoder,
@@ -803,6 +808,7 @@ impl AnnexBStreamDecoder {
 }
 
 /// Error from [`AnnexBStreamDecoder::decode_stream`].
+#[doc(hidden)] // internal: error of the hidden stream-decoder surface
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamDecodeError {
     /// The serial framing parse failed.
