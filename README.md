@@ -58,6 +58,10 @@ evidence and carries an env-gated stage trace):
   pins the effective first-subframe value at the eq (47) clamp
   floor 0.2.
 
+The **registry decoder** (`codec::G729Decoder` / `decoder::make_decoder`)
+now decodes through this fixed-point chain — the float `decode_chain`
+remains in-tree as the spec-equation oracle.
+
 **Measured (full fixed-point chain vs `.PST`)**: corr 0.9855–0.9999
 on all 12 clean vectors, RMS 0.92–1.05, PARITY 0.998/0.998, ERASURE
 0.92/0.89, OVERFLOW 0.81 (base corpus). The divergence census is now
