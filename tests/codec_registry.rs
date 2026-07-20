@@ -2,13 +2,15 @@
 //! [`oxideav_g729::codec`] module carries exactly the same 80
 //! Table-8 bits as the ITU serial format of the staged conformance
 //! corpus, and the registry decoder reproduces the crate's
-//! `decode_chain` path sample-for-sample on real reference bitstreams.
+//! fixed-point decode path (`fx` §4.1 chain + §4.2 cascade)
+//! sample-for-sample on real reference bitstreams.
 
 use std::path::{Path, PathBuf};
 
 use oxideav_core::{CodecId, CodecParameters, Decoder as _, Frame, Packet, TimeBase};
 use oxideav_g729::codec::{G729Decoder, PACKED_FRAME_BYTES, SAMPLES_PER_FRAME};
-use oxideav_g729::decode_chain::FrameDecoder;
+use oxideav_g729::fx::decoder::FrameDecoderFx;
+use oxideav_g729::fx::postfilter::PostfilterFx;
 use oxideav_g729::parameters::{pack_bit_array, unpack_parameters};
 use oxideav_g729::serial::{parse_frame, FrameKind, FRAME_BYTES};
 
@@ -38,10 +40,11 @@ fn serial_to_wire(bits: &[bool; 80]) -> [u8; PACKED_FRAME_BYTES] {
 
 /// Every active frame of every clean corpus vector, converted from the
 /// ITU serial format to the wire format and decoded through the
-/// registry `Decoder`, reproduces the `decode_chain` PCM exactly
-/// (same parameters, same state trajectory, same rounding).
+/// registry `Decoder`, reproduces the fixed-point decode path
+/// (`fx` §4.1 chain + §4.2 cascade) exactly (same parameters, same
+/// state trajectory, same rounding).
 #[test]
-fn registry_decoder_matches_decode_chain_on_corpus() {
+fn registry_decoder_matches_fx_chain_on_corpus() {
     let Some(root) = conformance_root() else {
         eprintln!("skip: conformance corpus not present");
         return;
@@ -49,7 +52,8 @@ fn registry_decoder_matches_decode_chain_on_corpus() {
     for name in ["ALGTHM", "FIXED", "LSP", "PITCH", "SPEECH", "TAME"] {
         let bit_bytes = std::fs::read(root.join(format!("g729-core/{name}.BIT"))).unwrap();
         let mut wire = G729Decoder::new();
-        let mut chain = FrameDecoder::new();
+        let mut fx = FrameDecoderFx::new();
+        let mut pf = PostfilterFx::new();
         let mut compared = 0usize;
         for chunk in bit_bytes.chunks_exact(FRAME_BYTES) {
             let frame = parse_frame(chunk).unwrap();
@@ -69,20 +73,22 @@ fn registry_decoder_matches_decode_chain_on_corpus() {
             };
             assert_eq!(a.samples as usize, SAMPLES_PER_FRAME);
 
-            let expect = chain.decode_parameters_to_postfiltered(&params).unwrap();
-            for (n, (got, want)) in a.data[0]
-                .chunks_exact(2)
-                .zip(expect.output().iter())
-                .enumerate()
-            {
+            let dec = fx.decode_frame(&params);
+            let int_t1 = usize::try_from(dec.sub[0].t_int.max(1)).unwrap();
+            let mut expect = Vec::with_capacity(SAMPLES_PER_FRAME);
+            for s in 0..2 {
+                let speech: [i16; 40] = std::array::from_fn(|n| dec.speech[s * 40 + n]);
+                let (out, _) = pf.process_subframe(&speech, &dec.sub[s].a_q12, int_t1);
+                expect.extend_from_slice(&out);
+            }
+            for (n, (got, want)) in a.data[0].chunks_exact(2).zip(expect.iter()).enumerate() {
                 let got = i16::from_le_bytes([got[0], got[1]]);
-                let want = want.round().clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16;
-                assert_eq!(got, want, "{name}: sample {n} of frame {compared}");
+                assert_eq!(got, *want, "{name}: sample {n} of frame {compared}");
             }
             compared += 1;
         }
         assert!(compared > 30, "{name}: compared only {compared} frames");
-        println!("{name}: registry decode matches decode_chain on {compared} frames");
+        println!("{name}: registry decode matches the fx chain on {compared} frames");
     }
 }
 

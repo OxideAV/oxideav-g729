@@ -1,9 +1,11 @@
 //! **Registry codec surface** — the `oxideav-core` trait wiring that
 //! turns the crate's clause-3 encoder ([`crate::encode_chain`]) and
-//! clause-4 decoder ([`crate::decode_chain`]) into registrable
-//! [`Decoder`] / [`Encoder`] implementations, plus the crate's
-//! `register` hook and the direct `make_decoder` / `make_encoder`
-//! factory endpoints (the workspace dual-API convention).
+//! the clause-4/clause-5 **fixed-point decoder** (the `fx` module
+//! tree: the §4.1 chain + the §4.2 cascade on the Word16/Word32
+//! operator grid) into registrable [`Decoder`] / [`Encoder`]
+//! implementations, plus the crate's `register` hook and the direct
+//! `make_decoder` / `make_encoder` factory endpoints (the workspace
+//! dual-API convention).
 //!
 //! ## On-wire framing
 //!
@@ -25,8 +27,8 @@
 //! ## Sample format
 //!
 //! 8000 Hz, mono, S16 interleaved (the clause-2 16-bit PCM interface).
-//! Decoded floats are rounded-and-saturated onto the 16-bit grid; the
-//! encoder consumes S16 bytes directly.
+//! The fixed-point decode chain produces the 16-bit grid natively;
+//! the encoder consumes S16 bytes directly.
 
 use std::collections::VecDeque;
 
@@ -35,8 +37,9 @@ use oxideav_core::{
     Result, RuntimeContext, SampleFormat, TimeBase,
 };
 
-use crate::decode_chain::FrameDecoder;
 use crate::encode_chain::{FrameEncoder, L_FRAME};
+use crate::fx::decoder::FrameDecoderFx;
+use crate::fx::postfilter::PostfilterFx;
 use crate::parameters::{pack_bit_array, unpack_bit_array};
 use crate::tables::BITS_PER_FRAME;
 
@@ -71,12 +74,6 @@ fn bits_to_payload(bits: &[bool; BITS_PER_FRAME]) -> [u8; PACKED_FRAME_BYTES] {
     out
 }
 
-/// Rounds and saturates a decoded float sample onto the 16-bit PCM
-/// grid.
-fn to_i16(s: f32) -> i16 {
-    s.round().clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
-}
-
 /// Validates the audio-side parameters shared by both factories.
 fn check_params(params: &CodecParameters) -> Result<()> {
     if let Some(sr) = params.sample_rate {
@@ -103,7 +100,8 @@ fn check_params(params: &CodecParameters) -> Result<()> {
 /// packet's frames concatenated).
 pub struct G729Decoder {
     id: CodecId,
-    chain: FrameDecoder,
+    chain: FrameDecoderFx,
+    postfilter: PostfilterFx,
     pending: VecDeque<Frame>,
     flushed: bool,
 }
@@ -123,7 +121,8 @@ impl G729Decoder {
     pub fn new() -> Self {
         Self {
             id: CodecId::new(CODEC_ID),
-            chain: FrameDecoder::new(),
+            chain: FrameDecoderFx::new(),
+            postfilter: PostfilterFx::new(),
             pending: VecDeque::new(),
             flushed: false,
         }
@@ -153,13 +152,23 @@ impl oxideav_core::Decoder for G729Decoder {
         for chunk in packet.data.chunks_exact(PACKED_FRAME_BYTES) {
             let bits = payload_to_bits(chunk);
             let params = unpack_bit_array(&bits);
-            let out = self
-                .chain
-                .decode_parameters_to_postfiltered(&params)
-                .map_err(|e| Error::invalid(format!("g729: frame decode failed: {e:?}")))?;
-            for s in out.output() {
-                pcm.extend_from_slice(&to_i16(s).to_le_bytes());
+            let dec = self.chain.decode_frame(&params);
+            // Clause 4.2.1: both subframes anchor on int(T_1).
+            let int_t1 = usize::try_from(dec.sub[0].t_int.max(1)).unwrap_or(1);
+            let mut periodic = false;
+            for s in 0..2 {
+                let speech: [i16; 40] = std::array::from_fn(|n| dec.speech[s * 40 + n]);
+                let (out, decision) =
+                    self.postfilter
+                        .process_subframe(&speech, &dec.sub[s].a_q12, int_t1);
+                periodic |= decision.gain_q15 > 0;
+                for v in out {
+                    pcm.extend_from_slice(&v.to_le_bytes());
+                }
             }
+            // §4.4 voicing classifier latch for concealment-capable
+            // callers.
+            self.chain.erasure_periodic = periodic;
         }
         self.pending.push_back(Frame::Audio(AudioFrame {
             samples: (n_frames * SAMPLES_PER_FRAME) as u32,
@@ -183,7 +192,8 @@ impl oxideav_core::Decoder for G729Decoder {
     }
 
     fn reset(&mut self) -> Result<()> {
-        self.chain = FrameDecoder::new();
+        self.chain = FrameDecoderFx::new();
+        self.postfilter = PostfilterFx::new();
         self.pending.clear();
         self.flushed = false;
         Ok(())

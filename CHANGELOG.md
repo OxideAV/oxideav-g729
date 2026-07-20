@@ -66,6 +66,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The registry decoder (`codec::G729Decoder`, the dual-API
+  `decoder::make_decoder`) now decodes through the fixed-point chain**
+  (`fx` §4.1 + §4.2) instead of the float `decode_chain` path. On the
+  ITU conformance corpus this moves whole-vector correlation against
+  the reference `.PST` from the float chain's long-vector drift
+  (SPEECH ≈ 0.11) to 0.9855–0.9999, with byte-exact stretches over a
+  hundred frames long. `reset()` still restores the clause-4.3
+  start-up state byte-identically; the wire framing is unchanged.
 - The in-flux internal modules (the per-clause §3/§4 processing-chain
   stages, the `fx` fixed-point operator grid, the numeric-table
   accessors, and the Annex B stream-decoder state machines) are now
