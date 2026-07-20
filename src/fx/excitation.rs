@@ -49,8 +49,12 @@ pub const EXC_BUF: usize = PIT_MAX + L_INTER10 + 2 * L_SUBFR;
 pub const SHARP_MIN_Q14: i16 = 3277;
 /// See [`SHARP_MIN_Q14`].
 pub const SHARP_MAX_Q14: i16 = 13107;
-/// Clause 4.3 initial sharpening gain (β = 0.8 … the Table 9 init) —
-/// the minimum clamp value on the Q14 grid.
+/// Start-up sharpening gain — the eq (47) clamp floor (0.2 on Q14).
+/// Table 9 lists β's non-zero init as 0.8, but the conformance corpus
+/// pins the *effective* first-subframe value at the 0.2 floor (the
+/// 0.8 reading regresses first-divergence positions on the LSP/TAME
+/// vectors), i.e. the eq (47) adaptation from the (zero-initialised)
+/// previous quantized pitch gain runs before the first use.
 pub const SHARP_INIT_Q14: i16 = SHARP_MIN_Q14;
 
 /// eq (40): build the adaptive vector `v(n)` in place over the

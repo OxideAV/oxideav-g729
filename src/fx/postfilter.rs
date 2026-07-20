@@ -217,6 +217,8 @@ pub struct PostfilterFx {
     hp_y: [i32; 2],
     /// Operator-schedule latitude (black-box-pinned).
     lat: PfLatitudeFx,
+    /// Oracle-probe switch: apply the §4.2.1 filter as disabled.
+    force_lt_off: bool,
 }
 
 impl Default for PostfilterFx {
@@ -238,6 +240,7 @@ impl PostfilterFx {
             hp_x: [0; 2],
             hp_y: [0; 2],
             lat: PfLatitudeFx::default(),
+            force_lt_off: false,
         }
     }
 
@@ -428,6 +431,23 @@ impl PostfilterFx {
             };
         }
 
+        // Over-unity guard, pinned black-box: when the raw eq (83)
+        // ratio exceeds 2 (num > 2·den — the ceiling of a Q14 gain
+        // grid, i.e. the point where a normalised fixed-point division
+        // for g_l stops being representable) the filter behaves as
+        // DISABLED, not clamped. The corpus separates the two cleanly:
+        // clamping keeps voiced material (SPEECH/PITCH unchanged) but
+        // wrecks the onset-heavy FIXED vectors (corr 0.9502/0.9756
+        // clamped vs 0.9855/0.9918 disabled); disabling everything
+        // over unity instead costs SPEECH/PITCH (0.9953/0.9926).
+        if num > 2 * den {
+            return LtDecisionFx {
+                delay: t0,
+                frac: 0,
+                gain_q15: 0,
+                use_long: false,
+            };
+        }
         // eq (83): g_l = num/den bounded [0, 1], on Q15.
         let gain_q15 = if num >= den {
             32767
@@ -448,7 +468,12 @@ impl PostfilterFx {
     /// combination over `r̂(n)` / `r̂_T(n)`; advances the residual
     /// history. The residual must already sit in `r_buf[HIST..]`.
     fn long_term(&mut self, int_t1: usize) -> ([i16; L_SUBFR], LtDecisionFx) {
-        let d = self.decide(int_t1);
+        let mut d = self.decide(int_t1);
+        if self.force_lt_off {
+            d.gain_q15 = 0;
+            d.frac = 0;
+            d.use_long = false;
+        }
 
         let mut out = [0i16; L_SUBFR];
         if d.gain_q15 == 0 {
@@ -652,6 +677,21 @@ impl PostfilterFx {
         int_t1: usize,
     ) -> ([i16; L_SUBFR], LtDecisionFx) {
         let t = self.process_subframe_traced(s, a_q12, int_t1);
+        (t.output, t.decision)
+    }
+
+    /// [`Self::process_subframe`] with the §4.2.1 filter forced off
+    /// (search still runs; history still advances) — oracle probes.
+    #[doc(hidden)]
+    pub fn process_subframe_lt_off(
+        &mut self,
+        s: &[i16; L_SUBFR],
+        a_q12: &[i16; M + 1],
+        int_t1: usize,
+    ) -> ([i16; L_SUBFR], LtDecisionFx) {
+        self.force_lt_off = true;
+        let t = self.process_subframe_traced(s, a_q12, int_t1);
+        self.force_lt_off = false;
         (t.output, t.decision)
     }
 

@@ -186,11 +186,9 @@ fn report(label: &str, out: &[i16], reference: &[i16]) -> Metrics {
 /// PITCH 0.9961+, SPEECH 0.9973+, TAME 0.9994+; exact 0.4–27%).
 fn floors(name: &str) -> (f64, f64) {
     match name {
-        // FIXED is the §4.2.1 stress case: the long-term postfilter's
-        // enable/gain decisions on onset material still diverge from
-        // the reference (LT-off measures 0.986/0.992) — the top open
-        // divergence of the hunt.
-        "FIXED" => (0.94, 10.0),
+        // FIXED is the §4.2.1 stress case (measured 0.9855/0.9918
+        // with the over-unity disable guard; 0.9502/0.9756 without).
+        "FIXED" => (0.97, 12.0),
         "TAME" => (0.995, 0.3),
         _ => (0.99, 1.0),
     }

@@ -37,10 +37,18 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   with pinned floors; an env-gated stage-by-stage trace dump
   (`G729_FX_TRACE`) and `#[doc(hidden)]` trace instrumentation on the
   cascade (`process_subframe_traced`) anchor the bisection workflow.
-  Measured full-fx: corr 0.9927–0.9999 on 10 of 12 clean vectors
-  (FIXED 0.9502/0.9756 — the §4.2.1 onset enable/gain decisions are
-  the top open divergence; forcing the long-term stage off measures
-  0.986/0.992), PARITY 0.998, ERASURE 0.92/0.89, OVERFLOW 0.81 base.
+  Measured full-fx: corr 0.9927–0.9999 on all 12 clean vectors
+  (FIXED 0.9855/0.9918), PARITY 0.998, ERASURE 0.92/0.89, OVERFLOW
+  0.81 base.
+- **§4.2.1 over-unity gain guard, pinned black-box** — when the raw
+  eq (83) ratio exceeds 2 (`num > 2·den`, the ceiling of a Q14 gain
+  grid) the long-term postfilter behaves as *disabled*, not clamped
+  to 1. The corpus separates the readings cleanly: clamping keeps
+  voiced material but wrecks the onset-heavy FIXED vectors
+  (0.9502/0.9756 vs 0.9855/0.9918 with the guard); disabling every
+  over-unity case instead costs SPEECH/PITCH (0.9953/0.9926). A
+  per-subframe oracle probe confirms passthrough beats the clamped
+  filter on 42 of 45 FIXED enables while SPEECH splits evenly.
 
 ### Changed
 
