@@ -66,11 +66,31 @@ const EXP_CONST_Q24: i32 = 354_735_042;
 /// `20·log10(2)` on the Q12 grid — converts a base-2 log to dB.
 const DB_PER_LOG2_Q12: i16 = 24_660;
 
+/// Black-box latitude of the eq (74)/(72) γ̂ grids: per-codebook
+/// binary-scale offsets relative to the 2^13 base, for the ĝ_c
+/// reconstruction and the Û memory push separately. All-zero is the
+/// round-410 uniform-2^13 pin; the residual-divergence hunt sweeps
+/// this space against the conformance corpus.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GainGridFx {
+    /// Extra right-shift of the GA γ column in the ĝ_c reconstruction.
+    pub recon_ga: i16,
+    /// Extra right-shift of the GB γ column in the ĝ_c reconstruction.
+    pub recon_gb: i16,
+    /// Extra right-shift of the GA γ column in the eq (72) Û push.
+    pub push_ga: i16,
+    /// Extra right-shift of the GB γ column in the eq (72) Û push.
+    pub push_gb: i16,
+}
+
 /// Fixed-point §3.9.1 gain predictor + §4.1.5 gain decoder state.
 #[derive(Debug, Clone)]
 pub struct GainDecoderFx {
     /// `[Û^(m−1) … Û^(m−4)]` on the Q10 dB grid.
     past_qua_en: [i16; MA_NP],
+    /// γ̂ grid latitude (defaults to the uniform 2^13 base).
+    grid: GainGridFx,
 }
 
 /// One subframe's decoded gains.
@@ -94,7 +114,14 @@ impl GainDecoderFx {
     pub fn new() -> Self {
         Self {
             past_qua_en: [PAST_QUA_EN_INIT_Q10; MA_NP],
+            grid: GainGridFx::default(),
         }
+    }
+
+    /// Override the γ̂ grid latitude (black-box sweep hook).
+    #[doc(hidden)]
+    pub fn set_grid(&mut self, grid: GainGridFx) {
+        self.grid = grid;
     }
 
     /// Borrow the Q10 predictor memory (most recent first).
@@ -138,7 +165,11 @@ impl GainDecoderFx {
         // (and takes the eq (72) logarithm of the 32-bit sum).
         let gamma_ga = ga_row[GAIN_VQ_COL_GC];
         let gamma_gb = gb_row[GAIN_VQ_COL_GC];
-        let gamma_q13_32 = l_add(l_deposit_l(gamma_ga), l_deposit_l(gamma_gb));
+        // The eq (72) push γ̂ on its (possibly split) grid, Q13 base.
+        let gamma_q13_32 = l_add(
+            l_shr(l_deposit_l(gamma_ga), self.grid.push_ga),
+            l_shr(l_deposit_l(gamma_gb), self.grid.push_gb),
+        );
 
         // eq (66) energy: Σ code² on Q27 (Q13 × Q13 doubled).
         let mut l_ener = 0i32;
@@ -172,10 +203,11 @@ impl GainDecoderFx {
         let g_prime_scaled = pow2(13, frac); // g'_c · 2^(13−exp), Word32
         let (gp_hi, gp_lo) = l_extract(g_prime_scaled);
         // γ̂·g'_c as the sum of the two per-stage products (full Q13
-        // precision, no Word16 γ̂ saturation).
+        // precision, no Word16 γ̂ saturation), each column on its
+        // (possibly split) grid.
         let prod = l_add(
-            mpy_32_16(gp_hi, gp_lo, gamma_ga),
-            mpy_32_16(gp_hi, gp_lo, gamma_gb),
+            l_shr(mpy_32_16(gp_hi, gp_lo, gamma_ga), self.grid.recon_ga),
+            l_shr(mpy_32_16(gp_hi, gp_lo, gamma_gb), self.grid.recon_gb),
         );
         let gain_code_q1 = round(l_shl(prod, add(exp, 6)));
 

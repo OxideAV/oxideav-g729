@@ -318,6 +318,21 @@ impl FrameDecoderFx {
     pub fn half_sum(a: i16, b: i16) -> i16 {
         add(shr(a, 1), shr(b, 1))
     }
+
+    /// The just-decoded frame's excitation `u(n)` (80 samples) — the
+    /// bisection instrument's view after [`Self::decode_frame`] has
+    /// advanced the buffer.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn last_frame_excitation(&self) -> [i16; 2 * L_SUBFR] {
+        std::array::from_fn(|n| self.exc[EXC_HIST - 2 * L_SUBFR + n])
+    }
+
+    /// γ̂-grid latitude pass-through (black-box sweep hook).
+    #[doc(hidden)]
+    pub fn set_gain_grid(&mut self, grid: crate::fx::gains::GainGridFx) {
+        self.gains.set_grid(grid);
+    }
 }
 
 #[cfg(test)]

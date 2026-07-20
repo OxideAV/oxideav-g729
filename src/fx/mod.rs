@@ -32,3 +32,4 @@ pub mod excitation;
 pub mod gains;
 pub mod lsp;
 pub mod ops;
+pub mod postfilter;

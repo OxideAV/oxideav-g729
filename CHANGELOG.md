@@ -6,6 +6,42 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Round 419 lands the **fixed-point §4.2 post-processing cascade**
+  (`fx::postfilter`), completing the whole decode path on the clause-5
+  Word16/Word32 operator grid. The cascade follows the clause-4.2
+  signal order as printed — `ŝ` → `Â(z/γ_n)` → residual `r̂` →
+  long-term postfilter `H_p(z)` **applied to the residual** →
+  synthesis `1/[g_f·Â(z/γ_d)]` → tilt `H_t(z)` → adaptive gain
+  control against `ŝ` → 100 Hz output high-pass + ×2 — which differs
+  structurally from the float cascade's historical `H_p`-on-speech
+  arrangement. The §4.2.1 two-pass search runs its correlations on a
+  norm-scaled Word16 residual window (Word32-safe by construction),
+  covers both sides of the integer anchor at 1/8 resolution, applies
+  the clause's longer-filter replacement rule, and lands `g_l` on Q15
+  by normalised division; `1/g_f` / `1/g_t` go through a shared
+  normalised-reciprocal helper; the §4.2.4 gain runs on Q12 with the
+  Q15 weight pair `27853/4915`; the §4.2.5 recursion keeps its
+  feedback on the wide Word32 grid with the ×2 folded into the final
+  rounding. Unpinned operator-schedule choices are exposed as a
+  `#[doc(hidden)]` latitude struct (plus a γ̂-grid hook on the gain
+  decoder) and were swept black-box against the corpus — the shipped
+  defaults are the sweep optimum; the round-410 uniform-2^13 γ̂ grid
+  measurably beats every per-codebook split (best challenger
+  2–4× worse per-subframe energy delta on all 12 clean vectors).
+- `tests/fx_full_conformance.rs` — the byte-exactness ratchet for the
+  full fixed-point chain: per-vector correlation / RMS / exact-share /
+  max|Δ| plus **first-diverging-sample** (frame/subframe/offset,
+  ours-vs-reference), longest byte-exact run, and clean-frame counts,
+  with pinned floors; an env-gated stage-by-stage trace dump
+  (`G729_FX_TRACE`) and `#[doc(hidden)]` trace instrumentation on the
+  cascade (`process_subframe_traced`) anchor the bisection workflow.
+  Measured full-fx: corr 0.9927–0.9999 on 10 of 12 clean vectors
+  (FIXED 0.9502/0.9756 — the §4.2.1 onset enable/gain decisions are
+  the top open divergence; forcing the long-term stage off measures
+  0.986/0.992), PARITY 0.998, ERASURE 0.92/0.89, OVERFLOW 0.81 base.
+
 ### Changed
 
 - The in-flux internal modules (the per-clause §3/§4 processing-chain
