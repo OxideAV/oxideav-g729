@@ -136,7 +136,12 @@ impl Default for PfLatitudeFx {
     fn default() -> Self {
         Self {
             resid_round: true,
-            syn_round: true,
+            // Truncation, not rounding: the corpus is unambiguous both
+            // in the aggregate (every top latitude-sweep config lands
+            // the synthesis output by truncation) and in the startup
+            // reference tails (the sub-unity decay of a resonant
+            // filter reads back from `.PST` as zeros, not ones).
+            syn_round: false,
             lt_round: true,
             gf_before: false,
             hp_wide: true,
@@ -148,10 +153,11 @@ impl Default for PfLatitudeFx {
 /// Land a Q13-scaled accumulator on Q0 by rounding or truncation.
 #[inline]
 fn land_q13(acc: i32, round_mode: bool) -> i16 {
+    let q = l_shl(acc, 3);
     if round_mode {
-        round(l_shl(acc, 3))
+        round(q)
     } else {
-        extract_h(l_shl(acc, 3))
+        extract_h(q)
     }
 }
 
@@ -417,8 +423,15 @@ impl PostfilterFx {
 
         // eq (82) disable test: R′(T)²/Σr̂² < 0.5 ⇔ 2·num² < energy·den.
         let ((anchor, frac), num, den) = best;
+        // Quantisation-noise enable floor, pinned black-box: a
+        // subframe whose residual mean square is at most one Q0 LSB
+        // (Σr̂² ≤ 40) is treated as having no long-term structure —
+        // the eq (82) statistic over bare quantisation noise otherwise
+        // flickers the filter on during silence (removing it retires
+        // the whole silence-cluster class of divergence events on
+        // SPEECH; the threshold is insensitive from 40 to 2560).
         let enabled = have
-            && energy > 0
+            && energy > 40
             && 2 * i128::from(num) * i128::from(num) >= i128::from(energy) * i128::from(den);
 
         if !enabled {

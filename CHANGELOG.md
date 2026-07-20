@@ -49,6 +49,20 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   over-unity case instead costs SPEECH/PITCH (0.9953/0.9926). A
   per-subframe oracle probe confirms passthrough beats the clamped
   filter on 42 of 45 FIXED enables while SPEECH splits evenly.
+- **Two more black-box §4.2 pins, ratcheted by whole-frame
+  byte-exactness** — (1) the `1/[g_f·Â(z/γ_d)]` synthesis output
+  lands on Q0 by *truncation* (`extract_h`), not rounding: the
+  change lifts SPEECH's longest byte-exact run from 77 to **9155
+  samples** (114 consecutive frames) and its fully-exact frame count
+  from 0 to 159/3750 (g729a: 166), and the reference startup tails
+  read back the same way (sub-unity decays land as zeros); rounding
+  and toward-zero variants both collapse the clean-frame count.
+  (2) a residual with mean square at most one Q0 LSB (`Σr̂² ≤ 40`)
+  never enables the long-term postfilter — the eq (82) statistic
+  over bare quantisation noise otherwise flickers the filter on
+  during silence; the threshold is insensitive from 40 to 2560 and
+  retires the silence-cluster divergence events (SPEECH's event
+  census drops from 11 root events to 9, none LT-related).
 
 ### Changed
 
