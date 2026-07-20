@@ -17,6 +17,62 @@ into the `oxideav-core` codec registry** (id `"g729"`, decode + encode
 over the raw 10-octet wire framing) with the dual-API
 `decoder::make_decoder` / `encoder::make_encoder` endpoints.
 
+## Round 419 — the fixed-point §4.2 cascade: whole decode path on the clause-5 grid
+
+Round 419 completes the decoder on the Word16/Word32 operator grid by
+landing `fx::postfilter` — the §4.2 post-processing cascade in the
+clause-4.2 **printed signal order** (which differs structurally from
+the float cascade's historical arrangement): `ŝ` → `Â(z/γ_n)` →
+residual `r̂` → long-term postfilter `H_p(z)` **applied to the
+residual** → synthesis `1/[g_f·Â(z/γ_d)]` → tilt `H_t(z)` → §4.2.4
+AGC against `ŝ` → 100 Hz output high-pass + ×2. Key numerics: the
+§4.2.1 two-pass search correlates a norm-scaled Word16 residual
+window (Word32-safe by construction) over both sides of the integer
+anchor at 1/8 resolution with the clause's longer-filter replacement
+rule; `g_l` lands on Q15 by normalised division; `1/g_f`/`1/g_t` go
+through a shared normalised-reciprocal helper; the AGC gain runs on
+Q12 with the Q15 weight pair `27853/4915`; the §4.2.5 recursion keeps
+Word32 feedback with the ×2 folded into the output rounding.
+
+Four **black-box pins** were ratcheted by whole-frame byte-exactness
+against the conformance corpus (`tests/fx_full_conformance.rs`, which
+reports first-diverging-sample / longest-exact-run / clean-frame
+evidence and carries an env-gated stage trace):
+
+- **Over-unity gain guard** — an eq (83) ratio above 2 (`num >
+  2·den`, the Q14 gain ceiling) behaves as *disabled*, not clamped
+  to 1 (FIXED corr 0.9502/0.9756 → 0.9855/0.9918, SPEECH/PITCH
+  unchanged; a per-subframe oracle probe shows passthrough beating
+  the clamped filter on 42/45 FIXED enables).
+- **Synthesis-stage truncation** — the `1/[g_f·Â(z/γ_d)]` output
+  lands on Q0 by truncation, not rounding: SPEECH's longest
+  byte-exact run jumps 77 → **9155 samples** (114 consecutive
+  frames), fully-exact frames 0 → 159/3750 (g729a 166); rounding and
+  toward-zero variants both collapse the clean-frame count, and a
+  Word32 (unrounded) feedback memory collapses it too — the Word16
+  truncated feedback is the pinned behaviour.
+- **Silence enable floor** — a residual at ≤ 1 Q0 LSB mean square
+  (`Σr̂² ≤ 40`) never enables `H_p` (threshold insensitive across
+  40…2560); retires the silence-cluster divergence events.
+- **Startup sharpening** — Table 9 prints β init 0.8, but the corpus
+  pins the effective first-subframe value at the eq (47) clamp
+  floor 0.2.
+
+**Measured (full fixed-point chain vs `.PST`)**: corr 0.9855–0.9999
+on all 12 clean vectors, RMS 0.92–1.05, PARITY 0.998/0.998, ERASURE
+0.92/0.89, OVERFLOW 0.81 (base corpus). The divergence census is now
+sharp: most vectors carry **exactly one root divergence event — at
+frame 0** — whose poisoned AGC/HP state then persists (SPEECH, with
+silent stretches to re-sync in, shows 9 events and 330/7500 clean
+subframes). An isolation probe pins the startup mystery precisely:
+overriding frame-0 subframe-0's `ŝ` with the reference-implied
+`[1, 2, 1, 1, 1, 0…]` makes the whole head byte-exact, but no
+reading of the printed equations produces that `ŝ` from the
+transmitted parameters (`u = [1,1,1,1,0…]`, near-flat interpolated
+LP) — the reference's fixed-point §4.1/§4.2 startup behaviour beyond
+the printed clauses is the remaining docs-gap, along with Table 9's
+domain-invalid `q_i = arccos(iπ/11)` row (arccos of values > 1).
+
 ## Round 410 — decoder conformance drive: three root causes + the fixed-point §4.1 chain
 
 Round 410's single goal was ITU conformance exactness for the decoder.
@@ -383,17 +439,16 @@ ratchet toward the fixed-point decode path. The decode stages:
 
 ### What is NOT yet wired up
 
-- **PCM-bit-exact decode** — the round-410 γ̂-grid fix closed the
-  historical amplitude gap (whole-vector RMS ratio now ≈ 0.97–1.36,
-  TAME 2.85), but sample-level agreement still drifts over long vectors
-  (SPEECH correlation ≈ 0.11 over 3750 frames) because the float decode
-  arithmetic diverges from the reference's 16-bit fixed-point grid and
-  the error compounds through the adaptive-codebook past-excitation
-  feedback. Bit-exactness requires the decode chain on the Word16/Word32
-  operator grid (Recommendation clause 5, Tables 10/11). The §4.2
-  cascade is chained end-to-end into `decode_*_to_postfiltered`; the
-  `*_to_speech` entry points intentionally return the pre-postfilter
-  reconstructed speech `ŝ(n)`.
+- **PCM-bit-exact decode** — round 419 put the whole decode path on
+  the clause-5 fixed-point grid and demonstrated genuine end-to-end
+  byte-exactness in the stream interior (114 consecutive exact frames
+  on SPEECH; 330/7500 clean subframes), but full-vector exactness is
+  blocked by the frame-0 startup divergence (one root event per
+  vector, see the round-419 section) whose AGC/HP state pollution
+  persists through loud material. The float cascade
+  (`decode_*_to_postfiltered`) remains as the spec-equation oracle;
+  the `*_to_speech` entry points intentionally return the
+  pre-postfilter reconstructed speech `ŝ(n)`.
 - **Annex B comfort-noise spectral envelope** (§B.4.2.2 SID-LSP VQ
   dequant) — blocked on absent numeric tables. The SID-LSP VQ subset
   codebooks (the §B.4.2.2 32-address first-stage subset + the two
