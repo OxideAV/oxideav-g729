@@ -15,7 +15,40 @@ and (round 382) the **entire clause-3 encoder analysis chain** with a
 working `.IN` → `.BIT` path. As of round 388 the crate is **registered
 into the `oxideav-core` codec registry** (id `"g729"`, decode + encode
 over the raw 10-octet wire framing) with the dual-API
-`decoder::make_decoder` / `encoder::make_encoder` endpoints.
+`decoder::make_decoder` / `encoder::make_encoder` endpoints. Round 419
+put the whole decode path on the clause-5 fixed-point grid; round 438
+does the same for the encoder's §3.1–§3.2.3 front end.
+
+## Round 438 — the encoder's fixed-point front end: TAME's L0 mystery retired
+
+Round 438 moves the encoder's §3.1–§3.2.3 chain onto the clause-5
+Word16/Word32 grid (`fx::analysis` / `fx::levinson` / `fx::lp_to_lsp`,
+wired into the production `FrameEncoder`): the §3.1 eq (1) high-pass
+with unrounded Word32 Q16 feedback, the eq (5) autocorrelation in a
+genuine saturating Word32 accumulator with the overflow-rescale
+protocol (down-scale the windowed signal on saturation, retry), DPF
+lag windowing, the eqs (8)/(9) Levinson recursion in the (hi, lo)
+format with `div_32` against a renormalised energy, and the §3.2.3
+Chebyshev root search on Q11/Q23 grids. Every unstated fixed-point
+choice was swept black-box (`tests/fx_front_end_conformance.rs`):
+pinned are the overflow shift 2, the truncating Q12→Q11
+half-polynomial landing, the rounding interpolation step, the Levinson
+numerator pre-shift, and the Q16 feedback storage (each losing
+alternative costs 6–16 points on some vector).
+
+**Measured** (reference-locked all-four-LSP-indices agreement,
+float → fx): ALGTHM 82.9 → 94.3%, FIXED 97.5%, LSP 77.7 → 85.8%,
+PITCH 92.8 → 93.6%, SPEECH 81.2 → 91.7%, **TAME 80.5 → 99.2%**
+(corpus 83.1 → 90.7%). End-to-end: **TAME L0 62.5 → 96.1%**, T1±2
+75.0 → 82.0%, SPEECH L0/L1 87.0/53.9%, PITCH L1 35.6%. TAME's jump
+retires the round-390 negative result — the "unstaged structural
+element of the reference's final mode compare" was front-end ω
+divergence, and no mode-compare docs-gap remains. The round also
+pins the decoder's start-up LSP memory to the exact
+`round(cos(iπ/11)·2^15)` grid per the staged Table 9 erratum
+resolution (`table9-initialisation.md`), which confirms the printed
+`arccos` row as a typographic erratum and the frame-0 startup
+*schedule* as out of the Recommendation's printed scope.
 
 ## Round 419 — the fixed-point §4.2 cascade: whole decode path on the clause-5 grid
 
@@ -468,17 +501,15 @@ ratchet toward the fixed-point decode path. The decode stages:
   until that envelope can be reconstructed. (Docs-gap: SID-LSP VQ subset
   codebooks + `lspSid_reset`.)
 - **Bit-exact encoding** — rounds 385/388/390 moved the LSF chain onto
-  the reference's fixed-point grid, metric, and (round 390) the full
-  integer Q13 search. Two measured residuals remain: (1) TAME's 24
-  locked-history `L0` flips, now **measured to be outside the staged
-  fixed-point latitude** (systematic ~2.1% ω-domain margins in a
-  5-frame reference index cycle; every swept rounding/tie-break/
-  mode-total alternative fails) — an unstaged structural element of
-  the reference's final mode compare (docs gap); (2) the remaining
-  LSP/SPEECH stage misses trace to front-end ω divergence whose exact
-  fixed-point internals (the DPF Levinson recursion, the Word32
-  Chebyshev root-search arithmetic) are not staged (docs gap). The
-  §3.9 decode-side Q-format gain saturation gap is the same family.
+  the reference's numeric grid and round 438 onto the genuine
+  Word16/Word32 operator chain (§3.1–§3.2.3), which retired TAME's
+  locked-history `L0` flips (99.2%) and lifted the locked corpus to
+  90.7%. The remaining locked-history misses (LSP 85.8, SPEECH 91.7)
+  are sub-LSB ω disagreements of the black-box-pinned front-end
+  schedule on near-tie frames; the mid-chain stages (§3.3 weighting,
+  §3.4/§3.7 pitch, §3.8 ACELP, §3.9 gain VQ) are still float — their
+  fixed-point migration is the next arc. The §3.9 decode-side
+  Q-format gain saturation gap is unchanged.
 - **Annex A depth-first ACELP search** (§A.3.8.1) — the Annex A prose
   pins only the search's existence and fixed complexity; the
   pulse-combination schedule lives only in the barred reference C

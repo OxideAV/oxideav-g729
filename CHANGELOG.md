@@ -8,6 +8,65 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 438 moves the **encoder's §3.1–§3.2.3 front end onto the
+  clause-5 Word16/Word32 operator grid** (`fx::analysis`,
+  `fx::levinson`, `fx::lp_to_lsp`) and wires it into the production
+  `FrameEncoder`:
+  - `fx::analysis` — eq (4) windowing via `mult_r`, the eq (5)
+    autocorrelation in a genuine Word32 accumulator with the
+    **overflow-rescale protocol** (saturation → right-shift the
+    windowed signal, retry; step black-box-pinned at 2), the
+    clause-3.2.1 `r(0) ≥ 1` guard, `norm_l` normalisation to DPF
+    pairs, and the eqs (6)/(7) lag window as `mpy_32` split-double
+    products over the staged tables. Where the float emulation sums
+    exactly and normalises afterwards, the Word32 pipeline must
+    down-scale the *input* on overflow — a different truncation
+    pattern on exactly the loud frames where index agreement dropped.
+  - `fx::analysis::PreprocessorFx` — the §3.1 eq (1) 140 Hz
+    high-pass (÷2 folded into the staged Q12 numerator) with the
+    feedback kept as the unrounded Word32 recursion value on the Q16
+    grid (corpus-pinned: Q13 feedback storage costs ~12/16 locked
+    points of LSP/SPEECH; a Q28 DPF coefficient variant quantised
+    from the printed eq (1) decimals costs ~8/10).
+  - `fx::levinson` — eqs (8)/(9) entirely in the double-precision
+    (hi, lo) format: Q27 LP coefficients, Q31 reflections, `div_32`
+    against a per-order renormalised energy with the numerator
+    re-referred onto the stored-E grid *before* the division
+    (corpus-pinned; the post-division quotient shift costs ~6 points
+    of ALGTHM). Ill-conditioned input reports failure for the
+    clause-3.2.3 keep-previous fallback.
+  - `fx::lp_to_lsp` — the §3.2.3 Chebyshev search on the fixed grid:
+    Q11 half-polynomial coefficients (**truncating** Q12→Q11 landing,
+    corpus-pinned), Clenshaw in Word32 Q23, the staged 60-interval
+    cosine grid with four bisections, and a `div_s` linear
+    interpolation (rounding step).
+  - **Measured** (`tests/fx_front_end_conformance.rs`, reference-
+    locked all-four-LSP-indices agreement, float → fx chain):
+    ALGTHM 82.9 → 94.3%, FIXED 97.5 → 97.5%, LSP 77.7 → 85.8%,
+    PITCH 92.8 → 93.6%, SPEECH 81.2 → 91.7%, **TAME 80.5 → 99.2%**
+    (corpus 83.1 → 90.7%). End-to-end own-history agreement:
+    **TAME L0 62.5 → 96.1%** (T1±2 75.0 → 82.0%), SPEECH L0/L1
+    85.5/50.7 → 87.0/53.9%, PITCH L1 32.9 → 35.6%, LSP L1
+    47.2 → 48.5%.
+  - **TAME's jump retires the round-390 negative result**: the 24
+    locked-history `L0` flips attributed to an "unstaged structural
+    element of the reference's final mode compare" (a documented
+    docs-gap) were front-end ω divergence all along — the genuine
+    fixed-point §3.1/§3.2.1 truncation pattern lands ω on the
+    reference's grid and the printed eq (21) mode compare then picks
+    the reference's predictor. No mode-compare docs-gap remains.
+- The decoder's Table 9 start-up LSP memory is pinned to the **exact
+  Q15 cosine grid** `round(cos(iπ/11)·2^15)` per the staged erratum
+  resolution (`docs/audio/g729/table9-initialisation.md`: the printed
+  `arccos(iπ/11)` row is domain-invalid for `i ≥ 4`; §3.2.3's
+  `q_i = cos(ω_i)` applied to the adjacent `ω̂_i` row fixes the
+  intended value), replacing the 64-segment cosine-table image (up
+  to 8 Q15 LSB off). Measured: the frame-0 sub-1 interpolated Q12 LP
+  moves 1–4 LSB but every conformance vector's PCM is byte-identical
+  — the frame-0 startup divergence is *not* the startup LSP grid;
+  the remaining schedule question is confirmed out of the
+  Recommendation's scope by the same doc.
+
 - Round 419 lands the **fixed-point §4.2 post-processing cascade**
   (`fx::postfilter`), completing the whole decode path on the clause-5
   Word16/Word32 operator grid. The cascade follows the clause-4.2
