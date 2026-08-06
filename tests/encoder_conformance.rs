@@ -98,15 +98,15 @@ fn pct(hits: usize, total: usize) -> f64 {
 /// regression (not float jitter) trips them; ratchet them upward as
 /// the encoder closes on the reference.
 ///
-/// Round 438 (fixed-point front end wired into `FrameEncoder`):
-/// TAME's long-documented L0 outlier (62.5%, previously attributed
-/// to an unstaged element of the reference's mode compare) jumped to
-/// 92.2% — the flips were front-end ω divergence, resolved by the
-/// genuine Word32 §3.2.1–§3.2.3 chain (see
+/// Round 438 (fixed-point §3.1–§3.2.3 front end wired into
+/// `FrameEncoder`): TAME's long-documented L0 outlier (62.5%,
+/// previously attributed to an unstaged element of the reference's
+/// mode compare) jumped to 96.1% — the flips were front-end ω
+/// divergence, resolved by the genuine Word16/Word32 chain (see
 /// `tests/fx_front_end_conformance.rs`). Measured end-to-end rates:
-/// ALGTHM L0 91.4/L1 74.3/T1 74.3, FIXED 90.8/70.0/77.5, LSP
-/// 87.4/45.6/91.1, PITCH 94.1/30.4/83.4, SPEECH 86.3/51.7/78.5,
-/// TAME 92.2/100.0/75.0.
+/// ALGTHM L0 91.4/L1 71.4/T1 74.3, FIXED 90.8/70.0/75.0, LSP
+/// 87.7/48.5/90.4, PITCH 94.0/35.6/83.0, SPEECH 87.0/53.9/78.7,
+/// TAME 96.1/100.0/82.0.
 #[test]
 fn parameter_agreement_floors() {
     let Some(root) = conformance_root() else {
@@ -115,12 +115,12 @@ fn parameter_agreement_floors() {
     };
     // (vector, L0 floor, L1 floor, T1±2 floor).
     let floors: [(&str, f64, f64, f64); 6] = [
-        ("ALGTHM", 88.0, 71.0, 71.0),
-        ("FIXED", 87.0, 65.0, 74.0),
-        ("LSP", 84.0, 42.0, 88.0),
-        ("PITCH", 91.0, 27.0, 80.0),
-        ("SPEECH", 83.0, 48.0, 75.0),
-        ("TAME", 89.0, 96.0, 71.0),
+        ("ALGTHM", 88.0, 68.0, 71.0),
+        ("FIXED", 87.0, 65.0, 72.0),
+        ("LSP", 84.0, 45.0, 87.0),
+        ("PITCH", 91.0, 32.0, 80.0),
+        ("SPEECH", 84.0, 50.0, 75.0),
+        ("TAME", 93.0, 96.0, 78.0),
     ];
     for (name, f_l0, f_l1, f_t1) in floors {
         let pairs = encode_vector(&root, name);

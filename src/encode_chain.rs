@@ -54,6 +54,7 @@ use crate::fixed_codebook_search::{
     adaptive_gain, correlation_d, filter_through_h, phi_matrix, prefilter_impulse_response,
     search_fixed_codebook, update_target, MAX_LOOP4_PER_FRAME,
 };
+use crate::fx::analysis::PreprocessorFx;
 use crate::gain_index_map::{map_ga, map_gb};
 use crate::gain_predict::GainPredictor;
 use crate::gain_quantize::{quantize_gains, GainTerms};
@@ -67,7 +68,6 @@ use crate::parameters::Parameters;
 use crate::perceptual_weighting::PerceptualWeighting;
 use crate::pitch_decode::{derive_t_min, encode_p1, encode_p2, PitchDelay};
 use crate::pitch_sharpen::{clamp_beta, sharpen};
-use crate::preprocess::Preprocessor;
 use crate::tables::{L_WINDOW, M};
 use crate::taming::Taming;
 
@@ -81,8 +81,8 @@ pub const L_SUBFR: usize = 40;
 /// The stateful G.729 frame encoder.
 #[derive(Debug, Clone)]
 pub struct FrameEncoder {
-    /// §3.1 pre-processing filter.
-    preproc: Preprocessor,
+    /// §3.1 pre-processing filter (fixed-point, round 438).
+    preproc: PreprocessorFx,
     /// The 240-sample analysis buffer of pre-processed speech
     /// (Figure 5 layout: `0 … 119` past, `120 … 199` present frame,
     /// `200 … 239` look-ahead).
@@ -144,7 +144,7 @@ impl FrameEncoder {
         let prev_q: [f32; M] =
             std::array::from_fn(|i| ((i + 1) as f32 * std::f32::consts::PI / 11.0).cos());
         Self {
-            preproc: Preprocessor::new(),
+            preproc: PreprocessorFx::new(),
             speech: [0.0; L_WINDOW],
             lsp_quant: LspQuantizer::new(),
             interp_q: LspInterpolator::new(),
@@ -213,9 +213,15 @@ impl FrameEncoder {
     pub fn encode_frame(&mut self, pcm: &[f32; L_FRAME]) -> EncodedFrame {
         // §3.1 pre-process the new input and slide it into the
         // analysis buffer (Figure 5: new samples fill 160 … 239).
-        let s_new = self.preproc.process_frame(pcm);
+        // Raw input PCM is integral; the §3.1 filter runs on the
+        // Word16/Word32 grid and its output is stored back as f32 for
+        // the float mid-chain stages.
+        let pcm_i: [i16; L_FRAME] = std::array::from_fn(|n| pcm[n] as i16);
+        let s_new = self.preproc.process_frame(&pcm_i);
         self.speech.copy_within(L_FRAME.., 0);
-        self.speech[L_WINDOW - L_FRAME..].copy_from_slice(&s_new);
+        for (o, &v) in self.speech[L_WINDOW - L_FRAME..].iter_mut().zip(&s_new) {
+            *o = f32::from(v);
+        }
 
         // §3.2.1/2/3: LP analysis on the clause-5 fixed-point grid
         // (round 438): genuine Word32 autocorrelation with the

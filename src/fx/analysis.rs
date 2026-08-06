@@ -37,11 +37,12 @@
 //! unstated and exposed as [`FrontEndLatitude::overflow_shift`],
 //! pinned black-box against the corpus (see the conformance tests).
 
-use crate::fx::dsp::{l_comp, l_extract, mpy_32};
-use crate::fx::ops::{l_shl, mult_r, norm_l, shr};
+use crate::fx::dsp::{l_comp, l_extract, mpy_32, mpy_32_16};
+use crate::fx::ops::{l_add, l_mac, l_mult, l_shl, mult_r, norm_l, round, shr};
 use crate::lp_analysis::N_LAGS;
 use crate::tables::{
-    LPC_HAMMING_WINDOW_Q15, LPC_LAG_WINDOW_HIGH_Q15, LPC_LAG_WINDOW_LOW_Q15, L_WINDOW,
+    HPF_PREPROC_140HZ_A_Q12, HPF_PREPROC_140HZ_B_Q12, LPC_HAMMING_WINDOW_Q15,
+    LPC_LAG_WINDOW_HIGH_Q15, LPC_LAG_WINDOW_LOW_Q15, L_WINDOW,
 };
 
 /// A Word32 value carried in the DPF `(hi, lo)` split
@@ -59,6 +60,64 @@ pub struct FrontEndLatitude {
 impl Default for FrontEndLatitude {
     fn default() -> Self {
         Self { overflow_shift: 2 }
+    }
+}
+
+/// §3.1 fixed-point pre-processing — the eq (1) 140 Hz high-pass
+/// (÷2 folded into the Q12 numerator) on the Word16/Word32 grid,
+/// mirroring the structure the decoder's §4.2.5 output high-pass
+/// pinned black-box: a Q13 accumulator (`l_mult`/`l_mac` over the
+/// staged Q12 coefficients), the feedback memory kept as the
+/// **unrounded Word32** recursion value on the Q16 grid
+/// (`mpy_32_16` against the Q12 feedback gains), and the output
+/// rounded to the saturated 16-bit PCM grid.
+#[derive(Debug, Clone, Default)]
+pub struct PreprocessorFx {
+    /// Input taps `x(n−1)`, `x(n−2)`.
+    x_hist: [i16; 2],
+    /// Unrounded feedback `y(n−1)`, `y(n−2)` on Word32 Q16.
+    y_hist: [i32; 2],
+}
+
+impl PreprocessorFx {
+    /// Fresh filter with the clause-4.3 zero state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Processes one raw 16-bit PCM sample, returning `s(n)` on the
+    /// 16-bit grid.
+    #[must_use]
+    pub fn process_sample(&mut self, x: i16) -> i16 {
+        let b = &HPF_PREPROC_140HZ_B_Q12;
+        let a = &HPF_PREPROC_140HZ_A_Q12;
+        // Numerator on the Q13 accumulator: b (Q12) × x (Q0) doubled.
+        let mut acc = l_mult(x, b[0]);
+        acc = l_mac(acc, self.x_hist[0], b[1]);
+        acc = l_mac(acc, self.x_hist[1], b[2]);
+        // Feedback: a (Q12) × y (Q16 Word32) lands on Q13 directly
+        // (corpus-pinned: a Q28 DPF coefficient variant from the
+        // printed eq (1) decimals costs ~8/10 points of LSP/SPEECH,
+        // and a Q13 y-storage costs ~12/16 — the staged Q12 grid with
+        // three extra feedback fraction bits is the reference
+        // arrangement).
+        let (h1, l1) = l_extract(self.y_hist[0]);
+        acc = l_add(acc, mpy_32_16(h1, l1, a[1]));
+        let (h2, l2) = l_extract(self.y_hist[1]);
+        acc = l_add(acc, mpy_32_16(h2, l2, a[2]));
+        self.y_hist[1] = self.y_hist[0];
+        self.y_hist[0] = l_shl(acc, 3);
+        self.x_hist[1] = self.x_hist[0];
+        self.x_hist[0] = x;
+        // Q13 → Q16 high word: rounded, saturated 16-bit output.
+        round(l_shl(acc, 3))
+    }
+
+    /// Processes one 80-sample frame, preserving inter-frame state.
+    #[must_use]
+    pub fn process_frame<const N: usize>(&mut self, frame: &[i16; N]) -> [i16; N] {
+        std::array::from_fn(|n| self.process_sample(frame[n]))
     }
 }
 
@@ -176,6 +235,31 @@ mod tests {
             let n = n as f32;
             (amp * (0.07 * n).sin() + 0.25 * amp * (0.31 * n).cos()).round()
         })
+    }
+
+    /// §3.1: the fixed pre-processor tracks the float filter within
+    /// one PCM LSB (the Word32-vs-f32 feedback truncation) on a
+    /// speech-band test signal, and both reject DC.
+    #[test]
+    fn preprocessor_tracks_float_and_rejects_dc() {
+        use crate::preprocess::Preprocessor;
+        let mut fx = PreprocessorFx::new();
+        let mut fl = Preprocessor::new();
+        let mut max_d = 0i32;
+        for n in 0..800 {
+            let x = (8_000.0 * (0.4 * n as f32).sin() + 3_000.0 * (0.9 * n as f32).cos()).round();
+            let a = i32::from(fx.process_sample(x as i16));
+            let b = fl.process_sample(x) as i32;
+            max_d = max_d.max((a - b).abs());
+        }
+        assert!(max_d <= 1, "fx vs float preprocess max delta {max_d}");
+        // DC rejection: a long constant input decays toward zero.
+        let mut fx = PreprocessorFx::new();
+        let mut last = 0i16;
+        for _ in 0..2_000 {
+            last = fx.process_sample(8_192);
+        }
+        assert!(last.abs() <= 1, "DC leak {last}");
     }
 
     /// eq (4): the fixed windowing matches the float emulation's
