@@ -26,6 +26,7 @@
 //! equations but its rounding drift compounds through the
 //! adaptive-codebook feedback until long vectors decorrelate.
 
+pub mod analysis;
 pub mod decoder;
 pub mod dsp;
 pub mod excitation;
