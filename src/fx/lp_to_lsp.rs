@@ -23,7 +23,7 @@
 
 use crate::fx::analysis::Dpf;
 use crate::fx::dsp::{l_extract, mpy_32_16};
-use crate::fx::ops::{add, div_s, l_abs, l_shl, l_sub, mult, norm_l, shr, shr_r, sub};
+use crate::fx::ops::{add, div_s, l_abs, l_shl, l_sub, norm_l, shr, sub};
 use crate::tables::{LSF_SEARCH_GRID_COS_Q15, M};
 
 /// Half the LP order — the root count of each of `F1` / `F2`.
@@ -36,17 +36,20 @@ const N_BISECT: usize = 4;
 /// (`a_in[i−1] = a_i`, `a_0 = 1` implicit):
 ///
 /// `f1[i] = (a_i + a_{M+1−i}) − f1[i−1]`,
-/// `f2[i] = (a_i − a_{M+1−i}) + f2[i−1]` — the Q12→Q11 landing uses
-/// the rounding shift (`shr_r`).
+/// `f2[i] = (a_i − a_{M+1−i}) + f2[i−1]` — the Q12→Q11 landing
+/// **truncates** (`shr`): pinned black-box against the corpus, where
+/// the rounding variant costs ~6 points of ALGTHM/LSP/SPEECH
+/// locked-history agreement (see `tests/fx_front_end_conformance.rs`).
 fn build_polys_fx(a: &[i16; M]) -> ([i16; NC + 1], [i16; NC + 1]) {
     let mut f1 = [0i16; NC + 1];
     let mut f2 = [0i16; NC + 1];
     f1[0] = 2048; // 1.0 on Q11
     f2[0] = 2048;
     for i in 1..=NC {
-        // a_i ± a_{M+1−i} on Q12, halved onto Q11 with rounding.
-        let sum = shr_r(add(a[i - 1], a[M - i]), 1);
-        let diff = shr_r(sub(a[i - 1], a[M - i]), 1);
+        // a_i ± a_{M+1−i} on Q12, halved onto Q11 with truncation
+        // (corpus-pinned; see the doc comment).
+        let sum = shr(add(a[i - 1], a[M - i]), 1);
+        let diff = shr(sub(a[i - 1], a[M - i]), 1);
         f1[i] = sub(sum, f1[i - 1]);
         f2[i] = add(diff, f2[i - 1]);
     }
@@ -80,7 +83,9 @@ fn cheb_fx(x_q15: i16, f: &[i16; NC + 1]) -> i32 {
 /// `[x_hi, x_lo]` (grid order: `x_lo > x_hi`) with the polynomial
 /// values `y_lo`/`y_hi` of opposite sign: `x = x_lo + (x_hi −
 /// x_lo)·|y_lo|/|y_hi − y_lo|`, the ratio through `div_s` on aligned
-/// high words.
+/// high words and the step landed with the rounding multiply
+/// (`mult_r`, corpus-pinned: the truncating variant costs ~0.4 points
+/// of PITCH/SPEECH locked-history agreement).
 fn interpolate_root(x_lo: i16, x_hi: i16, y_lo: i32, y_hi: i32) -> i16 {
     let dy = l_sub(y_hi, y_lo);
     if dy == 0 {
@@ -90,7 +95,7 @@ fn interpolate_root(x_lo: i16, x_hi: i16, y_lo: i32, y_hi: i32) -> i16 {
     let den = crate::fx::ops::extract_h(l_shl(l_abs(dy), n));
     let num = crate::fx::ops::extract_h(l_shl(l_abs(y_lo), n));
     let ratio = if num >= den { 32767 } else { div_s(num, den) };
-    add(x_lo, mult(sub(x_hi, x_lo), ratio))
+    add(x_lo, crate::fx::ops::mult_r(sub(x_hi, x_lo), ratio))
 }
 
 /// §3.2.3 fixed-point LP→LSP conversion: Q12 LP coefficients to ten

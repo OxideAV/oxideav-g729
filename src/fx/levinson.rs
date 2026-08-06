@@ -23,15 +23,15 @@
 //! - The prediction-error energy `E^{(i)}` is kept **renormalised**
 //!   after every order (`norm_l` shift, cumulative exponent
 //!   `alp_exp`), so the eq (8) division always sees a normalised
-//!   denominator; the quotient is re-referred to the `Q(n)` grid by
-//!   shifting the accumulated exponent back in.
+//!   denominator; the numerator is re-referred onto the stored-E
+//!   grid by the accumulated exponent before the division.
 //!
 //! ## Order-`i` schedule
 //!
 //! ```text
 //! t0   = Σ_{j=1}^{i−1} mpy_32(a_j, r'(i−j))      (Q(n−4))
 //! t0   = l_shl(t0, 4) + r'(i)                    (Q(n))
-//! k_i  = −t0 / E^{(i−1)}     via div_32 + l_shl(·, alp_exp)  (Q31)
+//! k_i  = −t0 / E^{(i−1)}     via l_shl(t0, alp_exp) + div_32  (Q31)
 //! a_j += mpy_32(k_i, a_{i−j})     j = 1 … i−1    (Q27, snapshot)
 //! a_i  = l_shr(k_i, 4)                           (Q27)
 //! E    = E − mpy_32(k_i², E) ; renormalise, alp_exp += shift
@@ -104,9 +104,13 @@ pub fn levinson_fx(r: &[Dpf; N_LAGS]) -> Option<LevinsonFxResult> {
             return None;
         }
         let (e_hi, e_lo) = l_extract(e);
-        let quot = div_32(t1, e_hi, e_lo);
-        // Re-refer the quotient from the stored-E grid to Q(n).
-        let mut k = l_shl(quot, alp_exp);
+        // Re-refer the numerator onto the stored-E grid *before* the
+        // division (corpus-pinned: shifting the quotient after the
+        // division instead costs ~6 points of ALGTHM locked-history
+        // agreement — the pre-shift keeps the full div_32 fraction
+        // width on the small late-order numerators).
+        let quot = div_32(l_shl(t1, alp_exp), e_hi, e_lo);
+        let mut k = quot;
         if t0 > 0 {
             k = l_negate(k);
         }
