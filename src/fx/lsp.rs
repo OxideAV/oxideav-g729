@@ -55,6 +55,16 @@ pub const STABILITY_CEIL_Q13: i16 = 25681;
 /// cosine-table domain (`π ↦ 16384`).
 const TWO_OVER_PI_Q15: i16 = 20861;
 
+/// Table 9 start-up LSP memory `q_i = cos(iπ/11)` on the exact Q15
+/// grid `round(cos(iπ/11)·2^15)`, `i = 1…10` (decreasing in `i`
+/// because cosine is decreasing on `(0, π)`). The printed
+/// `arccos(iπ/11)` is domain-invalid for `i ≥ 4`; §3.2.3's
+/// `q_i = cos(ω_i)` applied to the adjacent `ω̂_i = iπ/11` row fixes
+/// the intended value.
+pub const STARTUP_LSP_Q15: [i16; M] = [
+    31441, 27566, 21458, 13612, 4663, -4663, -13612, -21458, -27566, -31441,
+];
+
 /// §3.2.4 steps 1–4 stability procedure on the Q13 grid, in place.
 pub fn stability_q13(lsf: &mut [i16; M]) {
     // Step 1 — ascending order.
@@ -205,14 +215,22 @@ impl Default for LspDecoderFx {
 impl LspDecoderFx {
     /// Fresh decoder in the clause-4.3 start-up state: MA history at
     /// the `l̂_i = iπ/11` vector, previous LSPs at `cos(iπ/11)`.
+    ///
+    /// The previous-LSP memory is the Table 9 `q_i` row on the exact
+    /// Q15 grid `round(cos(iπ/11)·2^15)` (the printed `arccos` is a
+    /// documented erratum for `cos` — §3.2.3 defines `q_i = cos(ω_i)`
+    /// and the row above initialises `ω̂_i = iπ/11`), NOT the staged
+    /// 64-segment cosine-table image of the startup LSF: the table
+    /// interpolation lands up to 8 Q15 LSB off the true cosines, and
+    /// that perturbation is measurable at frame 0 subframe 0 of every
+    /// conformance vector through the §3.2.5 interpolated LP.
     #[must_use]
     pub fn new() -> Self {
         let history = startup_history_q13();
         let startup_lsf: [i16; M] = history[0];
-        let prev_lsp_q15 = lsf_to_lsp_q15(&startup_lsf);
         Self {
             history,
-            prev_lsp_q15,
+            prev_lsp_q15: STARTUP_LSP_Q15,
             prev_lsf_q13: startup_lsf,
             last_residual: startup_lsf,
             lat: FxLatitude::default(),
@@ -279,6 +297,24 @@ mod tests {
             worst = worst.max(err);
         }
         assert!(worst <= 16.0, "worst cosine deviation {worst} Q15 LSBs");
+    }
+
+    /// The Table 9 start-up LSP grid is `round(cos(iπ/11)·2^15)`
+    /// exactly (the corrected reading of the printed domain-invalid
+    /// `arccos(iπ/11)` row: §3.2.3 defines `q_i = cos(ω_i)` and the
+    /// adjacent row initialises `ω̂_i = iπ/11`), antisymmetric and
+    /// strictly decreasing as cosine on `(0, π)` demands.
+    #[test]
+    fn startup_lsp_is_exact_cosine_grid() {
+        for (i, &q) in STARTUP_LSP_Q15.iter().enumerate() {
+            let w = f64::from((i + 1) as u32) * core::f64::consts::PI / 11.0;
+            let expect = (w.cos() * 32768.0).round() as i16;
+            assert_eq!(q, expect, "q_{} off the exact Q15 cosine grid", i + 1);
+            assert_eq!(q, -STARTUP_LSP_Q15[M - 1 - i], "antisymmetry at {i}");
+            if i > 0 {
+                assert!(q < STARTUP_LSP_Q15[i - 1], "not strictly decreasing");
+            }
+        }
     }
 
     /// Monotonicity: increasing LSF maps to non-increasing LSP.
