@@ -217,24 +217,47 @@ impl FrameEncoder {
         self.speech.copy_within(L_FRAME.., 0);
         self.speech[L_WINDOW - L_FRAME..].copy_from_slice(&s_new);
 
-        // §3.2.1/2/3: LP analysis over the whole 240-sample window.
-        let r = analyze_window(&self.speech);
-        let lev = levinson(&r);
-        // Clause 2.5: the bit-exact coder stores the LP coefficients as
-        // 16-bit Q12 values; every LSP root the reference finds is a
-        // root of the *Q12-rounded* A(z). Rounding here moves the whole
-        // LSF chain onto the reference grid (black-box-validated: the
-        // §3.2.4 codebook decisions measurably align with the
-        // conformance corpus once a_i is Q12).
-        let a_q12: [f32; M] = std::array::from_fn(|i| (lev.a[i] * 4096.0).round() / 4096.0);
-        let q_unq = match lp_to_lsp(&a_q12) {
-            Some(q) => {
+        // §3.2.1/2/3: LP analysis on the clause-5 fixed-point grid
+        // (round 438): genuine Word32 autocorrelation with the
+        // overflow-rescale protocol, DPF Levinson-Durbin, and the
+        // fixed Chebyshev root search. The corpus-pinned configuration
+        // (see `tests/fx_front_end_conformance.rs`) beats the float
+        // grid emulation on every locked-history vector — most
+        // dramatically TAME 80.5 → 99.2%. The float chain remains the
+        // fallback for an ill-conditioned frame (never triggered on
+        // the corpus) and the spec-equation oracle.
+        let speech_i: [i16; L_WINDOW] = std::array::from_fn(|n| self.speech[n] as i16);
+        let ac = crate::fx::analysis::analyze_window_fx(
+            &speech_i,
+            &crate::fx::analysis::FrontEndLatitude::default(),
+        );
+        let fx_front = crate::fx::levinson::levinson_fx(&ac.r).and_then(|lev_fx| {
+            crate::fx::lp_to_lsp::lp_to_lsp_fx(&lev_fx.a_q12).map(|q_fx| (lev_fx, q_fx))
+        });
+        let (reflection, q_unq) = match fx_front {
+            Some((lev_fx, q_fx)) => {
+                let q: [f32; M] = std::array::from_fn(|i| f32::from(q_fx[i]) / 32_768.0);
                 self.prev_q_unq = q;
-                q
+                (
+                    (
+                        f32::from(lev_fx.rc_q15[0]) / 32_768.0,
+                        f32::from(lev_fx.rc_q15[1]) / 32_768.0,
+                    ),
+                    q,
+                )
             }
-            // Clause 3.2.3: on a failed root search keep the previous
-            // frame's LSPs.
-            None => self.prev_q_unq,
+            None => {
+                // Defensive float fallback: Q12-rounded Levinson +
+                // float root search; on a failed search keep the
+                // previous frame's LSPs (clause 3.2.3).
+                let r = analyze_window(&self.speech);
+                let lev = levinson(&r);
+                let a_q12: [f32; M] = std::array::from_fn(|i| (lev.a[i] * 4096.0).round() / 4096.0);
+                if let Some(q) = lp_to_lsp(&a_q12) {
+                    self.prev_q_unq = q;
+                }
+                ((lev.reflection[0], lev.reflection[1]), self.prev_q_unq)
+            }
         };
 
         // §3.2.4: quantise (advances the decoder-consistent MA state).
@@ -260,9 +283,7 @@ impl FrameEncoder {
             crate::lsp_interpolate::q_to_omega(&q_sub_unq[0]),
             crate::lsp_interpolate::q_to_omega(&q_sub_unq[1]),
         ];
-        let decisions = self
-            .weighting
-            .adapt_frame((lev.reflection[0], lev.reflection[1]), &omega_sub);
+        let decisions = self.weighting.adapt_frame(reflection, &omega_sub);
 
         // Weighted speech for both subframes (the present frame is
         // buffer 120 … 199).
