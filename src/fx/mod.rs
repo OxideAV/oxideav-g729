@@ -31,6 +31,7 @@ pub mod decoder;
 pub mod dsp;
 pub mod excitation;
 pub mod gains;
+pub mod levinson;
 pub mod lsp;
 pub mod ops;
 pub mod postfilter;
