@@ -135,6 +135,38 @@ pub struct PfLatitudeFx {
     /// high-pass consumes that grid, landing its output on Q0 without
     /// a second scaling.
     pub agc_x2: bool,
+    /// eq (88) target as the square root of the amplitude ratio
+    /// (black-box sweep hook; r452 measured: pushes SPEECH's first
+    /// divergence 83 → 271 but collapses LSP/PITCH exact share — off).
+    pub agc_sqrt: bool,
+    /// eq (89)/(90): scale with `g(n−1)` first, then advance the
+    /// recursion (black-box sweep hook).
+    pub agc_apply_first: bool,
+    /// eq (90) smoothing pole on Q15 (`0` = the printed 0.85 pair).
+    pub agc_pole_q15: i16,
+    /// eq (88) ratio taken from the PREVIOUS subframe's `Σ|ŝ|/Σ|sf|`
+    /// sums (one-subframe lag) instead of the current one.
+    ///
+    /// r452 measured: this reproduces the reference's AGC trajectory at
+    /// silence→signal onsets exactly (PITCH/FIXED/TAME frame-0
+    /// subframe-1 heads become byte-exact, and every clean vector's
+    /// first divergence moves later: FIXED 43 → 47, PITCH 41 → 46,
+    /// TAME 41 → 53, SPEECH 83 → 141), but costs aggregate exact share
+    /// (sum over 12 vectors 112.7 → 103.7) while the §4.2.2/§4.2.3
+    /// sub-LSB schedule is still unpinned — the residual ±1-LSB
+    /// `st`/`tilt` differences then land on the wrong side of the
+    /// rounding boundary more often. Left OFF until that schedule is
+    /// pinned; the onset evidence says it is the reference's structure.
+    pub agc_lag: bool,
+    /// eq (85) `1/g_f` as an exact rounded division by the Word32 gain
+    /// instead of the `recip_norm` mantissa multiply (r452 measured:
+    /// clearly refuted — exact-share sum 112.7 → 92.8; the mantissa
+    /// multiply IS the reference grid).
+    pub gf_exact_div: bool,
+    /// eq (86) `1/g_t` as an exact rounded division (r452: neutral,
+    /// ±0.2 on the exact-share sum — the tilt numbers rarely reach the
+    /// differing LSB).
+    pub tilt_exact_div: bool,
 }
 
 impl Default for PfLatitudeFx {
@@ -155,6 +187,12 @@ impl Default for PfLatitudeFx {
             hp_wide: true,
             agc_shift: 0,
             agc_x2: true,
+            agc_sqrt: false,
+            agc_apply_first: false,
+            agc_pole_q15: 0,
+            agc_lag: false,
+            gf_exact_div: false,
+            tilt_exact_div: false,
         }
     }
 }
@@ -224,6 +262,8 @@ pub struct PostfilterFx {
     st_y: [i16; M],
     /// §4.2.3 FIR input tap `t(n−1)`.
     tilt_prev: i16,
+    /// Previous subframe's eq (88) `(Σ|ŝ|, Σ|sf|)` pair (agc_lag hook).
+    agc_prev_sums: (i32, i32),
     /// §4.2.4 smoothed gain `g(n)` on Q12 (Table 9 init 1.0 = 4096).
     agc_q12: i16,
     /// §4.2.5 input taps `[x(n−1), x(n−2)]`.
@@ -251,6 +291,7 @@ impl PostfilterFx {
             r_buf: [0; HIST + L_SUBFR],
             st_y: [0; M],
             tilt_prev: 0,
+            agc_prev_sums: (0, 0),
             agc_q12: 4096,
             hp_x: [0; 2],
             hp_y: [0; 2],
@@ -536,15 +577,29 @@ impl PostfilterFx {
         z: &[i16; L_SUBFR],
         apd: &[i16; M],
         gf_recip: (i16, i16),
+        gf32_q12: i32,
     ) -> [i16; L_SUBFR] {
         let (gf_m, gf_e) = gf_recip;
+        // Exact division by the Q12 gain: round(x·4096/g_f).
+        let exact_div = |x: i16| -> i16 {
+            if gf32_q12 <= 0 {
+                return x;
+            }
+            let num = i64::from(x) << 13; // ×2·4096 for the rounding add
+            let q = (num / i64::from(gf32_q12) + 1) >> 1;
+            q.clamp(-32768, 32767) as i16
+        };
         let mut y_un = [0i16; L_SUBFR]; // un-normalised y(n)
         let mut out = [0i16; L_SUBFR];
         for n in 0..L_SUBFR {
             // Optionally scale the input by 1/g_f first (the eq (84)
             // leading factor commutes; the rounding point differs).
             let zin = if self.lat.gf_before {
-                round(l_shl(l_mult(z[n], gf_m), sub(gf_e, 18)))
+                if self.lat.gf_exact_div {
+                    exact_div(z[n])
+                } else {
+                    round(l_shl(l_mult(z[n], gf_m), sub(gf_e, 18)))
+                }
             } else {
                 z[n]
             };
@@ -565,6 +620,8 @@ impl PostfilterFx {
             // (Q16 landing → round to Q0).
             out[n] = if self.lat.gf_before {
                 y
+            } else if self.lat.gf_exact_div {
+                exact_div(y)
             } else {
                 round(l_shl(l_mult(y, gf_m), sub(gf_e, 18)))
             };
@@ -609,10 +666,16 @@ impl PostfilterFx {
             let prev = if n == 0 { self.tilt_prev } else { t[n - 1] };
             // t(n) + c·t(n−1) on Q16.
             let acc = l_mac(l_deposit_h(t[n]), c, prev);
-            // ×(1/g_t) = ×m·2^(e−30) keeping Q16: mpy is acc·m/2^15,
-            // so shift by e − 15.
-            let (hi, lo) = l_extract(acc);
-            *o = round(l_shl(mpy_32_16(hi, lo, gt_m), sub(gt_e, 15)));
+            *o = if self.lat.tilt_exact_div {
+                // Exact rounded (t + c·t₋₁)/g_t on the Q16/Q15 grids.
+                let num = (i64::from(acc) << 15) / i64::from(gt32.max(1));
+                (((num >> 15) + 1) >> 1).clamp(-32768, 32767) as i16
+            } else {
+                // ×(1/g_t) = ×m·2^(e−30) keeping Q16: mpy is acc·m/2^15,
+                // so shift by e − 15.
+                let (hi, lo) = l_extract(acc);
+                round(l_shl(mpy_32_16(hi, lo, gt_m), sub(gt_e, 15)))
+            };
         }
         self.tilt_prev = t[L_SUBFR - 1];
         out
@@ -629,23 +692,43 @@ impl PostfilterFx {
             den = l_add(den, i32::from(abs_s(sf[n])));
         }
         let shift = self.lat.agc_shift;
+        let (num, den) = if self.lat.agc_lag {
+            let prev = self.agc_prev_sums;
+            self.agc_prev_sums = (num, den);
+            prev
+        } else {
+            (num, den)
+        };
         let g_target_q12: i16 = if den > 0 {
-            ((i64::from(num) << (12 + shift)) / i64::from(den)).min(32767) as i16
+            let ratio = f64::from(num) / f64::from(den);
+            let ratio = if self.lat.agc_sqrt {
+                ratio.sqrt()
+            } else {
+                ratio
+            };
+            ((ratio * ((1i64 << (12 + shift)) as f64)) as i64).min(32767) as i16
         } else {
             self.agc_q12
         };
 
         let mut out = [0i16; L_SUBFR];
         for (n, o) in out.iter_mut().enumerate() {
-            // eq (90): g(n) = 0.85·g(n−1) + 0.15·G (Q15 weights).
-            self.agc_q12 = add(
-                mult(AGC_PREV_Q15, self.agc_q12),
-                mult(AGC_TARGET_Q15, g_target_q12),
-            );
-            // eq (89): sf′(n) = g(n)·sf(n) — product to Q16, round
-            // (or to Q17 → Q1 when the ×2 upscale is folded in).
             let x2 = i16::from(self.lat.agc_x2);
-            *o = round(l_shl(l_mult(sf[n], self.agc_q12), 3 - shift + x2));
+            let (pole, target_w) = if self.lat.agc_pole_q15 == 0 {
+                (AGC_PREV_Q15, AGC_TARGET_Q15)
+            } else {
+                (self.lat.agc_pole_q15, sub(32767, self.lat.agc_pole_q15))
+            };
+            if self.lat.agc_apply_first {
+                *o = round(l_shl(l_mult(sf[n], self.agc_q12), 3 - shift + x2));
+                self.agc_q12 = add(mult(pole, self.agc_q12), mult(target_w, g_target_q12));
+            } else {
+                // eq (90): g(n) = 0.85·g(n−1) + 0.15·G (Q15 weights).
+                self.agc_q12 = add(mult(pole, self.agc_q12), mult(target_w, g_target_q12));
+                // eq (89): sf′(n) = g(n)·sf(n) — product to Q16, round
+                // (or to Q17 → Q1 when the ×2 upscale is folded in).
+                *o = round(l_shl(l_mult(sf[n], self.agc_q12), 3 - shift + x2));
+            }
         }
         out
     }
@@ -768,7 +851,7 @@ impl PostfilterFx {
             gf = l_add(gf, i32::from(abs_s(hv)));
         }
         let gf_recip = if gf > 0 { recip_norm(gf) } else { (16384, 33) };
-        let hf = self.synthesis(&hp, &apd, gf_recip);
+        let hf = self.synthesis(&hp, &apd, gf_recip, gf);
 
         // §4.2.3 H_t(z).
         let ht = self.tilt(&hf, &h);
