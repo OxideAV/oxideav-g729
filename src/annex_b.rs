@@ -590,12 +590,13 @@ pub enum AnnexBOutput {
     /// samples `ex(n)`, the eq (B.19) target gain `G̃_t`, and the SID
     /// energy that drove it.
     ///
-    /// This is the pseudo-white excitation the §B.4.4 decoder feeds into
-    /// the interpolated LP synthesis filter; the final LP-filtered PCM
-    /// still awaits the §B.4.2.2 SID-LSP VQ tables (a documented docs-gap),
-    /// so the excitation is surfaced directly here. When the SID-LSP VQ
-    /// lands, the filtered PCM replaces the raw excitation in this variant.
     ComfortNoise {
+        /// The §4.2-post-processed comfort-noise PCM — the §B.4.4
+        /// excitation filtered through the interpolated SID-LSP
+        /// synthesis filter and the same post-processing an active
+        /// frame gets (round 452; the §B.4.2.2 SID-LSP VQ tables are
+        /// staged and compiled).
+        pcm: Box<[f32; FRAME_SAMPLES]>,
         /// The 80 synthesized comfort-noise excitation samples `ex(n)`.
         excitation: Box<[f32; FRAME_SAMPLES]>,
         /// eq (B.19) target excitation gain `G̃_t` for this frame.
@@ -605,10 +606,11 @@ pub enum AnnexBOutput {
         /// untransmitted frame, or `None` before any SID has been seen.
         energy_db: Option<f32>,
     },
-    /// An active frame was erased; the §4.4 base-codec concealment path
-    /// should run. Carries no synthesized samples here because the base
-    /// chain surfaces erasure separately — the caller drives concealment.
-    ErasedActivePlaceholder,
+    /// An active frame was erased (§B.4.5: previous frame active →
+    /// treat as active). Carries the §4.4-concealed post-processed PCM
+    /// from the base chain (round 452; previously a placeholder with
+    /// no samples).
+    ErasedActive(Box<[f32; FRAME_SAMPLES]>),
 }
 
 /// End-to-end Annex B stream decoder: routes each parsed frame to the
@@ -638,6 +640,15 @@ pub struct AnnexBStreamDecoder {
     /// Whether the previous decoded frame was active speech (`Vad_{t−1}`),
     /// for the eq (B.19) jump-to-SID branch.
     prev_active: bool,
+    /// §B.4.2.2 SID-LSF dequantizer (separate MA history, advanced
+    /// once per SID frame).
+    sid_lsp: crate::sid_lsf::SidLspDecoder,
+    /// The last dequantized SID LSP vector (cosine domain) — the
+    /// "current LSPs" of §B.4.4 for SID and untransmitted frames.
+    /// `None` before the first SID: the previous-frame LSPs stand in
+    /// (spectrum repeat), mirroring the §B.4.5 first-SID-erased
+    /// protection which likewise falls back to the last valid LSPs.
+    last_sid_q: Option<[f32; crate::tables::M]>,
 }
 
 impl Default for AnnexBStreamDecoder {
@@ -656,6 +667,8 @@ impl AnnexBStreamDecoder {
             cng_gain: CngGainSmoother::new(),
             cng_rng: CngRandom::new(crate::concealment::RANDOM_SEED_INIT),
             prev_active: false,
+            sid_lsp: crate::sid_lsf::SidLspDecoder::new(),
+            last_sid_q: None,
         }
     }
 
@@ -671,7 +684,7 @@ impl AnnexBStreamDecoder {
     /// [`AnnexBOutput::Speech`]; non-active frames synthesize the §B.4.4
     /// energy-controlled comfort-noise excitation
     /// ([`AnnexBOutput::ComfortNoise`]); an erased-active frame returns
-    /// [`AnnexBOutput::ErasedActivePlaceholder`].
+    /// [`AnnexBOutput::ErasedActive`] with the §4.4-concealed PCM.
     ///
     /// # Errors
     ///
@@ -692,7 +705,15 @@ impl AnnexBStreamDecoder {
                 self.prev_active = true;
                 Ok(AnnexBOutput::Speech(Box::new(pf.output())))
             }
-            ResolvedFrame::Sid { energy_db, .. } => {
+            ResolvedFrame::Sid { sid, energy_db } => {
+                // §B.4.2.2: dequantize the SID-LSF indices to the
+                // comfort-noise spectral envelope.
+                let omega = self.sid_lsp.dequantize(
+                    usize::from(sid.lp0),
+                    usize::from(sid.l1),
+                    usize::from(sid.l2),
+                );
+                self.last_sid_q = Some(crate::lsp_interpolate::omega_to_q(&omega));
                 let out = self.synthesize_comfort_noise(Some(energy_db));
                 self.prev_active = false;
                 Ok(out)
@@ -702,7 +723,14 @@ impl AnnexBStreamDecoder {
                 self.prev_active = false;
                 Ok(out)
             }
-            ResolvedFrame::ErasedActive => Ok(AnnexBOutput::ErasedActivePlaceholder),
+            ResolvedFrame::ErasedActive => {
+                // §B.4.5 + §4.4: conceal through the base chain so the
+                // synthesis/postfilter state advances like the
+                // reference's.
+                let pf = self.base.conceal_to_postfiltered();
+                self.prev_active = true;
+                Ok(AnnexBOutput::ErasedActive(Box::new(pf.output())))
+            }
         }
     }
 
@@ -726,14 +754,31 @@ impl AnnexBStreamDecoder {
         let target = self.cng_gain.next_target(g_sid, self.prev_active);
 
         let mut excitation = [0.0f32; FRAME_SAMPLES];
+        let mut anchor_lag = 0usize;
         for sf in 0..2 {
-            let shapes = self.draw_cng_shapes();
+            let (shapes, lag) = self.draw_cng_shapes();
+            if sf == 0 {
+                anchor_lag = lag;
+            }
             let ga_draw = self.cng_rng.next_unit();
             let ex = synthesize_cng_subframe(&shapes, target, ga_draw);
             excitation[sf * SUBFRAME_SIZE..(sf + 1) * SUBFRAME_SIZE].copy_from_slice(&ex);
         }
 
+        // §B.4.4: the excitation drives the interpolated SID-LSP
+        // synthesis filter through the same §4.1.6 → §4.2 machinery an
+        // active frame uses (shared state: excitation history, filter
+        // memories, interpolator, postfilter). Before the first SID the
+        // previous-frame LSPs stand in as the current spectrum.
+        let current_q = self
+            .last_sid_q
+            .unwrap_or_else(|| *self.base.previous_lsp_q());
+        let pcm = self
+            .base
+            .decode_cng_frame_to_postfiltered(&excitation, &current_q, anchor_lag);
+
         AnnexBOutput::ComfortNoise {
+            pcm: Box::new(pcm),
             excitation: Box::new(excitation),
             target_gain: target,
             energy_db,
@@ -746,7 +791,7 @@ impl AnnexBStreamDecoder {
     /// 4-pulse ±1 ACELP fixed excitation `e_f(n)` (`Σe_f² = 4`) on the
     /// spec's interleaved single-pulse tracks, and a white Gaussian
     /// component `ex2(n)`.
-    fn draw_cng_shapes(&mut self) -> CngSubframeShapes {
+    fn draw_cng_shapes(&mut self) -> (CngSubframeShapes, usize) {
         // Adaptive excitation of unity gain: a single unit pulse at the
         // randomly chosen pitch position, repeated into the subframe (a
         // minimal unity-energy adaptive shape — the spec only fixes that
@@ -771,7 +816,7 @@ impl AnnexBStreamDecoder {
 
         let ex2: [f32; SUBFRAME_SIZE] = core::array::from_fn(|_| self.cng_rng.next_gaussian());
 
-        CngSubframeShapes { e_a, e_f, ex2 }
+        (CngSubframeShapes { e_a, e_f, ex2 }, lag)
     }
 
     /// Borrow the §B.4.4 CNG target-gain smoother for inspection / tests.
@@ -1115,6 +1160,7 @@ mod tests {
             .expect("sid decodes");
         match out {
             AnnexBOutput::ComfortNoise {
+                pcm: _,
                 excitation,
                 target_gain,
                 energy_db,
@@ -1193,7 +1239,7 @@ mod tests {
         let out = dec
             .decode_frame(&AnnexBFrame::Erased)
             .expect("erased decodes");
-        assert_eq!(out, AnnexBOutput::ErasedActivePlaceholder);
+        assert!(matches!(out, AnnexBOutput::ErasedActive(_)));
     }
 
     #[test]

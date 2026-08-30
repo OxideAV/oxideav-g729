@@ -150,11 +150,27 @@ impl PostfilterCascade {
         // integer part of the *first-subframe* transmitted delay T_1,
         // used for both subframes of the frame.
         let int_t1 = frame.subframes[0].pitch.int_t.max(0) as usize;
+        let speech = [synth.subframes[0].speech, synth.subframes[1].speech];
+        let lp = [frame.subframes[0].lp, frame.subframes[1].lp];
+        self.process_frame_direct(&speech, &lp, int_t1)
+    }
 
+    /// [`Self::process_frame`] from bare per-subframe signals: the
+    /// reconstructed speech, the LP coefficient sets, and the §4.2.1
+    /// integer-delay anchor. Used by the Annex B §B.4.4 comfort-noise
+    /// path, whose frames have no [`DecodedFrame`] (their pitch lag is
+    /// the eq (96)-drawn value and their LP is the SID-LSP filter).
+    #[must_use]
+    pub fn process_frame_direct(
+        &mut self,
+        speech: &[[f32; SUBFRAME_SIZE]; 2],
+        lp: &[[f32; M]; 2],
+        int_t1: usize,
+    ) -> PostfilteredFrame {
         let mut subs = [None, None];
         for (i, slot) in subs.iter_mut().enumerate() {
-            let s_hat: &[f32; SUBFRAME_SIZE] = &synth.subframes[i].speech;
-            let a: &[f32; M] = &frame.subframes[i].lp;
+            let s_hat: &[f32; SUBFRAME_SIZE] = &speech[i];
+            let a: &[f32; M] = &lp[i];
 
             // §4.2.1 H_p(z): long-term (harmonic) postfilter on ŝ(n).
             let (hp, decision) = self.long_term.filter_subframe(s_hat, a, int_t1);

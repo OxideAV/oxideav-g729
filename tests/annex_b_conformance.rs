@@ -344,6 +344,7 @@ fn annex_b_stream_decode_full_corpus() {
                     total_speech += 1;
                 }
                 AnnexBOutput::ComfortNoise {
+                    pcm,
                     excitation,
                     target_gain,
                     ..
@@ -354,12 +355,18 @@ fn annex_b_stream_decode_full_corpus() {
                         "{seq}: comfort-noise frame #{i} has non-finite excitation",
                     );
                     assert!(
+                        pcm.iter().all(|x| x.is_finite()),
+                        "{seq}: comfort-noise frame #{i} has non-finite PCM",
+                    );
+                    assert!(
                         target_gain.is_finite() && *target_gain >= 0.0,
                         "{seq}: comfort-noise frame #{i} target gain {target_gain} invalid",
                     );
                     total_comfort_noise += 1;
                 }
-                AnnexBOutput::ErasedActivePlaceholder => {}
+                AnnexBOutput::ErasedActive(pcm) => {
+                    assert!(pcm.iter().all(|x| x.is_finite()));
+                }
             }
         }
         checked += 1;
@@ -379,4 +386,106 @@ fn sid_frame_size_constants() {
     assert_eq!(SID_WORDS, 16);
     assert_eq!(SID_LP0_BITS + SID_L1_BITS + SID_L2_BITS + SID_GAIN_BITS, 15);
     assert_eq!(ACTIVE_BITS, 80);
+}
+
+/// Round-452 ratchet: the full Annex B stream output (active speech
+/// through the base chain, comfort noise through the §B.4.2.2 SID-LSP
+/// filter) against the reference `.out` PCM.
+///
+/// Active frames must correlate strongly with the reference (they are
+/// the same §4.1→§4.2 float chain, now fed the §B.4.4-continued
+/// excitation history across silence). Comfort-noise frames are
+/// *noise* — the eq (96) draw schedule is not pinned by the prose, so
+/// sample alignment with the reference is not expected; what is
+/// checked is the energy envelope: the aggregate CN RMS must sit in
+/// the same range as the reference's.
+#[test]
+fn annex_b_stream_tracks_reference_output() {
+    let Some(root) = conformance_root() else {
+        eprintln!("conformance corpus absent; skipping");
+        return;
+    };
+    let mut checked = 0;
+    for seq in [
+        "tstseq1", "tstseq2", "tstseq3", "tstseq4", "tstseq5", "tstseq6",
+    ] {
+        let bit = std::fs::read(root.join("g729b").join(format!("{seq}.bit"))).unwrap();
+        let refpcm_bytes = std::fs::read(root.join("g729b").join(format!("{seq}.out"))).unwrap();
+        let refpcm: Vec<i16> = refpcm_bytes
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let mut dec = AnnexBStreamDecoder::new();
+        let outputs = dec.decode_stream(&bit).unwrap();
+
+        let (mut dot, mut oe, mut re) = (0.0f64, 0.0f64, 0.0f64);
+        let (mut act_exact, mut act_n) = (0usize, 0usize);
+        let (mut cn_ours_e, mut cn_ref_e, mut cn_frames) = (0.0f64, 0.0f64, 0usize);
+        for (i, o) in outputs.iter().enumerate() {
+            let refs = &refpcm[i * FRAME_SAMPLES..(i + 1) * FRAME_SAMPLES];
+            match o {
+                AnnexBOutput::Speech(s) => {
+                    for (a, &b) in s.iter().zip(refs) {
+                        let (a, b) = (f64::from(*a), f64::from(b));
+                        dot += a * b;
+                        oe += a * a;
+                        re += b * b;
+                        if (a - b).abs() < 0.5 {
+                            act_exact += 1;
+                        }
+                        act_n += 1;
+                    }
+                }
+                AnnexBOutput::ComfortNoise { pcm, .. } => {
+                    for (a, &b) in pcm.iter().zip(refs) {
+                        cn_ours_e += f64::from(*a) * f64::from(*a);
+                        cn_ref_e += f64::from(b) * f64::from(b);
+                    }
+                    cn_frames += 1;
+                }
+                AnnexBOutput::ErasedActive(pcm) => {
+                    assert!(pcm.iter().all(|x| x.is_finite()));
+                }
+            }
+        }
+        let corr = if oe > 0.0 && re > 0.0 {
+            dot / (oe.sqrt() * re.sqrt())
+        } else {
+            1.0
+        };
+        let rms_ratio = if cn_ref_e > 0.0 {
+            (cn_ours_e / cn_ref_e).sqrt()
+        } else {
+            1.0
+        };
+        eprintln!(
+            "{seq}: active corr {corr:.4} exact {:.1}% ({act_n} samples), CN frames {cn_frames} rms-ratio {rms_ratio:.3}",
+            100.0 * act_exact as f64 / act_n.max(1) as f64,
+        );
+        // Floors pinned at round 452 (measured: corr 0.9914 / 0.9886 /
+        // 0.9831 / 0.9716 / 0.6589 / 0.9965; CN rms-ratio 0.716 /
+        // 0.918 / 1.035 / 1.057 / 16.6 / 0.635). tstseq5 is the
+        // erasure-stress decoder-only sequence: its head is one SID +
+        // erased frames, and its single comfort-noise frame lands
+        // before any usable SID energy state — both floors stay wide
+        // there.
+        let (corr_floor, rms_band) = match seq {
+            "tstseq1" => (0.98, 0.5..1.1),
+            "tstseq2" => (0.97, 0.7..1.2),
+            "tstseq3" => (0.97, 0.8..1.3),
+            "tstseq4" => (0.95, 0.8..1.3),
+            "tstseq5" => (0.60, 0.05..20.0),
+            _ => (0.99, 0.4..1.0),
+        };
+        assert!(
+            corr >= corr_floor,
+            "{seq}: active corr {corr:.4} under floor {corr_floor}",
+        );
+        assert!(
+            act_n == 0 || rms_band.contains(&rms_ratio),
+            "{seq}: CN rms ratio {rms_ratio:.3} out of band {rms_band:?}",
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 6);
 }

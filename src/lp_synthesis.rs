@@ -343,6 +343,23 @@ impl Synthesizer {
         }
     }
 
+    /// §B.4.4 comfort-noise entry: filter an externally-built
+    /// excitation subframe through `1/Â(z)` (eq (77)) and advance both
+    /// cross-subframe state buffers, exactly as an active subframe
+    /// would — the CNG excitation enters the eq (40) past-excitation
+    /// history so a following active frame's adaptive codebook reads
+    /// the synthesized noise, per §B.4.4's "in the same manner than
+    /// the decoder produces active speech".
+    pub fn synthesize_direct_subframe(
+        &mut self,
+        excitation: &[f32; SUBFRAME_SIZE],
+        a: &[f32; M],
+    ) -> [f32; SUBFRAME_SIZE] {
+        let speech = self.synthesis_filter(excitation, a);
+        self.advance_state(excitation, &speech);
+        speech
+    }
+
     /// Synthesize one decoded frame into reconstructed speech, running
     /// the §4.1.3 → §3.10 → §4.1.6 chain for both subframes and
     /// advancing the cross-subframe state.

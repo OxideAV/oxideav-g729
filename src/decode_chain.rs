@@ -631,6 +631,55 @@ impl FrameDecoder {
         Ok(self.postfilter.process_frame(&speech, &frame))
     }
 
+    /// Borrow the §3.2.5 previous-frame cosine-domain LSPs — the
+    /// state the Annex B §B.4.4 comfort-noise path interpolates
+    /// against (and the fallback "current" spectrum before any SID
+    /// has been received).
+    #[must_use]
+    pub fn previous_lsp_q(&self) -> &[f32; M] {
+        self.interpolator.previous_q()
+    }
+
+    /// Annex B §B.4.4: synthesize one comfort-noise frame to the §4.2
+    /// post-processed output, advancing the same cross-frame state an
+    /// active frame would.
+    ///
+    /// `excitation` is the eq (B.26) composite CNG excitation for the
+    /// whole frame; `current_q` the SID-LSP vector (cosine domain)
+    /// standing in as the current frame's LSPs — §B.4.4: "the
+    /// subframes interpolated LPC filters are obtained by using the
+    /// SID-LSPs as current LSPs and performing the interpolation with
+    /// the previous frame LSPs as done for active frames"; `int_t1`
+    /// the frame's drawn pitch lag, anchoring the §4.2.1 search.
+    ///
+    /// The interpolator, the synthesizer's excitation history and
+    /// filter memory, and the postfilter cascade all advance, so an
+    /// active frame following a non-active run resumes from the state
+    /// the reference decoder would carry.
+    #[must_use]
+    pub fn decode_cng_frame_to_postfiltered(
+        &mut self,
+        excitation: &[f32; 2 * SUBFRAME_SIZE],
+        current_q: &[f32; M],
+        int_t1: usize,
+    ) -> [f32; 2 * SUBFRAME_SIZE] {
+        let qs = self.interpolator.interpolate(current_q);
+        let lp: [[f32; M]; 2] = [lsp_to_lp(&qs[0]), lsp_to_lp(&qs[1])];
+
+        let mut speech = [[0.0f32; SUBFRAME_SIZE]; 2];
+        for (i, sub) in speech.iter_mut().enumerate() {
+            let exc: [f32; SUBFRAME_SIZE] =
+                core::array::from_fn(|n| excitation[i * SUBFRAME_SIZE + n]);
+            *sub = self.synthesizer.synthesize_direct_subframe(&exc, &lp[i]);
+        }
+
+        let pf = self.postfilter.process_frame_direct(&speech, &lp, int_t1);
+        let mut out = [0.0f32; 2 * SUBFRAME_SIZE];
+        out[..SUBFRAME_SIZE].copy_from_slice(&pf.subframes[0].output);
+        out[SUBFRAME_SIZE..].copy_from_slice(&pf.subframes[1].output);
+        out
+    }
+
     // ---------------------------------------------------------------
     // §4.4 frame-erasure concealment — the `*_concealed` entry points.
     //
@@ -788,8 +837,9 @@ impl FrameDecoder {
     }
 
     /// Synthesize + postfilter a concealed erased frame (or silence before
-    /// the first good frame).
-    fn conceal_to_postfiltered(&mut self) -> PostfilteredFrame {
+    /// the first good frame). `pub(crate)`: the Annex B §B.4.5 router
+    /// drives this directly for an erased *active* frame.
+    pub(crate) fn conceal_to_postfiltered(&mut self) -> PostfilteredFrame {
         match self.build_concealed_frame() {
             Some(frame) => {
                 let speech = self.synthesizer.synthesize_frame(&frame);

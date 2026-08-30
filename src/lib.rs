@@ -387,8 +387,10 @@ pub mod postfilter_cascade;
 #[doc(hidden)] // internal: §3.1 signal-conditioning pre-processor
 pub mod preprocess;
 pub mod serial;
+
 #[doc(hidden)] // internal: §4.2.2 short-term-postfilter stage
 pub mod short_term_postfilter;
+pub mod sid_lsf;
 #[doc(hidden)] // internal: build.rs-compiled numeric-table accessors
 pub mod tables;
 #[doc(hidden)] // internal: §3.8 taming-procedure stage
