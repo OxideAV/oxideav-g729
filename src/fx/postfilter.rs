@@ -167,6 +167,15 @@ pub struct PfLatitudeFx {
     /// ±0.2 on the exact-share sum — the tilt numbers rarely reach the
     /// differing LSB).
     pub tilt_exact_div: bool,
+    /// §4.2.1 fractional-interpolation window origin shift in samples
+    /// (the staging note records two candidate tap alignments; r452
+    /// measured: ±1 is corpus-neutral, ±0.6 on the exact-share sum
+    /// with no first-divergence movement — the current alignment
+    /// stands and the residual divergence is not here).
+    pub lt_tap_shift: i16,
+    /// eq (85)/(87) truncated impulse-response length (0 = the printed
+    /// 20; sweep hook, max 40; r452 measured: 22/32/40 all neutral).
+    pub gf_len: u8,
 }
 
 impl Default for PfLatitudeFx {
@@ -193,6 +202,8 @@ impl Default for PfLatitudeFx {
             agc_lag: false,
             gf_exact_div: false,
             tilt_exact_div: false,
+            lt_tap_shift: 0,
+            gf_len: 0,
         }
     }
 }
@@ -226,13 +237,22 @@ pub fn weight_az(a: &[i16; M + 1], gamma_q15: i16) -> [i16; M] {
 /// short-term postfilter `Â(z/γ_n)/Â(z/γ_d)` (eq (84) without `1/g_f`).
 #[must_use]
 pub fn impulse_response_q12(apn: &[i16; M], apd: &[i16; M]) -> [i16; GF_IMPULSE_LEN] {
+    let h40 = impulse_response_q12_n(apn, apd);
+    core::array::from_fn(|n| h40[n])
+}
+
+/// [`impulse_response_q12`] extended to 40 taps (the `gf_len` sweep
+/// hook consumes a prefix).
+#[doc(hidden)]
+#[must_use]
+pub fn impulse_response_q12_n(apn: &[i16; M], apd: &[i16; M]) -> [i16; 40] {
     // Numerator impulse response: [1, γ_n·â_1 … γ_n^10·â_10] on Q12.
-    let mut hnum = [0i16; GF_IMPULSE_LEN];
+    let mut hnum = [0i16; 40];
     hnum[0] = 4096;
     hnum[1..=M].copy_from_slice(apn);
     // All-pole 1/Â(z/γ_d) from zero state, Q12 in / Q12 out.
-    let mut h = [0i16; GF_IMPULSE_LEN];
-    for n in 0..GF_IMPULSE_LEN {
+    let mut h = [0i16; 40];
+    for n in 0..40 {
         let mut acc = l_mult(hnum[n], 4096); // Q25
         for (i, &c) in apd.iter().enumerate() {
             if n > i {
@@ -339,7 +359,14 @@ impl PostfilterFx {
     /// Interpolated fetch of `buf` at delay `T_0 + frac/8` for output
     /// index `n`, with the short (`long == false`) or long kernel.
     /// `frac == 0` is the direct integer fetch.
-    fn interp_at(buf: &[i16; HIST + L_SUBFR], n: usize, t0: usize, frac: usize, long: bool) -> i16 {
+    fn interp_at_shift(
+        buf: &[i16; HIST + L_SUBFR],
+        n: usize,
+        t0: usize,
+        frac: usize,
+        long: bool,
+        shift: i16,
+    ) -> i16 {
         if frac == 0 {
             return Self::at(buf, n, t0);
         }
@@ -356,7 +383,8 @@ impl PostfilterFx {
         };
         let mut acc = 0i32;
         for (j, &h) in taps.iter().enumerate() {
-            let k = (t0 + half).wrapping_sub(j);
+            let idx = i64::from(t0 as u32) + i64::from(half as u32) + i64::from(shift) - j as i64;
+            let k = usize::try_from(idx).unwrap_or(0);
             acc = l_mac(acc, h, Self::at(buf, n, k));
         }
         round(acc)
@@ -365,11 +393,17 @@ impl PostfilterFx {
     /// Correlation `Σ r̂(n)·r̂_T(n)` and energy `Σ r̂_T(n)²` for a
     /// candidate delay over the **scaled** residual window (the
     /// Word32 accumulators stay in range by construction).
-    fn corr_energy(rs: &[i16; HIST + L_SUBFR], t0: usize, frac: usize, long: bool) -> (i64, i64) {
+    fn corr_energy_shift(
+        rs: &[i16; HIST + L_SUBFR],
+        t0: usize,
+        frac: usize,
+        long: bool,
+        shift: i16,
+    ) -> (i64, i64) {
         let mut corr = 0i32;
         let mut energy = 0i32;
         for n in 0..L_SUBFR {
-            let rk = Self::interp_at(rs, n, t0, frac, long);
+            let rk = Self::interp_at_shift(rs, n, t0, frac, long, shift);
             let rn = rs[HIST + n];
             corr = l_mac(corr, rn, rk);
             energy = l_mac(energy, rk, rk);
@@ -438,7 +472,8 @@ impl PostfilterFx {
             .map(|frac| (neg_anchor, frac))
             .chain((0..POSTFILTER_FRAC_RES).map(|frac| (t0, frac)));
         for (anchor, frac) in candidates {
-            let (corr, e_t) = Self::corr_energy(&rs, anchor, frac, false);
+            let (corr, e_t) =
+                Self::corr_energy_shift(&rs, anchor, frac, false, self.lat.lt_tap_shift);
             if corr <= 0 || e_t <= 0 {
                 continue;
             }
@@ -460,7 +495,8 @@ impl PostfilterFx {
         // it raises R(T)²/E_T.
         let mut use_long = false;
         if have && best.0 .1 != 0 {
-            let (corr_l, e_l) = Self::corr_energy(&rs, best.0 .0, best.0 .1, true);
+            let (corr_l, e_l) =
+                Self::corr_energy_shift(&rs, best.0 .0, best.0 .1, true, self.lat.lt_tap_shift);
             if corr_l > 0 && e_l > 0 {
                 let l = i128::from(corr_l) * i128::from(corr_l) * i128::from(best.2);
                 let r = i128::from(best.1) * i128::from(best.1) * i128::from(e_l);
@@ -552,7 +588,14 @@ impl PostfilterFx {
                 // r̂(n) + γ_p·g_l·r̂_T(n) on Q16 — the delayed residual
                 // through the kernel the search settled on (clause
                 // 4.2.1 longer-filter replacement rule).
-                let r_t = Self::interp_at(&self.r_buf, n, d.delay, d.frac, d.use_long);
+                let r_t = Self::interp_at_shift(
+                    &self.r_buf,
+                    n,
+                    d.delay,
+                    d.frac,
+                    d.use_long,
+                    self.lat.lt_tap_shift,
+                );
                 let acc = l_mac(l_deposit_h(self.r_buf[HIST + n]), g_half, r_t);
                 let (hi, lo) = l_extract(acc);
                 let scaled = l_shl(mpy_32_16(hi, lo, inv_q15), 1);
@@ -635,13 +678,13 @@ impl PostfilterFx {
 
     /// §4.2.3 `H_t(z)`: `sf(n) = (1/g_t)·(t(n) + γ_t·k1'·t(n−1))` with
     /// the eq (87) tilt factor from the Q12 impulse response.
-    fn tilt(&mut self, t: &[i16; L_SUBFR], h: &[i16; GF_IMPULSE_LEN]) -> [i16; L_SUBFR] {
+    fn tilt(&mut self, t: &[i16; L_SUBFR], h: &[i16]) -> [i16; L_SUBFR] {
         // eq (87): k1' = −r_h(1)/r_h(0), wide-exact on the Q12 grid.
         let mut rh0 = 0i64;
         let mut rh1 = 0i64;
-        for j in 0..GF_IMPULSE_LEN {
+        for j in 0..h.len() {
             rh0 += i64::from(h[j]) * i64::from(h[j]);
-            if j + 1 < GF_IMPULSE_LEN {
+            if j + 1 < h.len() {
                 rh1 += i64::from(h[j]) * i64::from(h[j + 1]);
             }
         }
@@ -845,16 +888,22 @@ impl PostfilterFx {
 
         // 1/[g_f·Â(z/γ_d)] synthesis (impulse response shared with
         // §4.2.3).
-        let h = impulse_response_q12(&apn, &apd);
+        let h40 = impulse_response_q12_n(&apn, &apd);
+        let len = if self.lat.gf_len == 0 {
+            GF_IMPULSE_LEN
+        } else {
+            usize::from(self.lat.gf_len).min(40)
+        };
+        let h = &h40[..len];
         let mut gf = 0i32;
-        for &hv in &h {
+        for &hv in h {
             gf = l_add(gf, i32::from(abs_s(hv)));
         }
         let gf_recip = if gf > 0 { recip_norm(gf) } else { (16384, 33) };
         let hf = self.synthesis(&hp, &apd, gf_recip, gf);
 
         // §4.2.3 H_t(z).
-        let ht = self.tilt(&hf, &h);
+        let ht = self.tilt(&hf, h);
 
         // §4.2.4 AGC against the reconstructed speech ŝ(n).
         let agc_gain_in = self.agc_q12;
@@ -865,7 +914,7 @@ impl PostfilterFx {
         SubframeTraceFx {
             decision,
             long_term: hp,
-            impulse: h,
+            impulse: core::array::from_fn(|n| h40[n]),
             gf_q12: gf,
             short_term: hf,
             tilt: ht,
