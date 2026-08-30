@@ -17,7 +17,61 @@ into the `oxideav-core` codec registry** (id `"g729"`, decode + encode
 over the raw 10-octet wire framing) with the dual-API
 `decoder::make_decoder` / `encoder::make_encoder` endpoints. Round 419
 put the whole decode path on the clause-5 fixed-point grid; round 438
-does the same for the encoder's §3.1–§3.2.3 front end.
+did the same for the encoder's §3.1–§3.2.3 front end; round 452
+root-caused the frame-0 startup divergence (every clean vector's first
+subframe is now byte-exact) and gave the Annex B comfort noise its
+§B.4.2.2 spectral envelope.
+
+## Round 452 — frame-0 identified, SID-LSP envelope wired
+
+Two docs stagings (the Annex B SID-LSF VQ tables and the ITU
+fixed-point cluster resolutions) are consumed, and the round-419
+frame-0 startup mystery is closed:
+
+- **The frame-0 divergence was the previous-LSP start-up memory.**
+  Inverting the §4.2.5 output high-pass on the frame-0 `.PST` samples
+  of all six clean vectors (the base and Annex A corpora agree
+  sample-for-sample there, so the recovered signal is §4.1 speech, not
+  a postfilter artifact) shows the reference's frame-0 subframe-0 LP
+  has `a₁ ≈ −0.6` — *not* the flat spectrum. The corpus pins the
+  §3.2.5/§4.1.6 interpolation memory to the coarse decreasing vector
+  `30000 26000 21000 15000 8000 0 −8000 −15000 −21000 −26000` (Q15),
+  which reproduces the recovered `ŝ` on all six vectors exactly; the
+  Table 9 `cos(iπ/11)` reading (the printed row is domain-invalid)
+  stays available as `STARTUP_LSP_COS_GRID_Q15` but is measurably not
+  what the reference decoder holds. The §3.2.4 MA-predictor reset is
+  now the staged `trunc(iπ/11·2¹³)` table (five of ten entries one LSB
+  below rounding).
+- **§4.2/§3.9.1 grid re-pin** (the r419 pins were fitted against the
+  wrong frame-0 state): synthesis lands by rounding; `1/g_f` scales
+  the synthesis *input*; the §4.2.5 ×2 folds into the eq (89) AGC
+  product so the output high-pass consumes a Q1 grid (integer-grid HP
+  inputs cannot reproduce the reference's frame 0 at all); the HP
+  feedback products are exact 48-bit landed on Q15; `ĝ_c` lands on Q1
+  by truncation; the eq (75) excitation landing rounds ties toward
+  zero (pinned by LSP's frame-0/1 silence).
+- **Measured** (full fixed-point chain vs `.PST`, base corpus,
+  exact% r419 → r452): ALGTHM 1.89 → 4.04, FIXED 19.09 → 34.45,
+  LSP 3.49 → 4.01, PITCH 1.84 → 1.98, SPEECH 14.02 → 21.80 (clean
+  frames 162 → 285), TAME 0.78 → 0.81, PARITY 14.38 → 26.59, ERASURE
+  13.94 → 20.43; corr 0.9856–0.9999. Every clean vector's first
+  divergence now sits in frame-0 subframe 1 or later (LSP: sample
+  440). The residual is the §4.2.2/§4.2.3 sub-LSB operator schedule
+  plus the AGC trajectory (`agc_lag` reproduces the reference's onset
+  AGC exactly and is the recorded lead — see `fx::postfilter`).
+- **Annex B comfort noise gains its spectral envelope** — the
+  §B.4.2.2 SID-LSP dequantizer (`sid_lsf`: eq (B.18) blended
+  predictor, 32-address L1 subset, 2 × 16 full-VQ L2 subset) feeds the
+  §B.4.4 excitation through the interpolated SID-LSP synthesis filter
+  and the §4.2 cascade, sharing state with the active chain (the CNG
+  excitation enters the eq (40) history, so active frames resume
+  coherently after silence). `AnnexBOutput::ComfortNoise` carries
+  post-processed PCM; `AnnexBOutput::ErasedActive` carries
+  §4.4-concealed PCM per §B.4.5. Measured against the `g729b`
+  reference `.out`: active-frame correlation 0.9914 / 0.9886 / 0.9831
+  / 0.9716 / 0.6589 / 0.9965 on tstseq1–6, comfort-noise RMS envelope
+  0.72–1.06 (floors pinned; CN samples are not expected to align — the
+  eq (96) draw schedule is not pinned by the prose).
 
 ## Round 438 — the encoder's fixed-point front end: TAME's L0 mystery retired
 
@@ -476,30 +530,22 @@ ratchet toward the fixed-point decode path. The decode stages:
 
 ### What is NOT yet wired up
 
-- **PCM-bit-exact decode** — round 419 put the whole decode path on
-  the clause-5 fixed-point grid and demonstrated genuine end-to-end
-  byte-exactness in the stream interior (114 consecutive exact frames
-  on SPEECH; 330/7500 clean subframes), but full-vector exactness is
-  blocked by the frame-0 startup divergence (one root event per
-  vector, see the round-419 section) whose AGC/HP state pollution
-  persists through loud material. The float cascade
-  (`decode_*_to_postfiltered`) remains as the spec-equation oracle;
-  the `*_to_speech` entry points intentionally return the
-  pre-postfilter reconstructed speech `ŝ(n)`.
-- **Annex B comfort-noise spectral envelope** (§B.4.2.2 SID-LSP VQ
-  dequant) — blocked on absent numeric tables. The SID-LSP VQ subset
-  codebooks (the §B.4.2.2 32-address first-stage subset + the two
-  16-address second-stage subset + the modified MA predictor) and
-  `annexB-cng-lsp-sid-reset-Q15.csv` (`lspSid_reset`, listed in the docs
-  `tables/README.md` but **not present** as a file) are not staged under
-  `docs/audio/g729/tables/` — only the CNG spectrum factor/shift and VAD
-  margin tables are. The §B.4.4 CNG *excitation* (energy path) is now
-  synthesized (eqs (B.19)–(B.26), `cng` module); what still awaits the
-  SID-LSP VQ tables is the **LP-filtered PCM** — the excitation must pass
-  through the SID-LSP-derived synthesis filter for the correct spectral
-  colour, so `AnnexBOutput::ComfortNoise` surfaces the raw excitation
-  until that envelope can be reconstructed. (Docs-gap: SID-LSP VQ subset
-  codebooks + `lspSid_reset`.)
+- **PCM-bit-exact decode** — round 452 closed the frame-0 startup
+  divergence (all six clean vectors are byte-exact through subframe 0;
+  FIXED reaches 34.5% exact, SPEECH 285 fully-exact frames), but
+  whole-vector exactness is still blocked by the unpublished
+  §4.2.2/§4.2.3 fixed-point internal scaling (±1-LSB `st`/`tilt`
+  landings) and the AGC trajectory (the `agc_lag` hook reproduces the
+  reference's onset AGC exactly and is the recorded next lead). The
+  float cascade (`decode_*_to_postfiltered`) remains the spec-equation
+  oracle.
+- **Annex B comfort-noise sample alignment** — the §B.4.2.2 SID-LSP
+  envelope and §B.4.4 LP-filtered PCM are wired (round 452), but the
+  eq (96) *draw schedule* (how many draws, in which order, per
+  subframe) is not pinned by the prose, so CN frames match the
+  reference in energy envelope, not sample-for-sample. The Annex B
+  *encoder* (VAD §B.3, DTX decision §B.4.1, SID quantization search)
+  is not implemented.
 - **Bit-exact encoding** — rounds 385/388/390 moved the LSF chain onto
   the reference's numeric grid and round 438 onto the genuine
   Word16/Word32 operator chain (§3.1–§3.2.3), which retired TAME's
@@ -516,13 +562,11 @@ ratchet toward the fixed-point decode path. The decode stages:
   (docs gap). The Annex A encoder uses the main-body focused search
   (bit-stream legal, non-matching `C/S` choices). §A.4.4 concealment
   (clause 4.4 without voicing detection) is also not yet wired.
-- The remaining numeric tables (gain-quantizer coefficient matrix,
-  Annex B SID-LSP VQ, the LSF→LSP cos direction
-  `table2`/`slope_cos`/`slope_acos`) are staged under
-  `docs/audio/g729/tables/` but not yet compiled in. (The §4.2.1
-  postfilter interpolation filters, the round-385 eq (18) arccos pair
-  `table`/`slope`, and the round-388 taming `tab_zone` are now
-  compiled.)
+- The unnamed Annex B per-mode pair `annexB-sid-lsf-mp-Q15` is
+  compiled but unconsumed (no clause names it — see the staging note);
+  the gain-quantizer coefficient matrix and the
+  `slope_cos`/`slope_acos` LSF↔LSP direction tables remain staged in
+  `docs/` but uncompiled (no stage needs them yet).
 
 ## Clean-room provenance
 

@@ -8,6 +8,50 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 452 — frame-0 startup identified; every clean vector's first
+  subframe byte-exact.** Inverting the §4.2.5 output high-pass on the
+  frame-0 `.PST` samples of all six clean vectors (both corpora agree
+  there sample-for-sample) recovers the reference's frame-0 `ŝ`; the
+  §3.2.5/§4.1.6 previous-LSP start-up memory is corpus-pinned to
+  `30000 26000 21000 15000 8000 0 −8000 −15000 −21000 −26000` (Q15) —
+  *not* the flat `cos(iπ/11)` grid (kept as
+  `STARTUP_LSP_COS_GRID_Q15`; the printed Table 9 row is
+  domain-invalid either way). With the correct startup the r419
+  §4.2/§3.9.1 pins were re-swept: synthesis lands by **rounding**;
+  `1/g_f` scales the synthesis input; the §4.2.5 ×2 folds into the
+  eq (89) AGC product (Q1 high-pass grid, exact 48-bit feedback
+  products landed on Q15); `ĝ_c` lands on Q1 by **truncation**; the
+  eq (75) excitation landing rounds ties toward zero. Measured
+  (base-corpus exact%, r419 → r452): ALGTHM 1.89 → 4.04, FIXED
+  19.09 → 34.45, LSP 3.49 → 4.01, PITCH 1.84 → 1.98, SPEECH
+  14.02 → 21.80 (clean frames 162 → 285), TAME 0.78 → 0.81, PARITY
+  14.38 → 26.59, ERASURE 13.94 → 20.43. Floors raised; six new
+  doc(hidden) `PfLatitudeFx`/`GainGridFx` sweep hooks carry the
+  measured rulings (`agc_lag` reproduces the reference's onset AGC
+  trajectory exactly and is the recorded lead; `gf_exact_div` is
+  refuted).
+- **Round 452 — Annex B comfort noise gains its spectral envelope.**
+  New `sid_lsf` module implements the §B.4.2.2 SID-LSF dequantizer
+  from the newly staged tables: the eq (B.18) blended second predictor
+  (staged per-mode column sums asserted to be the blend of the full
+  coder's rows), the 32-address first-stage subset into L1, and the
+  2 × 16 full-VQ second stage into L2, then the unchanged §3.2.4
+  machinery. `decode_chain::decode_cng_frame_to_postfiltered` drives
+  the §B.4.4 excitation through the interpolated SID-LSP synthesis
+  filter and the §4.2 cascade **sharing the active chain's state**
+  (interpolator, eq (40) excitation history, filter memories);
+  `AnnexBOutput::ComfortNoise` now carries post-processed PCM and
+  `AnnexBOutput::ErasedActive` (replacing the placeholder variant)
+  carries §4.4-concealed PCM per §B.4.5. Measured vs the `g729b`
+  reference `.out` (new `annex_b_stream_tracks_reference_output`,
+  floors pinned): active-frame corr 0.9914/0.9886/0.9831/0.9716/
+  0.6589/0.9965 on tstseq1–6, CN RMS envelope ratio 0.72–1.06.
+- **Round 452 — the r452 docs stagings compiled**: the §3.2.4/Table 9
+  MA-predictor reset vector (`trunc(iπ/11·2¹³)`, truncated not
+  rounded) now seeds `startup_history_q13()`, and the seven Annex B
+  SID-LSF/gain table pairs enter `build.rs` with shape/domain/
+  monotonicity tests.
+
 - Round 438 moves the **encoder's §3.1–§3.2.3 front end onto the
   clause-5 Word16/Word32 operator grid** (`fx::analysis`,
   `fx::levinson`, `fx::lp_to_lsp`) and wires it into the production
