@@ -230,6 +230,28 @@ include!(concat!(
     "/postfilter-pitch-interpolation-long.rs"
 ));
 include!(concat!(env!("OUT_DIR"), "/taming-test-err-zone-table.rs"));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/lsp-ma-predictor-reset-lsf-Q13.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/annexB-sid-lsf-stage1-index-map.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/annexB-sid-lsf-stage2-index-map.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/annexB-sid-lsf-ma-predictor-sum-Q15.rs"
+));
+include!(concat!(
+    env!("OUT_DIR"),
+    "/annexB-sid-lsf-ma-predictor-sum-inv-Q12.rs"
+));
+include!(concat!(env!("OUT_DIR"), "/annexB-sid-lsf-mp-Q15.rs"));
+include!(concat!(env!("OUT_DIR"), "/annexB-sid-gain-codebook.rs"));
 
 /// G.729 §4.1 transmitted parameter count per frame (spec `PRM_SIZE`).
 /// The bit-allocation table [`BIT_ALLOCATION_TABLE8`] carries 13

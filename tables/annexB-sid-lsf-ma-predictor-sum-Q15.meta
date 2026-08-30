@@ -1,0 +1,14 @@
+spec_name: annexB-sid-lsf-ma-predictor-sum-Q15
+spec_role: Annex B §B.4.2.2 SID-LSF quantizer — sum of the (B.18)-modified MA predictor coefficients, per mode (MODE=2 × M=10, Q15)
+c_identifier: noise_fg_sum
+c_type: Word16
+raw_dims: [MODE][M]
+resolved_dims: [2, 10]
+element_count: 20
+source_file: g729AnnexB/c_codeB/tab_dtx.c
+source_sha256: 0f40290bd070a6fc87b5260f22bbcb61e414c3e8353b60b2939e5ebd33c22a60
+source_line_start: 46
+source_line_end: 49
+source_url: https://www.itu.int/rec/T-REC-G.729-201206-I/en
+source_zip_sha256: 979680ff3b52b13a5701453178efd32b53e340114638fd330fdb6669eec86620
+extractor: extract.py (pure data extraction; no algorithmic source read)

@@ -357,6 +357,43 @@ const TABLES: &[Table] = &[
         stem: "taming-test-err-zone-table",
         shape: Shape::Flat { elements: 153 },
     },
+    // §3.2.4 / Table 9 start-up value of the four MA-predictor history
+    // slots `l̂_i^(k)`, k < 0: `iπ/11` on the Q13 radian grid,
+    // truncated (not rounded) — `docs/audio/g729/table9-initialisation.md`
+    // (round 452).
+    Table {
+        stem: "lsp-ma-predictor-reset-lsf-Q13",
+        shape: Shape::Flat { elements: 10 },
+    },
+    // Annex B §B.4.2.2 SID-LSF quantizer (round 452): the 32-address
+    // first-stage subset map into L1, the 2 × 16 second-stage subset map
+    // into L2 (full VQ: one 4-bit index addresses both halves), the per-
+    // mode eq (B.18) blended-predictor column sums and reciprocals, the
+    // unnamed per-mode Q15 constant pair, and the §B.4.2.1 gain ladder.
+    Table {
+        stem: "annexB-sid-lsf-stage1-index-map",
+        shape: Shape::Flat { elements: 32 },
+    },
+    Table {
+        stem: "annexB-sid-lsf-stage2-index-map",
+        shape: Shape::Matrix { rows: 2, cols: 16 },
+    },
+    Table {
+        stem: "annexB-sid-lsf-ma-predictor-sum-Q15",
+        shape: Shape::Matrix { rows: 2, cols: 10 },
+    },
+    Table {
+        stem: "annexB-sid-lsf-ma-predictor-sum-inv-Q12",
+        shape: Shape::Matrix { rows: 2, cols: 10 },
+    },
+    Table {
+        stem: "annexB-sid-lsf-mp-Q15",
+        shape: Shape::Flat { elements: 2 },
+    },
+    Table {
+        stem: "annexB-sid-gain-codebook",
+        shape: Shape::Flat { elements: 32 },
+    },
 ];
 
 /// Maps a CSV stem to its Rust-side `pub const` identifier. Kept here
@@ -399,6 +436,13 @@ fn const_ident(stem: &str) -> &'static str {
         "postfilter-pitch-interpolation-short" => "POSTFILTER_PITCH_INTERP_SHORT_Q15",
         "postfilter-pitch-interpolation-long" => "POSTFILTER_PITCH_INTERP_LONG_Q15",
         "taming-test-err-zone-table" => "TAMING_ZONE_TABLE",
+        "lsp-ma-predictor-reset-lsf-Q13" => "LSP_MA_PREDICTOR_RESET_LSF_Q13",
+        "annexB-sid-lsf-stage1-index-map" => "ANNEXB_SID_LSF_STAGE1_INDEX_MAP",
+        "annexB-sid-lsf-stage2-index-map" => "ANNEXB_SID_LSF_STAGE2_INDEX_MAP",
+        "annexB-sid-lsf-ma-predictor-sum-Q15" => "ANNEXB_SID_LSF_MA_PREDICTOR_SUM_Q15",
+        "annexB-sid-lsf-ma-predictor-sum-inv-Q12" => "ANNEXB_SID_LSF_MA_PREDICTOR_SUM_INV_Q12",
+        "annexB-sid-lsf-mp-Q15" => "ANNEXB_SID_LSF_MP_Q15",
+        "annexB-sid-gain-codebook" => "ANNEXB_SID_GAIN_CODEBOOK",
         _ => panic!("unknown table stem: {stem}"),
     }
 }

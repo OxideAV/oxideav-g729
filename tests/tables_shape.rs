@@ -985,3 +985,88 @@ fn taming_zone_table_shape_and_partition() {
         assert_eq!(tables::taming_zone(i), expect as usize);
     }
 }
+
+/// The §3.2.4 / Table 9 MA-predictor reset vector (round 452):
+/// 10 Q13 radians, `trunc(iπ/11 · 2^13)`, strictly increasing inside
+/// `(0, π)`. The truncate-not-round rule is asserted bit-exactly.
+#[test]
+fn lsp_ma_predictor_reset_lsf_shape_and_values() {
+    let t = &tables::LSP_MA_PREDICTOR_RESET_LSF_Q13;
+    assert_eq!(t.len(), tables::M);
+    for (i, &v) in t.iter().enumerate() {
+        let exact = f64::from((i + 1) as u32) * core::f64::consts::PI / 11.0 * 8192.0;
+        assert_eq!(f64::from(v), exact.floor(), "entry {i} not truncated");
+        if i > 0 {
+            assert!(v > t[i - 1]);
+        }
+    }
+}
+
+/// Annex B §B.4.2.2 modification 2: the 32-address first-stage subset
+/// map holds distinct row indices into the 128-row L1 codebook.
+#[test]
+fn annexb_sid_lsf_stage1_map_shape_and_domain() {
+    let t = &tables::ANNEXB_SID_LSF_STAGE1_INDEX_MAP;
+    assert_eq!(t.len(), 32);
+    let mut seen = [false; 128];
+    for &v in t.iter() {
+        let v = usize::try_from(v).expect("index non-negative");
+        assert!(v < tables::NC0, "stage-1 map entry out of L1 domain");
+        assert!(!seen[v], "stage-1 map entry repeated");
+        seen[v] = true;
+    }
+}
+
+/// Annex B §B.4.2.2 modification 3: the 2 × 16 second-stage subset map
+/// holds row indices into the 32-row L2 codebook (repeats within a row
+/// are legitimate — the 4-bit index addresses the *pair*).
+#[test]
+fn annexb_sid_lsf_stage2_map_shape_and_domain() {
+    let t = &tables::ANNEXB_SID_LSF_STAGE2_INDEX_MAP;
+    assert_eq!(t.len(), 2);
+    for row in t.iter() {
+        assert_eq!(row.len(), 16);
+        for &v in row.iter() {
+            assert!(usize::try_from(v).expect("non-negative") < tables::NC1);
+        }
+    }
+}
+
+/// The eq (B.18) blended-predictor column sums and reciprocals are
+/// per-mode rows of `M` entries, and mode 0 must reproduce the full
+/// coder's mode-0 rows exactly (the blend leaves predictor 0 alone) —
+/// the consistency check the staging note calls out.
+#[test]
+fn annexb_sid_lsf_ma_predictor_sums_match_mode0() {
+    let sum = &tables::ANNEXB_SID_LSF_MA_PREDICTOR_SUM_Q15;
+    let inv = &tables::ANNEXB_SID_LSF_MA_PREDICTOR_SUM_INV_Q12;
+    assert_eq!(sum.len(), 2);
+    assert_eq!(inv.len(), 2);
+    for mode in 0..2 {
+        assert_eq!(sum[mode].len(), tables::M);
+        assert_eq!(inv[mode].len(), tables::M);
+    }
+    assert_eq!(sum[0], tables::LSP_MA_PREDICTOR_FG_SUM_Q15[0]);
+    assert_eq!(inv[0], tables::LSP_MA_PREDICTOR_FG_SUM_INV_Q12[0]);
+}
+
+/// The §B.4.2.1 SID gain ladder: 32 strictly increasing positive
+/// levels (the −12 dB … 66 dB logarithmic grid).
+#[test]
+fn annexb_sid_gain_codebook_shape_and_monotonicity() {
+    let t = &tables::ANNEXB_SID_GAIN_CODEBOOK;
+    assert_eq!(t.len(), 32);
+    for (i, &v) in t.iter().enumerate() {
+        assert!(v > 0);
+        if i > 0 {
+            assert!(v > t[i - 1], "gain ladder not strictly increasing");
+        }
+    }
+}
+
+/// The unnamed per-mode Q15 constant pair rides along as data-only
+/// (role unresolved in the Recommendation — see the staging note).
+#[test]
+fn annexb_sid_lsf_mp_shape() {
+    assert_eq!(tables::ANNEXB_SID_LSF_MP_Q15, [8644, 16572]);
+}

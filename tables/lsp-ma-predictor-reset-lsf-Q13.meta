@@ -1,0 +1,14 @@
+spec_name: lsp-ma-predictor-reset-lsf-Q13
+spec_role: §3.2.4 / §4.3 Table 9 — reset value of the switched-MA LSF predictor memory ω̂ᵢ (M=10 entries, Q13 radians; = round(i·π/11 · 2^13), the uniform flat-spectrum LSF grid)
+c_identifier: freq_prev_reset
+c_type: Word16
+raw_dims: [M]
+resolved_dims: [10]
+element_count: 10
+source_file: g729AnnexE/c_code/tab_ld8e.c
+source_sha256: 695c627d3ddeeafa01969772f593945ee8b642badc9dd12cfae51eddd5a4e7e6
+source_line_start: 15
+source_line_end: 17
+source_url: https://www.itu.int/rec/T-REC-G.729-201206-I/en
+source_zip_sha256: 979680ff3b52b13a5701453178efd32b53e340114638fd330fdb6669eec86620
+extractor: extract.py (pure data extraction; no algorithmic source read)

@@ -597,14 +597,14 @@ fn reconstruct_omega_q13(
     })
 }
 
-/// The spec start-up MA history `l̂_i = iπ/11` on the Q13 grid.
+/// The spec start-up MA history `l̂_i = iπ/11` on the Q13 grid — the
+/// staged Table 9 reset vector ([`tables::LSP_MA_PREDICTOR_RESET_LSF_Q13`],
+/// `trunc(iπ/11 · 2^13)`: five of the ten entries sit one LSB below the
+/// rounded value, and the predictor's ≈ 0.76 history weight carries that
+/// LSB into the frame-0 reconstructed LSF).
 #[must_use]
 pub fn startup_history_q13() -> [[i16; M]; MA_NP] {
-    let row: [i16; M] = std::array::from_fn(|i| {
-        let v = f64::from((i + 1) as u32) * core::f64::consts::PI / 11.0 * 8192.0;
-        v.round() as i16
-    });
-    [row; MA_NP]
+    [tables::LSP_MA_PREDICTOR_RESET_LSF_Q13; MA_NP]
 }
 
 /// Advances a Q13 MA history with the residual selected by
@@ -1029,17 +1029,23 @@ mod tests {
         assert!(!lat.mode_tie_le, "mode 0 holds ties");
     }
 
-    /// The Q13 start-up history is `round(iπ/11 · 2^13)` in every slot.
+    /// The Q13 start-up history is the staged Table 9 reset vector
+    /// `trunc(iπ/11 · 2^13)` in every slot (truncated, not rounded:
+    /// five of the ten entries sit one LSB below the rounded value).
     #[test]
     fn fx_startup_history_matches_spec() {
         let h = startup_history_q13();
+        let mut differs_from_rounding = 0;
         for plane in &h {
             for (i, &v) in plane.iter().enumerate() {
-                let expected =
-                    (f64::from((i + 1) as u32) * core::f64::consts::PI / 11.0 * 8192.0).round();
-                assert_eq!(f64::from(v), expected, "slot {i}");
+                let exact = f64::from((i + 1) as u32) * core::f64::consts::PI / 11.0 * 8192.0;
+                assert_eq!(f64::from(v), exact.floor(), "slot {i}");
+                if exact.round() != exact.floor() {
+                    differs_from_rounding += 1;
+                }
             }
         }
+        assert_eq!(differs_from_rounding, 5 * MA_NP);
     }
 
     /// The integer rearrangement enforces the same post-pass invariant

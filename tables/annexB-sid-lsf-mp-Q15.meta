@@ -1,0 +1,14 @@
+spec_name: annexB-sid-lsf-mp-Q15
+spec_role: Annex B SID-LSF quantizer — 2-entry per-mode Q15 constant pair carried in the same data block as the SID-LSF quantizer tables. The Annex B prose does not name it; role unresolved, staged as data only (see ../annexb-sid-lsp-vq.md)
+c_identifier: Mp
+c_type: Word16
+raw_dims: [MODE]
+resolved_dims: [2]
+element_count: 2
+source_file: g729AnnexB/c_codeB/tab_dtx.c
+source_sha256: 0f40290bd070a6fc87b5260f22bbcb61e414c3e8353b60b2939e5ebd33c22a60
+source_line_start: 62
+source_line_end: 62
+source_url: https://www.itu.int/rec/T-REC-G.729-201206-I/en
+source_zip_sha256: 979680ff3b52b13a5701453178efd32b53e340114638fd330fdb6669eec86620
+extractor: extract.py (pure data extraction; no algorithmic source read)
