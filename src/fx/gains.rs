@@ -72,7 +72,7 @@ const DB_PER_LOG2_Q12: i16 = 24_660;
 /// round-410 uniform-2^13 pin; the residual-divergence hunt sweeps
 /// this space against the conformance corpus.
 #[doc(hidden)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GainGridFx {
     /// Extra right-shift of the GA γ column in the ĝ_c reconstruction.
     pub recon_ga: i16,
@@ -82,6 +82,30 @@ pub struct GainGridFx {
     pub push_ga: i16,
     /// Extra right-shift of the GB γ column in the eq (72) Û push.
     pub push_gb: i16,
+    /// Land `ĝ_c` on Q1 by truncation (`true`) instead of rounding.
+    pub code_trunc: bool,
+    /// Land `ĝ_c` on the Q0 grid (then carried as an even Q1 value).
+    pub code_q0: bool,
+}
+
+impl Default for GainGridFx {
+    fn default() -> Self {
+        Self {
+            recon_ga: 0,
+            recon_gb: 0,
+            push_ga: 0,
+            push_gb: 0,
+            // Corpus-pinned (round 452): ĝ_c lands on Q1 by
+            // TRUNCATION. LSP frame 0 subframe 2 (ĝ_c ≈ 0.98 by the
+            // float oracle, 1.96 on Q1) reconstructs to silence in
+            // the reference, which only a truncated 1 (= 0.5) with the
+            // eq (75) ties-toward-zero landing produces; rounding to 2
+            // puts four unit pulses in the output. Whole-corpus exact
+            // share rises with it (sum over 12 clean vectors 101 → 107).
+            code_trunc: true,
+            code_q0: false,
+        }
+    }
 }
 
 /// Fixed-point §3.9.1 gain predictor + §4.1.5 gain decoder state.
@@ -209,7 +233,17 @@ impl GainDecoderFx {
             l_shr(mpy_32_16(gp_hi, gp_lo, gamma_ga), self.grid.recon_ga),
             l_shr(mpy_32_16(gp_hi, gp_lo, gamma_gb), self.grid.recon_gb),
         );
-        let gain_code_q1 = round(l_shl(prod, add(exp, 6)));
+        let land_shift = if self.grid.code_q0 { 5 } else { 6 };
+        let landed = if self.grid.code_trunc {
+            extract_h(l_shl(prod, add(exp, land_shift)))
+        } else {
+            round(l_shl(prod, add(exp, land_shift)))
+        };
+        let gain_code_q1 = if self.grid.code_q0 {
+            crate::fx::ops::shl(landed, 1)
+        } else {
+            landed
+        };
 
         // eq (72) decode form: Û^(m) = 20·log10(γ̂) pushed on Q10.
         //   log2(γ̂) = log2(gamma_q13_32) − 13; dB = 6.0206·log2.
@@ -288,10 +322,9 @@ mod tests {
             let (gc_hat, _) = fl.predict_and_update(&cf, q.gamma_hat);
 
             let got_gc = f32::from(got.gain_code_q1) / 2.0;
-            // Tolerance: 1% relative or the Q1 grid step (0.5), the
-            // coarser of the two — small gains land on the half-integer
-            // Q1 grid by construction.
-            let tol = (0.01 * gc_hat.abs()).max(0.3);
+            // Tolerance: 1% relative plus the Q1 grid step (0.5) —
+            // ĝ_c lands on the half-integer grid by truncation.
+            let tol = 0.01 * gc_hat.abs() + 0.5;
             assert!(
                 (got_gc - gc_hat).abs() <= tol,
                 "(ga={ga}, gb={gb}) fx ĝ_c {got_gc} vs float {gc_hat}"

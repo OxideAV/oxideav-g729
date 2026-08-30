@@ -177,7 +177,7 @@ pub fn lp_to_lsp_fx_q27(a_q27: &[Dpf; M]) -> Option<[i16; M]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fx::lsp::STARTUP_LSP_Q15;
+    use crate::fx::lsp::STARTUP_LSP_COS_GRID_Q15;
     use crate::lp_to_lsp::lp_to_lsp;
 
     /// Valid LSP set: strictly decreasing, inside (−1, 1).
@@ -188,13 +188,13 @@ mod tests {
     }
 
     /// The flat predictor's LSPs are the uniform cosine grid — the
-    /// same grid Table 9 initialises (within the grid-search
+    /// `cos(iπ/11)` reading of Table 9 (within the grid-search
     /// resolution of the 60-interval walk).
     #[test]
     fn flat_predictor_hits_uniform_grid() {
         let q = lp_to_lsp_fx(&[0i16; M]).expect("flat spectrum");
         assert_valid(&q);
-        for (i, (&got, &want)) in q.iter().zip(STARTUP_LSP_Q15.iter()).enumerate() {
+        for (i, (&got, &want)) in q.iter().zip(STARTUP_LSP_COS_GRID_Q15.iter()).enumerate() {
             assert!(
                 (i32::from(got) - i32::from(want)).abs() <= 96,
                 "flat LSP {i}: {got} vs Table 9 {want}"

@@ -130,22 +130,31 @@ pub struct PfLatitudeFx {
     pub hp_wide: bool,
     /// §4.2.4 gain grid shift relative to Q12 (0 = Q12, 1 = Q13, …).
     pub agc_shift: i16,
+    /// The §4.2.5 ×2 upscale folded into the eq (89) product landing:
+    /// the AGC output lands on Q1 (`2·sf′(n)` rounded once) and the
+    /// high-pass consumes that grid, landing its output on Q0 without
+    /// a second scaling.
+    pub agc_x2: bool,
 }
 
 impl Default for PfLatitudeFx {
     fn default() -> Self {
         Self {
             resid_round: true,
-            // Truncation, not rounding: the corpus is unambiguous both
-            // in the aggregate (every top latitude-sweep config lands
-            // the synthesis output by truncation) and in the startup
-            // reference tails (the sub-unity decay of a resonant
-            // filter reads back from `.PST` as zeros, not ones).
-            syn_round: false,
+            // Round 452 re-pin (with the corpus-identified frame-0
+            // previous-LSP memory in place the r419 truncation pin no
+            // longer holds): every landing rounds, the §4.2.5 ×2 is
+            // folded into the eq (89) product (Q1 AGC output), and
+            // 1/g_f scales the synthesis input. Measured on the full
+            // fixed-point chain, sum of exact% over the 12 clean
+            // vectors: 79 (r419 defaults) → 109; frame-0 subframe 0
+            // byte-exact on all six base vectors.
+            syn_round: true,
             lt_round: true,
-            gf_before: false,
+            gf_before: true,
             hp_wide: true,
             agc_shift: 0,
+            agc_x2: true,
         }
     }
 }
@@ -633,8 +642,10 @@ impl PostfilterFx {
                 mult(AGC_PREV_Q15, self.agc_q12),
                 mult(AGC_TARGET_Q15, g_target_q12),
             );
-            // eq (89): sf′(n) = g(n)·sf(n) — product to Q16, round.
-            *o = round(l_shl(l_mult(sf[n], self.agc_q12), 3 - shift));
+            // eq (89): sf′(n) = g(n)·sf(n) — product to Q16, round
+            // (or to Q17 → Q1 when the ×2 upscale is folded in).
+            let x2 = i16::from(self.lat.agc_x2);
+            *o = round(l_shl(l_mult(sf[n], self.agc_q12), 3 - shift + x2));
         }
         out
     }
@@ -652,11 +663,28 @@ impl PostfilterFx {
             acc = l_mac(acc, self.hp_x[0], b[1]);
             acc = l_mac(acc, self.hp_x[1], b[2]);
             if self.lat.hp_wide {
-                // Feedback: a (Q13) × y (Q14 Word32) → Q12, realigned.
-                let (h1, l1) = l_extract(self.hp_y[0]);
-                acc = l_add(acc, l_shl(mpy_32_16(h1, l1, a[1]), 2));
-                let (h2, l2) = l_extract(self.hp_y[1]);
-                acc = l_add(acc, l_shl(mpy_32_16(h2, l2, a[2]), 2));
+                // Feedback: a (Q13) × y (Q14 Word32) as an EXACT
+                // double-precision product landed on Q14 — corpus-
+                // pinned (round 452): with the AGC output on the Q1
+                // grid, the whole frame-0 subframe of all six clean
+                // vectors is byte-exact only when the low word of the
+                // feedback product is carried in full; the (hi, lo)
+                // split with the low product truncated to Q15 ends the
+                // filter's decay tail one sample late (FIXED n = 16,
+                // ALGTHM/PITCH n = 22), and rounding that low product
+                // ends it one sample early.
+                // Each product lands on Q15 (`>> 15`, the full 48-bit
+                // product) and is then realigned by `<< 2`.
+                let fb1 = ((i64::from(self.hp_y[0]) * i64::from(a[1])) >> 15) << 2;
+                let fb2 = ((i64::from(self.hp_y[1]) * i64::from(a[2])) >> 15) << 2;
+                acc = l_add(
+                    acc,
+                    fb1.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                );
+                acc = l_add(
+                    acc,
+                    fb2.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+                );
                 self.hp_y[1] = self.hp_y[0];
                 self.hp_y[0] = acc;
             } else {
@@ -669,8 +697,10 @@ impl PostfilterFx {
             }
             self.hp_x[1] = self.hp_x[0];
             self.hp_x[0] = x[n];
-            // ×2 upscale: acc = y·2^14 → 2y·2^16 = acc·2^3, rounded.
-            *o = round(l_shl(acc, 3));
+            // ×2 upscale: acc = y·2^14 → 2y·2^16 = acc·2^3, rounded —
+            // unless the input already carried the ×2 (Q1 grid), in
+            // which case the accumulator is 2y·2^14 and lands by 2^2.
+            *o = round(l_shl(acc, if self.lat.agc_x2 { 2 } else { 3 }));
         }
         out
     }

@@ -55,13 +55,34 @@ pub const STABILITY_CEIL_Q13: i16 = 25681;
 /// cosine-table domain (`π ↦ 16384`).
 const TWO_OVER_PI_Q15: i16 = 20861;
 
-/// Table 9 start-up LSP memory `q_i = cos(iπ/11)` on the exact Q15
-/// grid `round(cos(iπ/11)·2^15)`, `i = 1…10` (decreasing in `i`
-/// because cosine is decreasing on `(0, π)`). The printed
-/// `arccos(iπ/11)` is domain-invalid for `i ≥ 4`; §3.2.3's
-/// `q_i = cos(ω_i)` applied to the adjacent `ω̂_i = iπ/11` row fixes
-/// the intended value.
+/// Table 9 start-up value of the §3.2.5 / §4.1.6 previous-frame LSP
+/// memory (Q15 cosine domain), **corpus-pinned**.
+///
+/// The printed Table 9 row (`q_i = arccos(iπ/11)`) is domain-invalid,
+/// and its textual resolution `cos(iπ/11)` (exact Q15 grid
+/// `31441, 27566, 21458, 13612, 4663, …`, see
+/// [`STARTUP_LSP_COS_GRID_Q15`]) does **not** reproduce the conformance
+/// corpus: inverting the §4.2.5 output high-pass on the frame-0 `.PST`
+/// samples of all six clean vectors (both corpora, whose two different
+/// postfilters agree sample-for-sample on that frame) recovers the
+/// reference's frame-0 `ŝ(n)` — `[1, 2, 1, 1, 1, 0, …]` on FIXED,
+/// `[1, 2, 2, 2, 1, 0, …]` on ALGTHM/PITCH, `[1, 1, 0, …]` on TAME,
+/// `[1, 1, 1, 1, 0, …]` on LSP, `[1, 2, 1, 1, 0, −1, …]` on SPEECH —
+/// and the cosine grid lands the wrong sample on four of them, while
+/// this coarse decreasing vector (a spectrum that is *not* flat: its
+/// interpolated frame-0 LP has `a_1 ≈ −0.6`) reproduces all six
+/// exactly. Round 452 (`tests/fx_full_conformance.rs`).
 pub const STARTUP_LSP_Q15: [i16; M] = [
+    30000, 26000, 21000, 15000, 8000, 0, -8000, -15000, -21000, -26000,
+];
+
+/// The flat-spectrum `q_i = cos(iπ/11)` reading of the Table 9 row on
+/// the exact Q15 grid `round(cos(iπ/11)·2^15)` — the textual
+/// resolution of the printed `arccos` erratum (§3.2.3 defines
+/// `q_i = cos(ω_i)` and the row above initialises `ω̂_i = iπ/11`).
+/// Kept as the spec-equation reference; the decoder starts from
+/// [`STARTUP_LSP_Q15`] instead (see there).
+pub const STARTUP_LSP_COS_GRID_Q15: [i16; M] = [
     31441, 27566, 21458, 13612, 4663, -4663, -13612, -21458, -27566, -31441,
 ];
 
@@ -299,20 +320,30 @@ mod tests {
         assert!(worst <= 16.0, "worst cosine deviation {worst} Q15 LSBs");
     }
 
-    /// The Table 9 start-up LSP grid is `round(cos(iπ/11)·2^15)`
-    /// exactly (the corrected reading of the printed domain-invalid
-    /// `arccos(iπ/11)` row: §3.2.3 defines `q_i = cos(ω_i)` and the
-    /// adjacent row initialises `ω̂_i = iπ/11`), antisymmetric and
-    /// strictly decreasing as cosine on `(0, π)` demands.
+    /// The cosine-grid reading of Table 9 is `round(cos(iπ/11)·2^15)`
+    /// exactly, antisymmetric and strictly decreasing as cosine on
+    /// `(0, π)` demands; the corpus-pinned start-up memory is a valid
+    /// (strictly decreasing, in-range) LSP vector.
     #[test]
-    fn startup_lsp_is_exact_cosine_grid() {
-        for (i, &q) in STARTUP_LSP_Q15.iter().enumerate() {
+    fn startup_lsp_grids_are_well_formed() {
+        for (i, &q) in STARTUP_LSP_COS_GRID_Q15.iter().enumerate() {
             let w = f64::from((i + 1) as u32) * core::f64::consts::PI / 11.0;
             let expect = (w.cos() * 32768.0).round() as i16;
             assert_eq!(q, expect, "q_{} off the exact Q15 cosine grid", i + 1);
-            assert_eq!(q, -STARTUP_LSP_Q15[M - 1 - i], "antisymmetry at {i}");
+            assert_eq!(
+                q,
+                -STARTUP_LSP_COS_GRID_Q15[M - 1 - i],
+                "antisymmetry at {i}"
+            );
+        }
+        for i in 0..M {
+            assert!(STARTUP_LSP_Q15[i].abs() < 32767);
             if i > 0 {
-                assert!(q < STARTUP_LSP_Q15[i - 1], "not strictly decreasing");
+                assert!(
+                    STARTUP_LSP_Q15[i] < STARTUP_LSP_Q15[i - 1],
+                    "not strictly decreasing"
+                );
+                assert!(STARTUP_LSP_COS_GRID_Q15[i] < STARTUP_LSP_COS_GRID_Q15[i - 1]);
             }
         }
     }

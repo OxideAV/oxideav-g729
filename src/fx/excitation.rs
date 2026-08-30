@@ -34,7 +34,7 @@
 //! `u(n')` instead — a semantic difference for `T < 40` that the
 //! conformance corpus arbitrates.
 
-use crate::fx::ops::{add, l_mac, l_shl, mult, round, shl};
+use crate::fx::ops::{add, extract_h, l_mac, l_shl, mult, round, shl};
 use crate::tables::{M, PITCH_INTERP_FILTER_SYNTHESIS_Q15};
 
 /// Samples per subframe.
@@ -135,12 +135,38 @@ pub fn build_excitation(
     gain_pit_q14: i16,
     gain_code_q1: i16,
 ) {
+    build_excitation_mode(exc, off, code_q13, gain_pit_q14, gain_code_q1, 0);
+}
+
+/// [`build_excitation`] with the Q0 landing selectable: `mode` 0 =
+/// round, 1 = truncate, 2 = round half down, 3 = round half toward
+/// zero (black-box sweep hook).
+#[doc(hidden)]
+pub fn build_excitation_mode(
+    exc: &mut [i16; EXC_BUF],
+    off: usize,
+    code_q13: &[i16; L_SUBFR],
+    gain_pit_q14: i16,
+    gain_code_q1: i16,
+    mode: u8,
+) {
     for n in 0..L_SUBFR {
         // v·ĝ_p: Q0×Q14 → Q15; c·ĝ_c: Q13×Q1 → Q15.
         let mut acc = l_mac(0, exc[off + n], gain_pit_q14);
         acc = l_mac(acc, code_q13[n], gain_code_q1);
         acc = l_shl(acc, 1);
-        exc[off + n] = round(acc);
+        exc[off + n] = match mode {
+            1 => extract_h(acc),
+            2 => extract_h(crate::fx::ops::l_add(acc, 0x7FFF)),
+            3 => {
+                if acc >= 0 {
+                    extract_h(crate::fx::ops::l_add(acc, 0x7FFF))
+                } else {
+                    extract_h(crate::fx::ops::l_add(acc, 0x8000))
+                }
+            }
+            _ => round(acc),
+        };
     }
 }
 

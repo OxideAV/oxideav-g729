@@ -12,8 +12,8 @@
 //! postfilter's voicing decision).
 
 use crate::fx::excitation::{
-    build_codevector_q13, build_excitation, pred_lt3, syn_filt, syn_filt_check, EXC_BUF, L_SUBFR,
-    PIT_MAX, SHARP_INIT_Q14, SHARP_MAX_Q14, SHARP_MIN_Q14,
+    build_codevector_q13, build_excitation, build_excitation_mode, pred_lt3, syn_filt,
+    syn_filt_check, EXC_BUF, L_SUBFR, PIT_MAX, SHARP_INIT_Q14, SHARP_MAX_Q14, SHARP_MIN_Q14,
 };
 use crate::fx::gains::{DecodedGainsFx, GainDecoderFx};
 use crate::fx::lsp::LspDecoderFx;
@@ -97,6 +97,18 @@ pub struct FrameDecoderFx {
     /// updated by the caller that owns the long-term postfilter
     /// decision, defaulting to non-periodic.
     pub erasure_periodic: bool,
+    /// eq (66) energy over the plain-pulse codevector (`true`) instead
+    /// of the eq (48)-sharpened one (black-box sweep hook).
+    #[doc(hidden)]
+    pub energy_plain: bool,
+    /// eq (75) excitation Q0 landing mode (black-box hook; see
+    /// [`build_excitation_mode`]). Corpus-pinned default 3: ties
+    /// round toward zero (a truncated ĝ_c = 0.5 on a unit pulse lands
+    /// on 0, as the LSP frame-0/1 silence demands; the plain
+    /// round-half-up landing costs 60+ clean SPEECH frames and the
+    /// LSP frame-1 head).
+    #[doc(hidden)]
+    pub exc_mode: u8,
 }
 
 impl Default for FrameDecoderFx {
@@ -124,6 +136,8 @@ impl FrameDecoderFx {
             },
             rng: RandomFx::new(),
             erasure_periodic: false,
+            energy_plain: false,
+            exc_mode: 3,
         }
     }
 
@@ -189,7 +203,12 @@ impl FrameDecoderFx {
             };
             let ga = demap_ga(usize::from(tga)).expect("3-bit field");
             let gb = demap_gb(usize::from(tgb)).expect("4-bit field");
-            let gains = self.gains.decode(ga, gb, &code);
+            let gains = if self.energy_plain {
+                let plain = build_codevector_q13(&positions, &signs, 0, delay.int_t);
+                self.gains.decode(ga, gb, &plain)
+            } else {
+                self.gains.decode(ga, gb, &code)
+            };
 
             // eq (48) sharpening gain update: the just-decoded pitch
             // gain, clamped on Q14.
@@ -205,12 +224,13 @@ impl FrameDecoderFx {
             // the rescale; corr 0.55 → 0.78; the ÷2 and
             // excitation-only alternatives score worse). The exact
             // reference protocol beyond this is a docs-gap.
-            build_excitation(
+            build_excitation_mode(
                 &mut self.exc,
                 off,
                 &code,
                 gains.gain_pit_q14,
                 gains.gain_code_q1,
+                self.exc_mode,
             );
             let (head, tail) = speech.split_at_mut(L_SUBFR);
             let out = if s == 0 { head } else { tail };

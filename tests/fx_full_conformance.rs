@@ -181,15 +181,21 @@ fn report(label: &str, out: &[i16], reference: &[i16]) -> Metrics {
 }
 
 /// Per-vector pinned floors `(corr, exact%)` for the full fixed-point
-/// chain on the clean vectors, both corpora (measured r419:
-/// ALGTHM 0.9927/0.9944, FIXED 0.9502/0.9756, LSP 0.996+,
-/// PITCH 0.9961+, SPEECH 0.9973+, TAME 0.9994+; exact 0.4–27%).
+/// chain on the clean vectors, both corpora (measured r452, base /
+/// g729a: ALGTHM 4.04 / 3.61, FIXED 34.45 / 20.14, LSP 4.01 / 3.72,
+/// PITCH 1.98 / 1.90, SPEECH 21.80 / 15.76, TAME 0.81 / 0.48 exact%;
+/// corr 0.9856–0.9999). The r419 numbers were ALGTHM 1.89, FIXED
+/// 19.09, LSP 3.49, PITCH 1.84, SPEECH 14.02, TAME 0.78.
 fn floors(name: &str) -> (f64, f64) {
     match name {
+        "ALGTHM" => (0.99, 3.0),
         // FIXED is the §4.2.1 stress case (measured 0.9855/0.9918
         // with the over-unity disable guard; 0.9502/0.9756 without).
-        "FIXED" => (0.97, 12.0),
-        "TAME" => (0.995, 0.3),
+        "FIXED" => (0.97, 18.0),
+        "LSP" => (0.99, 3.2),
+        "PITCH" => (0.99, 1.5),
+        "SPEECH" => (0.99, 14.0),
+        "TAME" => (0.995, 0.4),
         _ => (0.99, 1.0),
     }
 }
