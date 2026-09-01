@@ -6,6 +6,39 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/OxideAV/oxideav-g729/compare/v0.0.7...v0.0.8) - 2026-08-30
+
+### Other
+
+- two more section 4.2 latitude probes measured neutral -- tap origin and impulse length are not the residual
+- round-452 README/CHANGELOG rollup -- frame-0 closed, SID-LSP envelope wired
+- section 4.2 AGC/scaling latitude hooks + measured rulings from the residual-divergence sweep
+- Annex B comfort noise gains its spectral envelope -- section B.4.2.2 SID-LSP dequant wired end to end
+- frame-0 startup identified + section 4.2/3.9.1 grid re-pin -- every clean vector's first subframe byte-exact
+- compile the r452 docs stagings -- Annex B SID-LSF VQ tables + the Table 9 MA-predictor reset vector
+- round-438 README/CHANGELOG rollup -- encoder front end on the fixed grid
+- section 3.1 pre-processing on the fixed grid -- SPEECH +8.3, LSP +4.5 locked points
+- FrameEncoder LSF chain moves onto the fixed-point front end
+- fx front end A/B -- corpus pin resolves the TAME L0 mystery
+- fx front end stage 3 -- section 3.2.3 Chebyshev root search on the fixed grid
+- fx front end stage 2 -- eqs (8)/(9) Levinson-Durbin on the DPF grid
+- fx front end stage 1 -- eq (4)/(5)/(6)(7) on the Word16/Word32 grid
+- Table 9 startup LSP pinned to the exact Q15 cosine grid
+- README — registry decoder now on the fixed-point chain
+- registry decoder switches to the fixed-point chain
+- round-419 README rollup + experiment-scaffolding cleanup
+- synthesis-stage truncation + silence enable floor — 114 consecutive byte-exact frames on SPEECH
+- §4.2.1 over-unity gain guard + startup-sharpening corpus pin
+- fixed-point §4.2 cascade in the printed clause-4.2 signal order + byte-exactness ratchet harness
+- doc(hidden) the in-flux internal surface; stable API = codec/serial/annex-b framing
+- pin eq (66) energy to the sharpened codevector; round-410 README/CHANGELOG rollup
+- §4.1.2 parity semantics, the 16-bit overflow-rescale protocol, stress-vector conformance
+- fixed-point §4.1 decode chain — gains, excitation, synthesis, frame driver
+- eq (40) adaptive-vector read geometry — the fraction folds negated with an upward borrow
+- fixed-point §4.1.1 LP-parameter decode — Q13 LSF chain to Q12 coefficients
+- clause-5 fixed-point layer — Table 10/11 operator set + Table 15 math functions
+- eq (74) γ̂ reconstruction grid is 2^13 — retires the ≈7-10× decode over-gain
+
 ### Added
 
 - **Round 452 — frame-0 startup identified; every clean vector's first
