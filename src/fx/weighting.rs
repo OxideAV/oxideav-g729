@@ -328,22 +328,29 @@ mod tests {
         }
     }
 
-    /// eq (30) hysteresis on the fixed grid: strongly tilted LARs flip
-    /// to tilted on subframe 2 of the first frame (subframe 1 is
-    /// interpolated with the zero start-up pair), flat LARs release.
+    /// eq (30) hysteresis on the fixed grid (base-10 thresholds):
+    /// strongly tilted LARs flip to tilted on subframe 2 of the first
+    /// frame (subframe 1 is interpolated with the zero start-up pair),
+    /// flat LARs release.
     #[test]
     fn flat_hysteresis_transitions() {
         let mut w = WeightingFx::new();
         let lsf: [i16; M] = std::array::from_fn(|i| (2340 * (i + 1)) as i16);
-        // k₁ = −0.75 → o₁ ≈ −1.945; k₂ = 0.4 → o₂ ≈ 0.847 ⇒ tilted.
-        let d = w.adapt_frame([-24576, 13107], &[lsf, lsf]);
-        assert!(d[0].flat);
+        // k₁ = −0.97 → o₁ = log10(0.03/1.97) ≈ −1.82 < −1.74;
+        // k₂ = 0.7 → o₂ = log10(1.7/0.3) ≈ 0.75 > 0.65 ⇒ tilted.
+        let d = w.adapt_frame([-31785, 22938], &[lsf, lsf]);
+        assert!(
+            d[0].flat,
+            "subframe 1 interpolates with the zero start-up LARs"
+        );
         assert!(!d[1].flat);
         assert_eq!(d[1].gamma1_q15, GAMMA1_TILT_Q15);
         // d_min = 2340/8192 = 0.286 rad → γ₂ = 1 − 1.71 → clamp 0.4.
         assert_eq!(d[1].gamma2_q15, GAMMA2_MIN_Q15);
-        let d2 = w.adapt_frame([0, 13107], &[lsf, lsf]);
+        // k₁ = 0 → o₁ = 0 > −1.52 releases the hysteresis.
+        let d2 = w.adapt_frame([0, 22938], &[lsf, lsf]);
         assert!(d2[0].flat);
+        assert_eq!(d2[0].gamma2_q15, GAMMA2_FLAT_Q15);
     }
 
     /// eq (32): a tight LSF pair pushes γ₂ to the 0.7 bound.
