@@ -43,6 +43,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   reflection coefficients is measurably not the resolution (it never
   tilts). Locked whole-corpus delta: T1 68.3 → 75.5 %, T2 70.8 → 76.3 %,
   C1 45.1 → 65.4 %, GA 73.3 → 80.8 %, frame-exact 10.1 → 24.0 %.
+- **§3.4 on the fixed grid.** eq (34)/(35) run in Word32 `l_mac`
+  accumulators behind the §3.2.1-style overflow-rescale protocol (the
+  whole 223-sample buffer energy is checked once; a `>> 3` rescale
+  covers every correlation by Cauchy-Schwarz); the normalised
+  correlations are Word16 mantissas (`norm_l`) times the Q30 `inv_sqrt`
+  mantissa with tracked exponents, re-aligned before the Q15 `0.85`
+  compare. Pinned black-box: the un-normalised `mpy_32` form loses
+  15 bits on small correlations and doubles the open-loop window
+  misses (SPEECH 8.8 → 18.9 %); the Word16 form reproduces the exact
+  double-precision selection on every vector (so the residual misses
+  are not arithmetic); and the favour-lower-delays test is **strict**
+  (`>`; the printed `≥` keeps the shortest section on all-zero frames,
+  the reference stays on the longest — a 174-frame `+62` cluster on
+  SPEECH). Open-loop window miss (reference `T1` outside `t_min − 2/3 …
+  t_max + 2/3`): SPEECH 8.8 → 4.2 %, whole corpus 7.2 → 5.0 %; the
+  0.85 threshold itself is corpus-confirmed (accepted/rejected ratios
+  separate at 0.845–0.856 on LSP and PITCH).
 
 ## [0.0.8](https://github.com/OxideAV/oxideav-g729/compare/v0.0.7...v0.0.8) - 2026-08-30
 

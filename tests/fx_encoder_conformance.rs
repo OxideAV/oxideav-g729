@@ -70,9 +70,12 @@ pub struct Agreement {
 impl Agreement {
     fn tally(&mut self, o: &Parameters, r: &Parameters, t_op: i32) {
         self.frames += 1;
+        // The §3.7 window reaches 2/3 of a sample past both integer
+        // ends (`t_min − 2/3 … t_max + 2/3`).
         let (lo, hi) = oxideav_g729::fx::pitch_cl::subframe1_window(t_op);
-        let rt1 = decode_t1_from_p1(r.p1).int_t;
-        self.t1_window_miss += usize::from(rt1 < lo || rt1 > hi);
+        let rt = decode_t1_from_p1(r.p1);
+        let rt1 = 3 * rt.int_t + rt.frac;
+        self.t1_window_miss += usize::from(rt1 < 3 * lo - 2 || rt1 > 3 * hi + 2);
         if o.p1 == r.p1 {
             self.c1_given_t1.1 += 1;
             self.c1_given_t1.0 += usize::from(o.c1 == r.c1);
@@ -159,11 +162,12 @@ fn fx_encoder_agreement() {
     };
     // (vector, locked T1 %, locked C1 %, locked GA %, free frame-exact %)
     //
-    // Measured after the §3.3 migration (table-log2 LAR decision with
-    // the eq (28) logarithm read as base 10, γ₂ from the Q13 d_min):
-    // locked T1 71.4/34.2/81.5/81.9/69.9/84.4, C1 68.6/70.8/39.3/90.2/
-    // 68.8/55.5, GA 81.4/97.5/69.5/90.1/83.1/60.2 (ALL: T1 75.5, T2 76.3,
-    // C1 65.4, GA 80.8, frame-exact 24.0); free frame-exact ≈ 0.
+    // Measured after the §3.4 migration (Word32 sums with the
+    // overflow-rescale protocol, Word16-mantissa eq (35) normalisation,
+    // strict favour-lower-delays compare): locked T1 71.4/34.2/81.5/81.9/
+    // 69.9/84.4, C1 68.6/70.8/39.3/90.2/68.8/55.5, GA 81.4/97.5/69.5/
+    // 90.1/83.1/60.2 (ALL: T1 75.5, T2 76.3, C1 65.4, GA 80.8,
+    // frame-exact 24.0, open-loop window miss 5.0); free frame-exact ≈ 0.
     let floors: [(&str, f64, f64, f64, f64); 6] = [
         ("ALGTHM", 68.0, 65.0, 78.0, 0.0),
         ("FIXED", 31.0, 67.0, 94.0, 0.0),

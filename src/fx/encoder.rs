@@ -49,7 +49,7 @@ use crate::fx::pitch_cl::{
     closed_loop_search_fx, pitch_gain_q14, subframe1_window, subframe2_window, ClosedLoopLatitude,
     T1_FRACTIONAL_LIMIT,
 };
-use crate::fx::pitch_ol::{open_loop_pitch_fx, PIT_BUFFER};
+use crate::fx::pitch_ol::{open_loop_pitch_fx_lat, OpenLoopLatitude, PIT_BUFFER};
 use crate::fx::target::{impulse_response_fx, TargetChainFx};
 use crate::fx::weighting::{WeightingFx, WeightingLatitude};
 use crate::gain_index_map::{demap_ga, demap_gb, map_ga, map_gb};
@@ -145,6 +145,8 @@ pub struct EncoderLatitude {
     pub gamma_override: Option<(i16, i16)>,
     /// §3.3 decision latitude.
     pub weighting: WeightingLatitude,
+    /// §3.4 search latitude.
+    pub ol: OpenLoopLatitude,
 }
 
 /// The stateful fixed-point G.729 frame encoder.
@@ -186,6 +188,9 @@ pub struct FrameEncoderFx {
     /// Last frame's per-subframe intermediates (instrument).
     #[doc(hidden)]
     pub probe: [SubframeProbe; 2],
+    /// Last frame's §3.4 result (instrument).
+    #[doc(hidden)]
+    pub probe_ol: crate::fx::pitch_ol::OpenLoopPitchFx,
 }
 
 impl Default for FrameEncoderFx {
@@ -222,6 +227,11 @@ impl FrameEncoderFx {
             lat,
             loop4_budget: 0,
             probe: [SubframeProbe::default(); 2],
+            probe_ol: crate::fx::pitch_ol::OpenLoopPitchFx {
+                t_op: 0,
+                signal_shift: 0,
+                candidates: [(0, 0.0); 3],
+            },
         }
     }
 
@@ -337,7 +347,8 @@ impl FrameEncoderFx {
 
         // §3.4: open-loop pitch over the frame's weighted speech.
         self.sw_buf[PIT_MAX..].copy_from_slice(&sw_frame);
-        let olp = open_loop_pitch_fx(&self.sw_buf);
+        let olp = open_loop_pitch_fx_lat(&self.sw_buf, &self.lat.ol);
+        self.probe_ol = olp;
         self.sw_buf.copy_within(L_FRAME.., 0);
 
         let mut params = Parameters {
