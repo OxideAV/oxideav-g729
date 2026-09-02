@@ -41,7 +41,7 @@ use crate::fx::excitation::{
 use crate::fx::filters::{
     convolve_code_q12, convolve_h_q0_lat, residu_lat, weight_az_lat, FilterLatitude,
 };
-use crate::fx::gain_vq::{quantize_gains_fx, GainCorrelationsFx, TamingFx};
+use crate::fx::gain_vq::{quantize_gains_fx_lat, GainCorrelationsFx, GainVqLatitude, TamingFx};
 use crate::fx::gains::{DecodedGainsFx, GainDecoderFx};
 use crate::fx::levinson::levinson_fx;
 use crate::fx::lp_to_lsp::lp_to_lsp_fx;
@@ -160,6 +160,8 @@ pub struct EncoderLatitude {
     pub filters: FilterLatitude,
     /// §3.8.1 search latitude.
     pub acelp: AcelpLatitude,
+    /// §3.9.2 search latitude.
+    pub gain: GainVqLatitude,
     /// Subframe-2 unquantised LP set through the LSP → LP conversion
     /// of the frame's unquantised LSPs (`true`) instead of the direct
     /// §3.2.2 output.
@@ -514,7 +516,7 @@ impl FrameEncoderFx {
             let pred = self.gains.predict(&code);
             let corr = GainCorrelationsFx::compute(&x, &y, &z);
             let tame = self.taming.test(delay.int_t, delay.frac);
-            let gq = quantize_gains_fx(&corr, &self.gains, &pred, tame);
+            let gq = quantize_gains_fx_lat(&corr, &self.gains, &pred, tame, &self.lat.gain);
 
             // Committed gains + state.
             let (ga, gb) = match lock {

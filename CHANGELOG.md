@@ -93,6 +93,26 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   the pin); truncating only the eq (44) `y` landing is a +1.5–2.5
   point C1 lead on LSP/SPEECH that is left unadopted (small-`n` vectors
   move the other way).
+- **§3.9 on the fixed grid.** The candidate gains are the decoder's
+  own `GainDecoderFx::reconstruct` (Q14 `ĝ_p`, Q1 `ĝ_c`) so the search
+  scores exactly what the decoder rebuilds; the eq (63) correlations
+  are exact wide sums and the error is evaluated per candidate on that
+  grid. The §3.9.2 preselection now reads the **staged partial-search
+  threshold tables** (`gain-quantizer-codebook-GA-thresholds-Q14`,
+  `…-GB-thresholds-Q15`): the cluster start is the number of thresholds
+  the joint eq (63) optimum exceeds (`γ_opt = g_c/g'_c` on the Q14 grid
+  for the four-row GA cluster, `g_p` on Q15 for the eight-row GB
+  cluster; the first GA threshold is exactly twice the fourth GA row's
+  `γ`, i.e. the tables are the clause's "closest" rule precomputed).
+  Pinned black-box: the joint optimum beats the single-axis
+  (`xᵗy/yᵗy`, `xᵗz/zᵗz`: −9 to −14 points of GA+GB) and sequential
+  readings (−2 to −4); threshold and nearest-row preselection agree to
+  0.1 point; an exhaustive 8 × 16 oracle moves both ways (+3 on
+  SPEECH/LSP/TAME, −4 to −6 on PITCH/FIXED/ALGTHM), so the residual
+  GA/GB misses are preselection-boundary cases whose reference-side
+  optimum computation is not published. Locked whole corpus:
+  GA 80.8 → 80.5 %, GB 78.8 → 78.4 % (neutral within noise against the
+  float-emulated search; ALGTHM +3/+1.5).
 
 ## [0.0.8](https://github.com/OxideAV/oxideav-g729/compare/v0.0.7...v0.0.8) - 2026-08-30
 
