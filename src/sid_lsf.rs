@@ -134,30 +134,49 @@ impl SidLspDecoder {
     /// (`lp0 >= 2`, `l1 >= 32`, `l2 >= 16`) — parsed SID frames cannot.
     #[must_use]
     pub fn dequantize(&mut self, lp0: usize, l1: usize, l2: usize) -> [f32; M] {
-        assert!(lp0 < 2, "1-bit switched-predictor index");
-        let mut residual = sid_codebook_sum(l1, l2);
-        rearrange_twice(&mut residual);
-
-        // eq (20) with the §B.4.2.2 predictor set: the per-mode
-        // residual weight is the staged blended column sum; the
-        // history taps use the (B.18) coefficients.
-        let sum_row = &ANNEXB_SID_LSF_MA_PREDICTOR_SUM_Q15[lp0];
-        let mut omega = [0.0_f32; M];
-        for i in 0..M {
-            let mut acc = (f32::from(sum_row[i]) / Q15_UNIT) * residual[i];
-            for k in 0..MA_NP {
-                acc += sid_predictor_coef(lp0, k, i) * self.history[k][i];
-            }
-            omega[i] = acc;
-        }
-        stability_clamp(&mut omega);
-
+        let (omega, residual) = sid_reconstruct(&self.history, lp0, l1, l2);
         for k in (1..MA_NP).rev() {
             self.history[k] = self.history[k - 1];
         }
         self.history[0] = residual;
         omega
     }
+}
+
+/// Pure §B.4.2.2 reconstruction of one `(lp0, l1, l2)` triple against
+/// an explicit MA history: returns the post-stability LSF vector `ω̂`
+/// (radians) and the rearranged residual the caller pushes into the
+/// history — the shared core of the decoder's [`SidLspDecoder`] and
+/// the encoder's SID-LSF search.
+///
+/// # Panics
+///
+/// Panics if an index exceeds its Table B.2 field domain.
+#[must_use]
+pub fn sid_reconstruct(
+    history: &[[f32; M]; MA_NP],
+    lp0: usize,
+    l1: usize,
+    l2: usize,
+) -> ([f32; M], [f32; M]) {
+    assert!(lp0 < 2, "1-bit switched-predictor index");
+    let mut residual = sid_codebook_sum(l1, l2);
+    rearrange_twice(&mut residual);
+
+    // eq (20) with the §B.4.2.2 predictor set: the per-mode residual
+    // weight is the staged blended column sum; the history taps use
+    // the (B.18) coefficients.
+    let sum_row = &ANNEXB_SID_LSF_MA_PREDICTOR_SUM_Q15[lp0];
+    let mut omega = [0.0_f32; M];
+    for i in 0..M {
+        let mut acc = (f32::from(sum_row[i]) / Q15_UNIT) * residual[i];
+        for (k, past) in history.iter().enumerate() {
+            acc += sid_predictor_coef(lp0, k, i) * past[i];
+        }
+        omega[i] = acc;
+    }
+    stability_clamp(&mut omega);
+    (omega, residual)
 }
 
 #[cfg(test)]

@@ -323,6 +323,8 @@ pub mod annex_a;
 #[doc(hidden)] // internal: Annex A reduced-complexity encoder chain
 pub mod annex_a_encoder;
 pub mod annex_b;
+#[doc(hidden)] // internal: Annex B encoder-side DTX decision + SID quantisation
+pub mod annex_b_encoder;
 #[doc(hidden)] // internal: §3.7 closed-loop pitch search stage
 pub mod closed_loop_pitch;
 #[doc(hidden)] // internal: §B.4.4 comfort-noise excitation synthesis

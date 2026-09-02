@@ -596,9 +596,15 @@ ratchet toward the fixed-point decode path. The decode stages:
   envelope and §B.4.4 LP-filtered PCM are wired (round 452), but the
   eq (96) *draw schedule* (how many draws, in which order, per
   subframe) is not pinned by the prose, so CN frames match the
-  reference in energy envelope, not sample-for-sample. The Annex B
-  *encoder* (VAD §B.3, DTX decision §B.4.1, SID quantization search)
-  is not implemented.
+  reference in energy envelope, not sample-for-sample. On the encoder
+  side (round 455) the §B.4.1 DTX decision and the §B.4.2 SID
+  quantisation are implemented (`annex_b_encoder`; locked-VAD
+  agreement on tstseq1–4: `Ftyp` 70–87 %, SID gain index 84–100 %
+  exact / 100 % within one step, all four SID indices 16–42 %), but
+  the §B.3 **VAD is not**: its Table B.1 boundary constants are
+  printed without the parameter grids they apply to, and the §B.3.7 AR
+  coefficient sets are named but never printed (docs ask). No
+  Annex B registry encoder yet.
 - **Bit-exact encoding** — the whole clause-3 chain runs on the
   Word16/Word32 grid (round 455: §3.3–§3.10 join the round-438
   §3.1–§3.2.3 front end), but the wire is not yet exact: locked

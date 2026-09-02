@@ -123,8 +123,49 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   of six; `L1` gives back 1–4 points on ALGTHM/PITCH/SPEECH (error
   propagation reshuffling).
 
+- **Annex B encoder side — §B.4.1 DTX decision + §B.4.2 SID
+  quantisation (`annex_b_encoder`).** `DtxEncoder` consumes a
+  voice-activity flag and the frame's §3.2.1 autocorrelation and
+  emits `Ftyp` (active / SID / untransmitted) with the four Table B.2
+  SID indices: eq (B.9) `N_cur = 2` autocorrelation sum → Levinson,
+  eq (B.10) first-inactive SID, §B.4.1.3 Itakura compare (eqs (B.12)/
+  (B.13), `thr1 = 1.20226`), §B.4.1.4 energy compare through the
+  §B.4.2.1 ladder (`thr2 = 2 dB`), eq (B.11) `N_min = 2` gating; SID
+  filter per eqs (B.16)/(B.17) (`N_p = 6`, `thr3 = 1.12202`), SID-LSF
+  VQ as an exhaustive joint search over the two eq (B.18) predictor
+  modes, the staged 32-entry first-stage subset and the 2 × 16 full-VQ
+  second stage under the eq (22) weights (`SidLsfQuantizer`, sharing
+  `sid_lsf::sid_reconstruct` with the decoder). The §B.3 VAD is **not**
+  implemented (docs gap below); `tests/annex_b_encoder_conformance.rs`
+  drives the module with the reference bitstream's own frame types as
+  the VAD and commits the reference SID frames to the state (locked
+  drive). Measured on tstseq1–4: `Ftyp` agreement 86.5 / 69.9 / 85.7 /
+  77.1 %, SID gain index exact 89.5 / 100 / 100 / 83.7 % (±1 step:
+  100 % everywhere), all four SID indices 42 / 0 / 17 / 16 %. Pinned
+  black-box: the eq (B.15) energy is on the **un-halved input scale**
+  (×4 the §3.1-halved autocorrelation's value — the literal reading
+  sits 5.9–6.4 dB under the reference on every sequence); nearest-level
+  energy quantisation beats floor (gain exact 90 → 65 % otherwise);
+  `t' = t − 1 − (t mod N_cur)` beats the other parity on the SID-LSF
+  indices (+4 to +6 points).
+
 ### Docs asks (round 455)
 
+- Annex B §B.3 (VAD): the fourteen Table B.1 boundary constants
+  `a_i`/`b_i` are printed as raw Word16 values, but the grids of the
+  four difference parameters they apply to (`ΔS` in what unit of the
+  LSF, `ΔZC`, `ΔE_f`/`ΔE_l` in dB on what Q) are not; §B.3.7's AR
+  coefficient sets `β_Ef, β_El, β_ZC, β_LSF` "according to the value of
+  `C_n`" are named but no values are printed; §B.3.3's `N_0 = 128`
+  minimum-buffer segmentation and §B.3.6 stage 1's energy `E` (vs
+  `E_f`) are unspecified. Need: a clean-room trace of one VAD frame
+  with the parameter grids, the β sets per `C_n` range and the
+  minimum-buffer layout.
+- Annex B §B.4.2.2: "`t'` varies in `[t − 1, t − N_cur]` depending on
+  the rest of the Euclidean division of `t` by `N_cur`" — which
+  remainder maps to which end (corpus-pinned `t' = t − 1 − (t mod 2)`);
+  and whether `A_sid(z)` for the §B.4.1.3 comparison is the quantised
+  SID filter or the estimate.
 - §3.3 eq (28): the prose writes `log`; the corpus pins **base 10**.
   A clean-room note confirming the base (or an erratum) would retire
   the black-box pin.
