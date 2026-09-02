@@ -60,6 +60,39 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   t_max + 2/3`): SPEECH 8.8 → 4.2 %, whole corpus 7.2 → 5.0 %; the
   0.85 threshold itself is corpus-confirmed (accepted/rejected ratios
   separate at 0.845–0.856 on LSP and PITCH).
+- **§3.7 on the fixed grid.** The eq (38) `y_k(n)` recursion runs on
+  the Word32 Q13 accumulator grid (exact shift-and-add across the delay
+  range, each row landed on Q0), eq (37) as Word16-mantissa products
+  (`norm_l` numerator × Q30 `inv_sqrt` mantissa, tracked exponents,
+  re-aligned to one Word32 scale), eq (39) through `mpy_32_16` on the
+  Q15 `b12` taps, eq (43) through `div_s` on Word16 mantissas landed on
+  Q14. Pinned black-box: the fractional pass evaluates **all five**
+  interpolated candidates `k − 2/3 … k + 2/3` — including the
+  interpolated fraction-0 value (comparing interpolated fractions
+  against the *raw* `R(k)` loses 4–8 points of T1 everywhere: SPEECH
+  69.8 → 74.3 %, PITCH 84.5 → 89.1 %, ALGTHM 74.3 → 82.9 %); the eq (39)
+  phase geometry is the literal `k + t/3` (the decoder's negated eq (40)
+  fold halves T1 here); the Word16 form matches the exact
+  double-precision search. Locked whole corpus: T1 75.5 → 80.9 %,
+  T2 76.3 → 81.0 %, frame-exact 24.0 → 27.5 %. The closed-loop
+  stage-isolation scorer (`compare_delays_fx`) attributes the residual
+  delay misses to input differences (our delay scores higher under our
+  own criterion on 96 % of them); quiet frames (`peak < 64`) carry most
+  of them (SPEECH T1 22.6 % there vs 96.6 % on loud frames).
+- **§3.8.1 on the fixed grid.** `d(n)` and `φ(i, j)` are exact wide
+  sums normalised onto Word16 (`max |d| < 2^13`, `φ(0,0) < 2^12`, so the
+  eq (58)/(59) sums stay inside Word16), sign-folded per eqs (56)/(57),
+  `thr₃` from the Q15 `0.4` with `av₃ = Σ₂₄|d| >> 3`, and the `C²/E`
+  maximisation as a wide cross-multiplication. Measured **neutral** on
+  every vector against the exact-double oracle and against a Word32
+  `C²`-high-word compare (±0.1 point): the search is not precision
+  sensitive, and every remaining C/S miss is an input difference (our
+  choice scores higher under our own `d`/`φ` on 98 % of them). Filter
+  landing latitude was swept the same way: truncating any of the
+  residual / all-pole landings loses 15–25 points of C1 (rounding is
+  the pin); truncating only the eq (44) `y` landing is a +1.5–2.5
+  point C1 lead on LSP/SPEECH that is left unadopted (small-`n` vectors
+  move the other way).
 
 ## [0.0.8](https://github.com/OxideAV/oxideav-g729/compare/v0.0.7...v0.0.8) - 2026-08-30
 

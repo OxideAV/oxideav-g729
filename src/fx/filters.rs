@@ -21,11 +21,37 @@
 //! synthesis is an exact inverse pair on the integer grid whenever the
 //! accumulator stays in range.
 
-use crate::fx::ops::{l_mac, l_msu, l_mult, l_shl, mult_r, round};
+use crate::fx::ops::{extract_h, l_mac, l_msu, l_mult, l_shl, mult, mult_r, round};
 use crate::tables::M;
 
 /// Samples per subframe.
 pub const L_SUBFR: usize = 40;
+
+/// Unstated Q0 landing latitude of the encoder-side filter runs
+/// (round-to-nearest vs truncation of the `<< 3` accumulator).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FilterLatitude {
+    /// Truncate the eq (36) residual landing.
+    pub residu_trunc: bool,
+    /// Truncate the all-pole (`1/Â(z)`, `1/A(z/γ₂)`) landings.
+    pub syn_trunc: bool,
+    /// Truncate the eq (44) convolution landing.
+    pub conv_trunc: bool,
+    /// Truncating (`mult`) instead of rounding (`mult_r`) products in
+    /// the γ-weighting of the LP coefficients.
+    pub weight_trunc: bool,
+}
+
+/// The `<< 3` Q0 landing of a Q13 accumulator.
+#[inline]
+fn land(acc: i32, trunc: bool) -> i16 {
+    let v = l_shl(acc, 3);
+    if trunc {
+        extract_h(v)
+    } else {
+        round(v)
+    }
+}
 
 /// eq (27) / §3.3: bandwidth-expands an LP coefficient set,
 /// `a'_i = γ^i · a_i`, with `γ` on Q15. The running power `γ^i` is
@@ -33,12 +59,23 @@ pub const L_SUBFR: usize = 40;
 /// tenth-order term carries the rounded — not truncated — product.
 #[must_use]
 pub fn weight_az(a: &[i16; M + 1], gamma_q15: i16) -> [i16; M + 1] {
+    weight_az_lat(a, gamma_q15, false)
+}
+
+/// [`weight_az`] with a selectable product rounding.
+#[must_use]
+pub fn weight_az_lat(a: &[i16; M + 1], gamma_q15: i16, trunc: bool) -> [i16; M + 1] {
     let mut out = [0i16; M + 1];
     out[0] = a[0];
     let mut fac = gamma_q15;
     for i in 1..=M {
-        out[i] = mult_r(a[i], fac);
-        fac = mult_r(fac, gamma_q15);
+        if trunc {
+            out[i] = mult(a[i], fac);
+            fac = mult(fac, gamma_q15);
+        } else {
+            out[i] = mult_r(a[i], fac);
+            fac = mult_r(fac, gamma_q15);
+        }
     }
     out
 }
@@ -49,6 +86,17 @@ pub fn weight_az(a: &[i16; M + 1], gamma_q15: i16) -> [i16; M + 1] {
 /// itself.
 #[must_use]
 pub fn residu(a: &[i16; M + 1], x_hist: &[i16; M], x: &[i16; L_SUBFR]) -> [i16; L_SUBFR] {
+    residu_lat(a, x_hist, x, false)
+}
+
+/// [`residu`] with a selectable landing.
+#[must_use]
+pub fn residu_lat(
+    a: &[i16; M + 1],
+    x_hist: &[i16; M],
+    x: &[i16; L_SUBFR],
+    trunc: bool,
+) -> [i16; L_SUBFR] {
     let mut out = [0i16; L_SUBFR];
     for n in 0..L_SUBFR {
         let mut acc = l_mult(x[n], a[0]);
@@ -60,8 +108,7 @@ pub fn residu(a: &[i16; M + 1], x_hist: &[i16; M], x: &[i16; L_SUBFR]) -> [i16; 
             };
             acc = l_mac(acc, a[i], s);
         }
-        acc = l_shl(acc, 3);
-        out[n] = round(acc);
+        out[n] = land(acc, trunc);
     }
     out
 }
@@ -73,6 +120,17 @@ pub fn residu(a: &[i16; M + 1], x_hist: &[i16; M], x: &[i16; L_SUBFR]) -> [i16; 
 /// [`crate::fx::excitation::syn_filt`].
 #[must_use]
 pub fn syn_filt_mem(a: &[i16; M + 1], y_hist: &[i16; M], x: &[i16; L_SUBFR]) -> [i16; L_SUBFR] {
+    syn_filt_mem_lat(a, y_hist, x, false)
+}
+
+/// [`syn_filt_mem`] with a selectable landing.
+#[must_use]
+pub fn syn_filt_mem_lat(
+    a: &[i16; M + 1],
+    y_hist: &[i16; M],
+    x: &[i16; L_SUBFR],
+    trunc: bool,
+) -> [i16; L_SUBFR] {
     let mut out = [0i16; L_SUBFR];
     for n in 0..L_SUBFR {
         let mut acc = l_mult(x[n], a[0]);
@@ -84,8 +142,7 @@ pub fn syn_filt_mem(a: &[i16; M + 1], y_hist: &[i16; M], x: &[i16; L_SUBFR]) -> 
             };
             acc = l_msu(acc, a[i], s);
         }
-        acc = l_shl(acc, 3);
-        out[n] = round(acc);
+        out[n] = land(acc, trunc);
     }
     out
 }
@@ -96,13 +153,23 @@ pub fn syn_filt_mem(a: &[i16; M + 1], y_hist: &[i16; M], x: &[i16; L_SUBFR]) -> 
 /// accumulator shifts up 3 and rounds onto Q0.
 #[must_use]
 pub fn convolve_h_q0(x: &[i16; L_SUBFR], h_q12: &[i16; L_SUBFR]) -> [i16; L_SUBFR] {
+    convolve_h_q0_lat(x, h_q12, false)
+}
+
+/// [`convolve_h_q0`] with a selectable landing.
+#[must_use]
+pub fn convolve_h_q0_lat(
+    x: &[i16; L_SUBFR],
+    h_q12: &[i16; L_SUBFR],
+    trunc: bool,
+) -> [i16; L_SUBFR] {
     let mut out = [0i16; L_SUBFR];
     for n in 0..L_SUBFR {
         let mut acc = 0i32;
         for i in 0..=n {
             acc = l_mac(acc, x[i], h_q12[n - i]);
         }
-        out[n] = round(l_shl(acc, 3));
+        out[n] = land(acc, trunc);
     }
     out
 }

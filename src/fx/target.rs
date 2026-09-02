@@ -25,7 +25,7 @@
 //! products land on the doubled Q15 grid exactly like the decoder's
 //! eq (75) excitation build, then round to Q0.
 
-use crate::fx::filters::{residu, syn_filt_mem, L_SUBFR};
+use crate::fx::filters::{residu_lat, syn_filt_mem_lat, FilterLatitude, L_SUBFR};
 use crate::fx::ops::{l_add, l_mult, l_shl, round, sub};
 use crate::tables::M;
 
@@ -35,12 +35,13 @@ pub fn impulse_response_fx(
     a_hat: &[i16; M + 1],
     ap1: &[i16; M + 1],
     ap2: &[i16; M + 1],
+    lat: &FilterLatitude,
 ) -> [i16; L_SUBFR] {
     let mut input = [0i16; L_SUBFR];
     input[..=M].copy_from_slice(ap1);
     let zero = [0i16; M];
-    let stage1 = syn_filt_mem(a_hat, &zero, &input);
-    syn_filt_mem(ap2, &zero, &stage1)
+    let stage1 = syn_filt_mem_lat(a_hat, &zero, &input, lat.syn_trunc);
+    syn_filt_mem_lat(ap2, &zero, &stage1, lat.syn_trunc)
 }
 
 /// The §3.6 / §3.10 filter memories.
@@ -68,10 +69,11 @@ impl TargetChainFx {
         a_hat: &[i16; M + 1],
         ap1: &[i16; M + 1],
         ap2: &[i16; M + 1],
+        lat: &FilterLatitude,
     ) -> [i16; L_SUBFR] {
-        let e = syn_filt_mem(a_hat, &self.mem_err, res);
-        let r = residu(ap1, &self.mem_err, &e);
-        syn_filt_mem(ap2, &self.mem_w, &r)
+        let e = syn_filt_mem_lat(a_hat, &self.mem_err, res, lat.syn_trunc);
+        let r = residu_lat(ap1, &self.mem_err, &e, lat.residu_trunc);
+        syn_filt_mem_lat(ap2, &self.mem_w, &r, lat.syn_trunc)
     }
 
     /// §3.10: commits the memories after the subframe's excitation is
@@ -109,7 +111,7 @@ mod tests {
     fn identity_impulse_response() {
         let mut a = [0i16; M + 1];
         a[0] = 4096;
-        let h = impulse_response_fx(&a, &a, &a);
+        let h = impulse_response_fx(&a, &a, &a, &FilterLatitude::default());
         assert_eq!(h[0], 4096);
         assert!(h[1..].iter().all(|&v| v == 0));
     }
@@ -127,10 +129,11 @@ mod tests {
         let mut ap2 = a_hat;
         ap2[1] = -1400;
         ap2[2] = 400;
-        let h = impulse_response_fx(&a_hat, &ap1, &ap2);
+        let lat = FilterLatitude::default();
+        let h = impulse_response_fx(&a_hat, &ap1, &ap2, &lat);
         let chain = TargetChainFx::new();
         let res: [i16; L_SUBFR] = std::array::from_fn(|n| ((n * 7 % 23) as i16) * 30 - 330);
-        let x = chain.target(&res, &a_hat, &ap1, &ap2);
+        let x = chain.target(&res, &a_hat, &ap1, &ap2, &lat);
         let conv = crate::fx::filters::convolve_h_q0(&res, &h);
         for n in 0..L_SUBFR {
             assert!(

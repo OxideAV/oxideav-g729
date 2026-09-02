@@ -162,18 +162,19 @@ fn fx_encoder_agreement() {
     };
     // (vector, locked T1 %, locked C1 %, locked GA %, free frame-exact %)
     //
-    // Measured after the §3.4 migration (Word32 sums with the
-    // overflow-rescale protocol, Word16-mantissa eq (35) normalisation,
-    // strict favour-lower-delays compare): locked T1 71.4/34.2/81.5/81.9/
-    // 69.9/84.4, C1 68.6/70.8/39.3/90.2/68.8/55.5, GA 81.4/97.5/69.5/
-    // 90.1/83.1/60.2 (ALL: T1 75.5, T2 76.3, C1 65.4, GA 80.8,
-    // frame-exact 24.0, open-loop window miss 5.0); free frame-exact ≈ 0.
+    // Measured after the §3.7/§3.8 migration (Word32 eq (38) rows,
+    // Word16-mantissa eq (37), all five interpolated fractional
+    // candidates; Word16-normalised d/φ with wide C²·E compare):
+    // locked T1 82.9/60.0/86.0/89.1/74.3/84.4, C1 65.7/70.8/39.3/90.2/
+    // 68.8/55.5, GA 81.4/97.5/69.5/90.1/83.1/60.2 (ALL: T1 80.9,
+    // T2 81.0, C1 65.3, GA 80.8, frame-exact 27.5, open-loop window
+    // miss 2.1); free frame-exact 0.1.
     let floors: [(&str, f64, f64, f64, f64); 6] = [
-        ("ALGTHM", 68.0, 65.0, 78.0, 0.0),
-        ("FIXED", 31.0, 67.0, 94.0, 0.0),
-        ("LSP", 78.0, 36.0, 66.0, 0.0),
-        ("PITCH", 78.0, 87.0, 87.0, 0.0),
-        ("SPEECH", 66.0, 65.0, 80.0, 0.0),
+        ("ALGTHM", 79.0, 62.0, 78.0, 0.0),
+        ("FIXED", 56.0, 67.0, 94.0, 0.0),
+        ("LSP", 83.0, 36.0, 66.0, 0.0),
+        ("PITCH", 86.0, 87.0, 87.0, 0.0),
+        ("SPEECH", 71.0, 65.0, 80.0, 0.0),
         ("TAME", 81.0, 52.0, 57.0, 0.0),
     ];
     let mut total_locked = Agreement::default();

@@ -32,13 +32,15 @@
 //! error propagation of earlier misses.
 
 use crate::fixed_codebook::{decode_pulses, encode_positions, encode_signs};
-use crate::fx::acelp::search_acelp_fx;
+use crate::fx::acelp::{search_acelp_fx_lat, AcelpLatitude};
 use crate::fx::analysis::{analyze_window_fx, FrontEndLatitude, PreprocessorFx};
 use crate::fx::excitation::{
     build_codevector_q13, build_excitation_mode, pred_lt3, syn_filt_check, EXC_BUF, PIT_MAX,
     SHARP_INIT_Q14, SHARP_MAX_Q14, SHARP_MIN_Q14,
 };
-use crate::fx::filters::{convolve_code_q12, convolve_h_q0, residu, weight_az};
+use crate::fx::filters::{
+    convolve_code_q12, convolve_h_q0_lat, residu_lat, weight_az_lat, FilterLatitude,
+};
 use crate::fx::gain_vq::{quantize_gains_fx, GainCorrelationsFx, TamingFx};
 use crate::fx::gains::{DecodedGainsFx, GainDecoderFx};
 use crate::fx::levinson::levinson_fx;
@@ -46,8 +48,8 @@ use crate::fx::lp_to_lsp::lp_to_lsp_fx;
 use crate::fx::lsp::{interpolate_lsp_q15, lsp_to_lp_q12, LspDecoderFx, STARTUP_LSP_Q15};
 use crate::fx::ops::{l_mac, l_mult, l_shl, round};
 use crate::fx::pitch_cl::{
-    closed_loop_search_fx, pitch_gain_q14, subframe1_window, subframe2_window, ClosedLoopLatitude,
-    T1_FRACTIONAL_LIMIT,
+    closed_loop_search_fx, pitch_gain_q14_lat, subframe1_window, subframe2_window,
+    ClosedLoopLatitude, T1_FRACTIONAL_LIMIT,
 };
 use crate::fx::pitch_ol::{open_loop_pitch_fx_lat, OpenLoopLatitude, PIT_BUFFER};
 use crate::fx::target::{impulse_response_fx, TargetChainFx};
@@ -112,6 +114,11 @@ pub struct SubframeProbe {
     pub tame: bool,
     /// The §3.3 `(γ₁, γ₂)` pair (Q15) the subframe ran with.
     pub gamma_q15: (i16, i16),
+    /// Under lock: the eq (37)/(39) scores of (our delay, the
+    /// reference delay) on one scale.
+    pub cl_scores: (i32, i32),
+    /// The encoder's own closed-loop delay.
+    pub own_delay: PitchDelay,
 }
 
 impl Default for SubframeProbe {
@@ -130,6 +137,8 @@ impl Default for SubframeProbe {
             },
             tame: false,
             gamma_q15: (0, 0),
+            cl_scores: (0, 0),
+            own_delay: PitchDelay { int_t: 0, frac: 0 },
         }
     }
 }
@@ -147,6 +156,14 @@ pub struct EncoderLatitude {
     pub weighting: WeightingLatitude,
     /// §3.4 search latitude.
     pub ol: OpenLoopLatitude,
+    /// Filter landing latitude.
+    pub filters: FilterLatitude,
+    /// §3.8.1 search latitude.
+    pub acelp: AcelpLatitude,
+    /// Subframe-2 unquantised LP set through the LSP → LP conversion
+    /// of the frame's unquantised LSPs (`true`) instead of the direct
+    /// §3.2.2 output.
+    pub unq_via_lsp: bool,
 }
 
 /// The stateful fixed-point G.729 frame encoder.
@@ -316,7 +333,12 @@ impl FrameEncoderFx {
         // 1, the current LSPs for subframe 2.
         let lsp_sub1 = interpolate_lsp_q15(&self.prev_lsp_unq, &lsp_unq);
         self.prev_lsp_unq = lsp_unq;
-        let a_unq: [[i16; M + 1]; 2] = [lsp_to_lp_q12(&lsp_sub1), a_unq_q12];
+        let a_sub2 = if self.lat.unq_via_lsp {
+            lsp_to_lp_q12(&lsp_unq)
+        } else {
+            a_unq_q12
+        };
+        let a_unq: [[i16; M + 1]; 2] = [lsp_to_lp_q12(&lsp_sub1), a_sub2];
         let lsf_sub: [[i16; M]; 2] = [
             std::array::from_fn(|i| acos_q15_to_lsf_q13(i32::from(lsp_sub1[i])) as i16),
             std::array::from_fn(|i| lsf_unq_q13[i] as i16),
@@ -334,14 +356,19 @@ impl FrameEncoderFx {
         let mut ap2 = [[0i16; M + 1]; 2];
         let mut sw_frame = [0i16; L_FRAME];
         for sub in 0..2 {
-            ap1[sub] = weight_az(&a_unq[sub], decisions[sub].gamma1_q15);
-            ap2[sub] = weight_az(&a_unq[sub], decisions[sub].gamma2_q15);
+            let wt = self.lat.filters.weight_trunc;
+            ap1[sub] = weight_az_lat(&a_unq[sub], decisions[sub].gamma1_q15, wt);
+            ap2[sub] = weight_az_lat(&a_unq[sub], decisions[sub].gamma2_q15, wt);
             let base = FRAME_OFFSET + sub * L_SUBFR;
             let s_hist: [i16; M] = std::array::from_fn(|i| self.speech[base - M + i]);
             let s_sub: [i16; L_SUBFR] = std::array::from_fn(|n| self.speech[base + n]);
-            let sw = self
-                .weighting
-                .weight_subframe(&s_hist, &s_sub, &ap1[sub], &ap2[sub]);
+            let sw = self.weighting.weight_subframe(
+                &s_hist,
+                &s_sub,
+                &ap1[sub],
+                &ap2[sub],
+                &self.lat.filters,
+            );
             sw_frame[sub * L_SUBFR..(sub + 1) * L_SUBFR].copy_from_slice(&sw);
         }
 
@@ -385,10 +412,12 @@ impl FrameEncoderFx {
             let s_sub: [i16; L_SUBFR] = std::array::from_fn(|n| self.speech[base + n]);
 
             // §3.5: impulse response of W(z)/Â(z) on Q12.
-            let h = impulse_response_fx(&a_hat[sub], &ap1[sub], &ap2[sub]);
+            let h = impulse_response_fx(&a_hat[sub], &ap1[sub], &ap2[sub], &self.lat.filters);
             // §3.6: residual + target.
-            let res = residu(&a_hat[sub], &s_hist, &s_sub);
-            let x = self.target.target(&res, &a_hat[sub], &ap1[sub], &ap2[sub]);
+            let res = residu_lat(&a_hat[sub], &s_hist, &s_sub, self.lat.filters.residu_trunc);
+            let x = self
+                .target
+                .target(&res, &a_hat[sub], &ap1[sub], &ap2[sub], &self.lat.filters);
 
             // Extend the excitation with the residual (clause 3.7).
             self.exc[off..off + L_SUBFR].copy_from_slice(&res);
@@ -430,6 +459,19 @@ impl FrameEncoderFx {
                 t1_committed = Some(delay);
             }
             delays[sub] = own_delay;
+            let cl_scores = if lock.is_some() && delay != own_delay {
+                crate::fx::pitch_cl::compare_delays_fx(
+                    &x,
+                    &h,
+                    &self.exc,
+                    off,
+                    own_delay,
+                    delay,
+                    &self.lat.cl,
+                )
+            } else {
+                (0, 0)
+            };
 
             // eq (40) adaptive vector (in place, decoder geometry) at
             // the committed delay, eq (44) filtered vector, eq (43)
@@ -438,8 +480,8 @@ impl FrameEncoderFx {
             // decision is measured in isolation.
             pred_lt3(&mut self.exc, off, delay.int_t, delay.frac);
             let v: [i16; L_SUBFR] = std::array::from_fn(|n| self.exc[off + n]);
-            let y = convolve_h_q0(&v, &h);
-            let gp_q14 = pitch_gain_q14(&x, &y);
+            let y = convolve_h_q0_lat(&v, &h, self.lat.filters.conv_trunc);
+            let gp_q14 = pitch_gain_q14_lat(&x, &y, &self.lat.cl);
 
             // eq (50) target update + eq (49) pre-filter on h.
             let x_prime: [i16; L_SUBFR] = std::array::from_fn(|n| {
@@ -450,7 +492,8 @@ impl FrameEncoderFx {
             prefilter_h(&mut h_pre, delay.int_t, self.sharp_q14);
 
             // §3.8.1 search.
-            let choice = search_acelp_fx(&x_prime, &h_pre, &mut self.loop4_budget);
+            let choice =
+                search_acelp_fx_lat(&x_prime, &h_pre, &mut self.loop4_budget, &self.lat.acelp);
 
             // Committed codevector.
             let (positions, signs) = match lock {
@@ -501,6 +544,8 @@ impl FrameEncoderFx {
                 pred,
                 tame,
                 gamma_q15: (decisions[sub].gamma1_q15, decisions[sub].gamma2_q15),
+                cl_scores,
+                own_delay,
             };
 
             // eq (48)/(47): next subframe's sharpening gain.

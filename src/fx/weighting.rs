@@ -26,7 +26,7 @@
 //! composition (the prose is silent on it).
 
 use crate::fx::dsp::log2;
-use crate::fx::filters::{residu, syn_filt_mem, L_SUBFR};
+use crate::fx::filters::{residu_lat, syn_filt_mem_lat, FilterLatitude, L_SUBFR};
 use crate::fx::ops::{l_add, l_shr, l_sub};
 use crate::tables::M;
 
@@ -268,9 +268,10 @@ impl WeightingFx {
         s: &[i16; L_SUBFR],
         ap1: &[i16; M + 1],
         ap2: &[i16; M + 1],
+        lat: &FilterLatitude,
     ) -> [i16; L_SUBFR] {
-        let r = residu(ap1, s_hist, s);
-        let sw = syn_filt_mem(ap2, &self.sw_mem, &r);
+        let r = residu_lat(ap1, s_hist, s, lat.residu_trunc);
+        let sw = syn_filt_mem_lat(ap2, &self.sw_mem, &r, lat.syn_trunc);
         self.sw_mem.copy_from_slice(&sw[L_SUBFR - M..]);
         sw
     }
@@ -298,7 +299,7 @@ mod tests {
         let mut w = WeightingFx::new();
         let hist = [0i16; M];
         let s: [i16; L_SUBFR] = std::array::from_fn(|n| ((n * 13 % 100) as i16) * 40 - 2000);
-        let sw = w.weight_subframe(&hist, &s, &ap, &ap);
+        let sw = w.weight_subframe(&hist, &s, &ap, &ap, &FilterLatitude::default());
         for n in 0..L_SUBFR {
             assert!((i32::from(sw[n]) - i32::from(s[n])).abs() <= 2, "n={n}");
         }
