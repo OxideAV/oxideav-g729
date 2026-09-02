@@ -6,6 +6,30 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Round 455 — fixed-point encoder chain (`fx::encoder::FrameEncoderFx`)
+  + stage-isolation harness.** The clause-3 encoder now has a Word16/
+  Word32 driver that shares every decoder-side primitive with
+  `FrameDecoderFx` (eq (40) `pred_lt3`, the Q13 codevector, the Q14/Q1
+  gain reconstruction, the eq (75) excitation landing, the `1/Â(z)`
+  synthesis with the overflow-rescale protocol), so the encoder's local
+  reconstruction is the decoder's bit for bit. §3.5 (Q12 impulse
+  response), §3.6 (residual/target through `e(n)` and eq (76) `ew(n)`
+  memories) and §3.10 run on the fixed grid; §3.3/§3.4/§3.7/§3.8/§3.9
+  are staged behind fixed-grid interfaces (`fx::weighting`,
+  `fx::pitch_ol`, `fx::pitch_cl`, `fx::acelp`, `fx::gain_vq`) and migrate
+  one stage per commit. `GainDecoderFx::decode` is split into
+  `predict` / `reconstruct` / `push` so the §3.9.2 search scores every
+  candidate on the decoder's exact grid. `tests/fx_encoder_conformance.rs`
+  measures per-parameter agreement two ways: **locked** (every stage
+  runs from the reference encoder's own state, committed from the
+  `.BIT` parameters after each search) and **free** (end to end).
+  Baseline, locked, whole corpus: T1 68.3 %, T2 70.8 %, C1 45.1 %,
+  S1 62.9 %, GA 73.3 %, GB 69.6 %, frame-exact 10.1 %; the ACELP
+  stage-isolation diagnostic shows 98 % of the C/S misses are input
+  (target / impulse-response) differences, not search-structure ones.
+
 ## [0.0.8](https://github.com/OxideAV/oxideav-g729/compare/v0.0.7...v0.0.8) - 2026-08-30
 
 ### Other

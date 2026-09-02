@@ -126,6 +126,17 @@ pub struct DecodedGainsFx {
     pub gain_code_q1: i16,
 }
 
+/// The eq (71) predicted gain `g'_c` in the form the eq (74)
+/// reconstruction consumes: a `pow2` mantissa (`g'_c · 2^(13 − exp)`,
+/// Word32) plus its integer exponent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GainPredictionFx {
+    /// `g'_c · 2^(13 − exp)` as a Word32 (full-scale mantissa).
+    pub g_prime_scaled: i32,
+    /// The integer exponent of the eq (71) base-2 form.
+    pub exp: i16,
+}
+
 impl Default for GainDecoderFx {
     fn default() -> Self {
         Self::new()
@@ -167,34 +178,12 @@ impl GainDecoderFx {
         acc
     }
 
-    /// Decodes one subframe's gains from the **codebook-domain**
-    /// `(ga, gb)` indices and the Q13 codevector, advancing the
-    /// predictor memory (eq (72) decode form).
-    ///
-    /// # Panics
-    ///
-    /// Panics if `ga`/`gb` exceed the codebook domains (3-/4-bit
-    /// fields cannot).
-    pub fn decode(&mut self, ga: usize, gb: usize, code_q13: &[i16; L_SUBFR]) -> DecodedGainsFx {
-        let ga_row = gain_ga_entry(ga);
-        let gb_row = gain_gb_entry(gb);
-
-        // eq (73): ĝ_p on Q14 (the column extremes sum well inside
-        // Word16).
-        let gain_pit_q14 = add(ga_row[GAIN_VQ_COL_GP], gb_row[GAIN_VQ_COL_GP]);
-        // eq (74): γ̂ on the 2^13 grid — accumulated on Word32: the
-        // worst-case column sum (27162 + 14276 = 41438, γ̂ ≈ 5.06)
-        // overflows Word16, so the reconstruction keeps the two stage
-        // contributions apart until they are combined against g'_c
-        // (and takes the eq (72) logarithm of the 32-bit sum).
-        let gamma_ga = ga_row[GAIN_VQ_COL_GC];
-        let gamma_gb = gb_row[GAIN_VQ_COL_GC];
-        // The eq (72) push γ̂ on its (possibly split) grid, Q13 base.
-        let gamma_q13_32 = l_add(
-            l_shr(l_deposit_l(gamma_ga), self.grid.push_ga),
-            l_shr(l_deposit_l(gamma_gb), self.grid.push_gb),
-        );
-
+    /// eq (66)–(71): the predicted fixed-codebook gain for this
+    /// subframe's Q13 codevector, as the `pow2` mantissa/exponent pair
+    /// the eq (74) reconstruction consumes. Pure — the predictor
+    /// memory is only advanced by [`Self::push`].
+    #[must_use]
+    pub fn predict(&self, code_q13: &[i16; L_SUBFR]) -> GainPredictionFx {
         // eq (66) energy: Σ code² on Q27 (Q13 × Q13 doubled).
         let mut l_ener = 0i32;
         for &c in code_q13.iter() {
@@ -218,14 +207,44 @@ impl GainDecoderFx {
         let exp = extract_h(l_shr(x_q24, 8)); // x >> 24
         let frac = extract_l(l_shr(l_sub(x_q24, l_shl(l_deposit_l(exp), 24)), 9));
 
+        GainPredictionFx {
+            g_prime_scaled: pow2(13, frac),
+            exp,
+        }
+    }
+
+    /// eqs (73)/(74): the quantised gains for the **codebook-domain**
+    /// `(ga, gb)` pair given the subframe's prediction — `ĝ_p` on Q14,
+    /// `ĝ_c = γ̂ · g'_c` landed on Q1. Pure (no memory advance), so the
+    /// encoder's §3.9.2 search can score every candidate pair on the
+    /// decoder's exact grid.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ga`/`gb` exceed the codebook domains (3-/4-bit
+    /// fields cannot).
+    #[must_use]
+    pub fn reconstruct(&self, pred: &GainPredictionFx, ga: usize, gb: usize) -> DecodedGainsFx {
+        let ga_row = gain_ga_entry(ga);
+        let gb_row = gain_gb_entry(gb);
+
+        // eq (73): ĝ_p on Q14 (the column extremes sum well inside
+        // Word16).
+        let gain_pit_q14 = add(ga_row[GAIN_VQ_COL_GP], gb_row[GAIN_VQ_COL_GP]);
+        // eq (74): γ̂ on the 2^13 grid — accumulated on Word32: the
+        // worst-case column sum (27162 + 14276 = 41438, γ̂ ≈ 5.06)
+        // overflows Word16, so the reconstruction keeps the two stage
+        // contributions apart until they are combined against g'_c.
+        let gamma_ga = ga_row[GAIN_VQ_COL_GC];
+        let gamma_gb = gb_row[GAIN_VQ_COL_GC];
+
         // g'_c scaled so the γ̂ product lands on Q1:
         //   pow2(13, frac) = g'_c · 2^(13−exp)   (mantissa full-scale)
         //   mpy_32_16 with γ̂ (2^13 grid)        → γ̂·g'_c·2^(11−exp)
         //   reposition to value·2^17 (Q1 in the high word) and round —
         //   the saturating left shift makes an over-range gain clip to
         //   the Word16 ceiling instead of wrapping.
-        let g_prime_scaled = pow2(13, frac); // g'_c · 2^(13−exp), Word32
-        let (gp_hi, gp_lo) = l_extract(g_prime_scaled);
+        let (gp_hi, gp_lo) = l_extract(pred.g_prime_scaled);
         // γ̂·g'_c as the sum of the two per-stage products (full Q13
         // precision, no Word16 γ̂ saturation), each column on its
         // (possibly split) grid.
@@ -235,15 +254,34 @@ impl GainDecoderFx {
         );
         let land_shift = if self.grid.code_q0 { 5 } else { 6 };
         let landed = if self.grid.code_trunc {
-            extract_h(l_shl(prod, add(exp, land_shift)))
+            extract_h(l_shl(prod, add(pred.exp, land_shift)))
         } else {
-            round(l_shl(prod, add(exp, land_shift)))
+            round(l_shl(prod, add(pred.exp, land_shift)))
         };
         let gain_code_q1 = if self.grid.code_q0 {
             crate::fx::ops::shl(landed, 1)
         } else {
             landed
         };
+
+        DecodedGainsFx {
+            gain_pit_q14,
+            gain_code_q1,
+        }
+    }
+
+    /// eq (72) memory advance for the chosen `(ga, gb)` pair:
+    /// `Û^(m) = 20·log10(γ̂)` pushed onto the Q10 history.
+    pub fn push(&mut self, ga: usize, gb: usize) {
+        let ga_row = gain_ga_entry(ga);
+        let gb_row = gain_gb_entry(gb);
+        let gamma_ga = ga_row[GAIN_VQ_COL_GC];
+        let gamma_gb = gb_row[GAIN_VQ_COL_GC];
+        // The eq (72) push γ̂ on its (possibly split) grid, Q13 base.
+        let gamma_q13_32 = l_add(
+            l_shr(l_deposit_l(gamma_ga), self.grid.push_ga),
+            l_shr(l_deposit_l(gamma_gb), self.grid.push_gb),
+        );
 
         // eq (72) decode form: Û^(m) = 20·log10(γ̂) pushed on Q10.
         //   log2(γ̂) = log2(gamma_q13_32) − 13; dB = 6.0206·log2.
@@ -257,11 +295,22 @@ impl GainDecoderFx {
             self.past_qua_en[k] = self.past_qua_en[k - 1];
         }
         self.past_qua_en[0] = u_q10;
+    }
 
-        DecodedGainsFx {
-            gain_pit_q14,
-            gain_code_q1,
-        }
+    /// Decodes one subframe's gains from the **codebook-domain**
+    /// `(ga, gb)` indices and the Q13 codevector, advancing the
+    /// predictor memory (eq (72) decode form) — [`Self::predict`] →
+    /// [`Self::reconstruct`] → [`Self::push`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ga`/`gb` exceed the codebook domains (3-/4-bit
+    /// fields cannot).
+    pub fn decode(&mut self, ga: usize, gb: usize, code_q13: &[i16; L_SUBFR]) -> DecodedGainsFx {
+        let pred = self.predict(code_q13);
+        let gains = self.reconstruct(&pred, ga, gb);
+        self.push(ga, gb);
+        gains
     }
 
     /// §4.4.2 erased-frame gain attenuation (eqs (93)/(94)) plus the

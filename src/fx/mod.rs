@@ -26,13 +26,21 @@
 //! equations but its rounding drift compounds through the
 //! adaptive-codebook feedback until long vectors decorrelate.
 
+pub mod acelp;
 pub mod analysis;
 pub mod decoder;
 pub mod dsp;
+pub mod encoder;
 pub mod excitation;
+pub mod filters;
+pub mod gain_vq;
 pub mod gains;
 pub mod levinson;
 pub mod lp_to_lsp;
 pub mod lsp;
 pub mod ops;
+pub mod pitch_cl;
+pub mod pitch_ol;
 pub mod postfilter;
+pub mod target;
+pub mod weighting;
