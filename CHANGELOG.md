@@ -29,6 +29,20 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   S1 62.9 %, GA 73.3 %, GB 69.6 %, frame-exact 10.1 %; the ACELP
   stage-isolation diagnostic shows 98 % of the C/S misses are input
   (target / impulse-response) differences, not search-structure ones.
+- **§3.3 on the fixed grid — and the eq (28) logarithm is base 10.**
+  The LAR decision runs through the clause-5 `log2` table
+  (`log2(1+k) − log2(1−k)` on a Word32 Q15 grid, eq (29) interpolation
+  as a halving add, eq (30) thresholds carried on the same grid, eq (32)
+  from the Q13 `d_min`). Black-box pinned: reading eq (28)'s `log` as
+  the **natural** logarithm classifies 43–84 % of the corpus subframes
+  as tilted and loses to a forced-flat encoder on every vector; reading
+  it as **base 10** (the convention the clause's `20 log g_c` energy
+  equations already use) classifies 0–26 % tilted and beats both the
+  natural-log reading and forced-flat everywhere (locked C/S on the
+  PITCH vector 46 → 92 %, SPEECH 52 → 70 %, LSP 33 → 40 %). Negating the
+  reflection coefficients is measurably not the resolution (it never
+  tilts). Locked whole-corpus delta: T1 68.3 → 75.5 %, T2 70.8 → 76.3 %,
+  C1 45.1 → 65.4 %, GA 73.3 → 80.8 %, frame-exact 10.1 → 24.0 %.
 
 ## [0.0.8](https://github.com/OxideAV/oxideav-g729/compare/v0.0.7...v0.0.8) - 2026-08-30
 

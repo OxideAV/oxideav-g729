@@ -159,17 +159,17 @@ fn fx_encoder_agreement() {
     };
     // (vector, locked T1 %, locked C1 %, locked GA %, free frame-exact %)
     //
-    // Measured (chain skeleton, decoder-consistent state, float-decision
-    // §3.3 and float-emulated §3.4/§3.7/§3.8/§3.9 arithmetic):
-    // locked T1 68.6/34.2/74.2/71.8/63.5/84.4, C1 65.7/70.8/32.2/45.1/
-    // 51.3/55.5, GA 78.6/97.5/65.6/76.0/76.2/60.2 (ALL: T1 68.3, T2 70.8,
-    // C1 45.1, GA 73.3, frame-exact 10.1); free frame-exact ≈ 0.
+    // Measured after the §3.3 migration (table-log2 LAR decision with
+    // the eq (28) logarithm read as base 10, γ₂ from the Q13 d_min):
+    // locked T1 71.4/34.2/81.5/81.9/69.9/84.4, C1 68.6/70.8/39.3/90.2/
+    // 68.8/55.5, GA 81.4/97.5/69.5/90.1/83.1/60.2 (ALL: T1 75.5, T2 76.3,
+    // C1 65.4, GA 80.8, frame-exact 24.0); free frame-exact ≈ 0.
     let floors: [(&str, f64, f64, f64, f64); 6] = [
-        ("ALGTHM", 65.0, 62.0, 75.0, 0.0),
+        ("ALGTHM", 68.0, 65.0, 78.0, 0.0),
         ("FIXED", 31.0, 67.0, 94.0, 0.0),
-        ("LSP", 71.0, 29.0, 62.0, 0.0),
-        ("PITCH", 68.0, 42.0, 73.0, 0.0),
-        ("SPEECH", 60.0, 48.0, 73.0, 0.0),
+        ("LSP", 78.0, 36.0, 66.0, 0.0),
+        ("PITCH", 78.0, 87.0, 87.0, 0.0),
+        ("SPEECH", 66.0, 65.0, 80.0, 0.0),
         ("TAME", 81.0, 52.0, 57.0, 0.0),
     ];
     let mut total_locked = Agreement::default();

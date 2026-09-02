@@ -83,8 +83,8 @@ impl Default for WeightingLatitude {
         Self {
             negate_rc: false,
             gamma2_slope_q8: 1536,
-            float_decision: true,
-            log_base10: false,
+            float_decision: false,
+            log_base10: true,
         }
     }
 }
