@@ -113,6 +113,36 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   optimum computation is not published. Locked whole corpus:
   GA 80.8 → 80.5 %, GB 78.8 → 78.4 % (neutral within noise against the
   float-emulated search; ALGTHM +3/+1.5).
+- **Registry encoder switches to the fixed-point chain.** `G729Encoder`
+  (the `"g729"` registry encoder and the `make_encoder` factory) now
+  drives `fx::encoder::FrameEncoderFx`; the float `encode_chain`
+  remains the spec-equation oracle. End to end against the float
+  chain on identical metrics: exact `T1` +2 to +36 points on every
+  vector (SPEECH 34.0 → 43.9 %, FIXED 16.7 → 52.5 %), `T1±2` up on
+  every vector but FIXED (−0.8), `GA`/`GB` +2 to +18, `C1` up on five
+  of six; `L1` gives back 1–4 points on ALGTHM/PITCH/SPEECH (error
+  propagation reshuffling).
+
+### Docs asks (round 455)
+
+- §3.3 eq (28): the prose writes `log`; the corpus pins **base 10**.
+  A clean-room note confirming the base (or an erratum) would retire
+  the black-box pin.
+- §3.9.2: the reference-side computation of the "optimum" `(g_p,
+  g_c)` that drives the preselection is not described beyond "derived
+  from equation (63)"; the staged 2 × 2 `coef` / `L_coef` matrices
+  (`gain-quantizer-coef-matrix-16bit`, Q10/Q14/Q16/Q19; `…-32bit`,
+  Q26/Q30/Q32/Q35) are labelled "predictor coefficient matrix" but no
+  clause names them. Need: which quantity they multiply and whether
+  they belong to the preselection's optimum solve.
+- §3.7 / §3.8.1 / §3.9: the prose is silent on every internal scaling
+  (accumulator headroom, Word16 normalisation of `R(k)`, `d(n)`, `φ`,
+  the eq (63) correlations). The fixed chain's compositions are
+  measured not to matter for the searches; the residual misses sit in
+  the quiet-frame target (`x(n)`, `h(n)`) LSBs — a trace of the
+  reference's target-computation order (which of `1/Â(z)`, `A(z/γ₁)`,
+  `1/A(z/γ₂)` lands on Word16 between stages, and the memory update
+  order) for one quiet SPEECH frame would settle it.
 
 ## [0.0.8](https://github.com/OxideAV/oxideav-g729/compare/v0.0.7...v0.0.8) - 2026-08-30
 

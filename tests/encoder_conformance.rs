@@ -1,7 +1,10 @@
-//! Encoder conformance harness: runs the round-382 clause-3
-//! `FrameEncoder` over the staged ITU `.IN` input vectors (black-box
-//! validators under `docs/audio/g729/conformance/g729-core/`) and
-//! measures per-parameter agreement against the reference `.BIT`
+//! Encoder conformance harness: runs the round-382 clause-3 **float**
+//! `FrameEncoder` (the spec-equation oracle; the production encoder is
+//! the fixed-point `fx::encoder::FrameEncoderFx`, measured in
+//! `tests/fx_encoder_conformance.rs`) over the staged ITU `.IN` input
+//! vectors (black-box validators under
+//! `docs/audio/g729/conformance/g729-core/`) and measures
+//! per-parameter agreement against the reference `.BIT`
 //! encoder-output streams.
 //!
 //! The float encoder is not yet bit-exact against the fixed-point

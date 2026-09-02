@@ -20,7 +20,60 @@ put the whole decode path on the clause-5 fixed-point grid; round 438
 did the same for the encoder's §3.1–§3.2.3 front end; round 452
 root-caused the frame-0 startup divergence (every clean vector's first
 subframe is now byte-exact) and gave the Annex B comfort noise its
-§B.4.2.2 spectral envelope.
+§B.4.2.2 spectral envelope; round 455 moved the whole encoder mid-chain
+(§3.3–§3.10) onto the fixed grid, sharing the decoder's primitives, and
+switched the registry encoder to it.
+
+## Round 455 — the encoder mid-chain on the fixed grid
+
+`fx::encoder::FrameEncoderFx` drives clause 3 on the Word16/Word32
+grid and shares every decoder-side primitive with `FrameDecoderFx`
+(eq (40) `pred_lt3`, the Q13 codevector, the Q14/Q1 gain
+reconstruction, the eq (75) landing, the `1/Â(z)` synthesis with the
+overflow-rescale protocol), so the encoder's local reconstruction is
+the decoder's bit for bit. The registry encoder and the `.IN` → `.BIT`
+path now run it; the float chain (`encode_chain`) stays as the
+spec-equation oracle.
+
+`tests/fx_encoder_conformance.rs` measures per-parameter agreement
+two ways — **locked** (every stage runs from the reference encoder's
+own state, committed from the `.BIT` parameters after each search, so
+each stage is measured in isolation) and **free** (end to end). Locked,
+whole corpus, skeleton → round close: T1 68.3 → 80.9 %, T2 70.8 →
+81.0 %, C1 45.1 → 65.3 %, GA 73.3 → 80.5 %, GB 69.6 → 78.4 %,
+frame-exact 10.1 → 27.5 % (PITCH 48.3 %). Free, against the float
+chain on identical metrics: exact T1 +2 to +36 points on every vector
+(SPEECH 34.0 → 43.9 %), GA/GB +2 to +18, T1±2 up everywhere.
+
+Stage by stage, each pinned black-box against the corpus:
+
+- **§3.3** — the eq (28) LAR through the clause-5 `log2` table with
+  the logarithm read as **base 10** (the clause's own `20 log g_c`
+  convention): the natural-log reading tilts 43–84 % of subframes and
+  loses to a forced-flat encoder on every vector; base 10 tilts
+  0–26 % and beats both (PITCH locked C/S 46 → 92 %). γ₂ from the Q13
+  `d_min` in radians.
+- **§3.4** — Word32 sums behind the §3.2.1 overflow-rescale protocol,
+  Word16-mantissa normalisation (the un-normalised `mpy_32` form loses
+  15 bits and doubles the window misses), **strict** favour-lower
+  compare (the printed `≥` takes the shortest section on all-zero
+  frames; the reference keeps the longest). The 0.85 threshold is
+  corpus-confirmed (accept/reject ratios separate at 0.845–0.856).
+- **§3.7** — Word32 eq (38) rows, Word16-mantissa eq (37), eq (39)
+  over **all five** interpolated candidates `k − 2/3 … k + 2/3`
+  including the interpolated fraction-0 value (+4 to +8 points of T1
+  everywhere); literal `k + t/3` phase geometry (the decoder's negated
+  eq (40) fold halves T1 here). eq (43) through `div_s` on Q14.
+- **§3.8.1** — Word16-normalised `d`/`φ`, wide `C²·E` compare: neutral
+  against the exact oracle — the search is not precision sensitive;
+  98 % of the remaining C/S misses are input (target / impulse
+  response) differences, concentrated on quiet frames (SPEECH
+  `peak < 64`: T1 22.6 % vs 96.6 % on loud frames).
+- **§3.9** — candidates on the decoder's gain grid; the §3.9.2
+  preselection reads the **staged threshold tables** (cluster start =
+  thresholds the joint eq (63) optimum exceeds; the first GA threshold
+  is exactly twice the fourth GA row's γ). Joint beats single-axis
+  (−9 to −14 GA+GB) and sequential (−2 to −4) optima.
 
 ## Round 452 — frame-0 identified, SID-LSP envelope wired
 
@@ -546,16 +599,18 @@ ratchet toward the fixed-point decode path. The decode stages:
   reference in energy envelope, not sample-for-sample. The Annex B
   *encoder* (VAD §B.3, DTX decision §B.4.1, SID quantization search)
   is not implemented.
-- **Bit-exact encoding** — rounds 385/388/390 moved the LSF chain onto
-  the reference's numeric grid and round 438 onto the genuine
-  Word16/Word32 operator chain (§3.1–§3.2.3), which retired TAME's
-  locked-history `L0` flips (99.2%) and lifted the locked corpus to
-  90.7%. The remaining locked-history misses (LSP 85.8, SPEECH 91.7)
-  are sub-LSB ω disagreements of the black-box-pinned front-end
-  schedule on near-tie frames; the mid-chain stages (§3.3 weighting,
-  §3.4/§3.7 pitch, §3.8 ACELP, §3.9 gain VQ) are still float — their
-  fixed-point migration is the next arc. The §3.9 decode-side
-  Q-format gain saturation gap is unchanged.
+- **Bit-exact encoding** — the whole clause-3 chain runs on the
+  Word16/Word32 grid (round 455: §3.3–§3.10 join the round-438
+  §3.1–§3.2.3 front end), but the wire is not yet exact: locked
+  (stage-isolated) frame-exact is 27.5 % corpus-wide, free 0.1 %.
+  The remaining locked misses are input differences the stage
+  arithmetic cannot fix — the front end's sub-LSB ω disagreements
+  (LSP 85.8 %, SPEECH 91.7 % locked-history LSP agreement) and
+  LSB-level target/impulse-response differences on quiet frames — plus
+  the §3.9.2 preselection-boundary cases whose reference-side optimum
+  computation is unpublished (see the docs asks in the round-455
+  CHANGELOG). Each stage's unstated latitude is exposed on
+  `fx::encoder::EncoderLatitude` for further black-box sweeps.
 - **Annex A depth-first ACELP search** (§A.3.8.1) — the Annex A prose
   pins only the search's existence and fixed complexity; the
   pulse-combination schedule lives only in the barred reference C

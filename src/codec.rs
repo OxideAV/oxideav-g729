@@ -37,8 +37,8 @@ use oxideav_core::{
     Result, RuntimeContext, SampleFormat, TimeBase,
 };
 
-use crate::encode_chain::{FrameEncoder, L_FRAME};
 use crate::fx::decoder::FrameDecoderFx;
+use crate::fx::encoder::{FrameEncoderFx, L_FRAME};
 use crate::fx::postfilter::PostfilterFx;
 use crate::parameters::{pack_bit_array, unpack_bit_array};
 use crate::tables::BITS_PER_FRAME;
@@ -203,12 +203,13 @@ impl oxideav_core::Decoder for G729Decoder {
 // ───────────────────────── encoder ─────────────────────────
 
 /// Registry [`Encoder`]: S16 mono 8 kHz PCM frames in, one 10-octet
-/// packet per encoded 10 ms frame out.
+/// packet per encoded 10 ms frame out. Runs the clause-3 chain on the
+/// clause-5 fixed-point grid ([`FrameEncoderFx`], round 455).
 pub struct G729Encoder {
     params: CodecParameters,
-    chain: FrameEncoder,
+    chain: FrameEncoderFx,
     /// Carry-over samples (< one frame) between `send_frame` calls.
-    buf: Vec<f32>,
+    buf: Vec<i16>,
     pending: VecDeque<Packet>,
     /// Running sample clock for output pts (1/8000 time base).
     next_pts: i64,
@@ -237,7 +238,7 @@ impl G729Encoder {
         params.bit_rate = Some(BIT_RATE);
         Self {
             params,
-            chain: FrameEncoder::new(),
+            chain: FrameEncoderFx::new(),
             buf: Vec::new(),
             pending: VecDeque::new(),
             next_pts: 0,
@@ -250,7 +251,7 @@ impl G729Encoder {
     fn drain_full_frames(&mut self) {
         let mut off = 0;
         while self.buf.len() - off >= SAMPLES_PER_FRAME {
-            let mut frame = [0.0f32; SAMPLES_PER_FRAME];
+            let mut frame = [0i16; SAMPLES_PER_FRAME];
             frame.copy_from_slice(&self.buf[off..off + SAMPLES_PER_FRAME]);
             off += SAMPLES_PER_FRAME;
             let encoded = self.chain.encode_frame(&frame);
@@ -300,7 +301,7 @@ impl oxideav_core::Encoder for G729Encoder {
         self.buf.extend(
             plane
                 .chunks_exact(2)
-                .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]]))),
+                .map(|c| i16::from_le_bytes([c[0], c[1]])),
         );
         self.drain_full_frames();
         Ok(())
@@ -318,7 +319,7 @@ impl oxideav_core::Encoder for G729Encoder {
         // Zero-pad a trailing partial block to a whole 10 ms frame —
         // G.729 has no partial-frame syntax.
         if !self.buf.is_empty() {
-            self.buf.resize(SAMPLES_PER_FRAME, 0.0);
+            self.buf.resize(SAMPLES_PER_FRAME, 0);
             self.drain_full_frames();
         }
         self.flushed = true;

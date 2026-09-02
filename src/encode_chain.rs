@@ -1,6 +1,12 @@
-//! §3 **per-frame encode chain** — the stateful glue that drives every
-//! encoder stage in clause-3 order, turning 80 samples of 16-bit PCM
-//! into the 15 transmitted Table-8 codewords per 10 ms frame.
+//! §3 **per-frame encode chain** (float spec-equation oracle) — the
+//! stateful glue that drives every encoder stage in clause-3 order,
+//! turning 80 samples of 16-bit PCM into the 15 transmitted Table-8
+//! codewords per 10 ms frame.
+//!
+//! Round 455: the registry encoder and the `.IN` → `.BIT` production
+//! path run the clause-5 fixed-point chain
+//! ([`crate::fx::encoder::FrameEncoderFx`]); this float chain stays as
+//! the spec-equation oracle its stage modules are validated against.
 //!
 //! The capstone of the round-382 encoder build-out. Per frame:
 //!
