@@ -73,6 +73,32 @@ landed:
   0.9875 (≈ 1 − 1/80) is not derivable from the printed clause and is
   recorded as a docs gap.
 
+**Annex A on the fixed grid.** The g729a rows previously ran the
+base cascade; `PostfilterFx::new_annex_a` now runs the §A.4.2
+reduced-complexity cascade on the same Word16/Word32 grid — integer
+delays only, searched in `[T_cl − 3, T_cl + 3]` around the *current*
+subframe's transmitted delay (`T_cl ≤ 140`, §A.4.2.1); no `1/g_f`
+(§A.4.2.2); tilt compensation `1 + γ_t·k′_1·z⁻¹` without `1/g_t`, `k′_1`
+from the length-22 impulse response (eq (A.14)), `γ_t = 0.8/0`
+(§A.4.2.3), run **before** the `1/Â(z/γ_d)` synthesis (§A.4.2); AGC
+target `√(Σŝ²/Σsf²)` (eq (A.15)) with the printed `0.9/0.1` pair,
+which the oracle confirms for Annex A (g729a TAME subframe 4 ramps
+0.733 → 0.802 toward 0.816 with `1 − 0.9^20 = 0.88`; the base body's
+0.9875 does not fit here) and a steady-state gain within 1 % of ours
+from subframe 2 on. Measured (g729a, r461 first landing → this):
+correlation ALGTHM 0.99763 → 0.99987, LSP 0.99689 → 0.99893, PITCH
+0.99750 → 0.99981, SPEECH 0.99755 → 0.99993, TAME 0.99960 → 0.99995,
+PARITY 0.99778 → 0.99996; max |Δ| SPEECH 4613 → 1228, LSP 1598 → 676,
+PARITY 2042 → 259; exact share ALGTHM 4.25 → 6.43 %, FIXED 20.19 →
+23.68 %, LSP 3.45 → 5.31 %, PITCH 2.00 → 5.37 %, SPEECH 15.61 →
+18.02 %. Open: the Annex A reference's AGC gain enters the first
+active subframe at ≈ 0 (g729a TAME/PITCH/FIXED frame-0 subframe 1,
+LSP frame 5) and rises with the 0.9 pole, and its SPEECH frame-0
+subframe 0 is attenuated where the base reference is not — a
+low-level/start-up behaviour of the §A.4.2.4 fixed-point form that a
+silence threshold on the energies (`Σsf² ≤ 3…7` → `G = 0`) only partly
+reproduces; recorded as a docs gap.
+
 **Measured** (base corpus, full fixed-point chain vs `.PST`; r455 →
 r461): correlation ALGTHM 0.99291 → 0.99993, PITCH 0.99676 →
 0.99936, SPEECH 0.99900 → 0.99984, TAME 0.99991 → 0.99996, PARITY

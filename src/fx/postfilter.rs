@@ -77,6 +77,12 @@ pub const AGC_TARGET_Q15: i16 = 4915;
 /// eq (85) impulse-response truncation length.
 pub const GF_IMPULSE_LEN: usize = 20;
 
+/// eq (A.14) impulse-response truncation length (Annex A).
+pub const ANNEX_A_IMPULSE_LEN: usize = 22;
+
+/// §A.4.2.3 tilt weight `γ_t = 0.8` (negative `k′_1`) on Q15.
+pub const GAMMA_T_ANNEX_A_Q15: i16 = 26214;
+
 /// Deepest §4.2.1 history reach: the longest integer delay the search
 /// can pick (`int(T_1) + 1 ≤ 144`) plus the long-interpolator margin
 /// (8 samples beyond the integer anchor).
@@ -189,6 +195,9 @@ pub struct PfLatitudeFx {
     /// (`true`, the r419 pin) or the printed eq (82) test alone decides
     /// (`false`).
     pub lt_silence_floor: bool,
+    /// §A.4.2.4 recursion pole on Q15 (printed `0.9` = 29491) for the
+    /// Annex A cascade; the complementary weight is `2^15 − pole`.
+    pub agc_pole_a_q15: i16,
 }
 
 impl Default for PfLatitudeFx {
@@ -220,6 +229,7 @@ impl Default for PfLatitudeFx {
             agc_energy: false,
             lt_over_unity_clamp: false,
             lt_silence_floor: true,
+            agc_pole_a_q15: 29491,
         }
     }
 }
@@ -256,6 +266,7 @@ impl PfLatitudeFx {
                 "agc_energy" => self.agc_energy = b,
                 "lt_over_unity_clamp" => self.lt_over_unity_clamp = b,
                 "lt_silence_floor" => self.lt_silence_floor = b,
+                "agc_pole_a_q15" => self.agc_pole_a_q15 = i,
                 other => panic!("unknown latitude field {other}"),
             }
         }
@@ -349,6 +360,8 @@ pub struct PostfilterFx {
     lat: PfLatitudeFx,
     /// Oracle-probe switch: apply the §4.2.1 filter as disabled.
     force_lt_off: bool,
+    /// §A.4.2 reduced-complexity cascade (see [`Self::new_annex_a`]).
+    annex_a: bool,
 }
 
 impl Default for PostfilterFx {
@@ -372,7 +385,27 @@ impl PostfilterFx {
             hp_y: [0; 2],
             lat: PfLatitudeFx::default(),
             force_lt_off: false,
+            annex_a: false,
         }
+    }
+
+    /// The **Annex A** (§A.4.2) reduced-complexity cascade on the same
+    /// grid: the §A.4.2.1 long-term postfilter searches **integer**
+    /// delays only, in `[T_cl − 3, T_cl + 3]` around the *current*
+    /// subframe's transmitted delay (`T_cl ≤ 140`); the §A.4.2.2
+    /// short-term postfilter drops `1/g_f`; the §A.4.2.3 tilt filter
+    /// `1 + γ_t·k′_1·z⁻¹` drops `1/g_t`, takes `k′_1` from the
+    /// length-22 impulse response (eq (A.14)) and uses `γ_t = 0.8`
+    /// for negative `k′_1`, `0` otherwise; the tilt compensation runs
+    /// **before** the `1/Â(z/γ_d)` synthesis (§A.4.2); the §A.4.2.4
+    /// AGC target is the energy ratio `√(Σŝ²/Σsf²)` (eq (A.15)) with
+    /// the recursion pair carried in [`PfLatitudeFx::agc_pole_a_q15`].
+    /// [`Self::process_subframe`]'s delay argument is then `T_cl`.
+    #[must_use]
+    pub fn new_annex_a() -> Self {
+        let mut pf = Self::new();
+        pf.annex_a = true;
+        pf
     }
 
     /// Override the operator-schedule latitude (black-box sweep hook).
@@ -616,13 +649,75 @@ impl PostfilterFx {
         }
     }
 
+    /// §A.4.2.1: best integer delay in `[T_cl − 3, T_cl + 3]` by the
+    /// eq (80) correlation, then the eq (82)/(83) gain decision on it
+    /// (no fractional pass, no longer-filter refinement).
+    fn decide_integer(&self, t_cl: usize) -> LtDecisionFx {
+        let rs = self.scaled_residual();
+        let mut energy32 = 0i32;
+        for n in 0..L_SUBFR {
+            energy32 = l_mac(energy32, rs[HIST + n], rs[HIST + n]);
+        }
+        let energy = i128::from(energy32);
+        let centre = t_cl.min(140);
+        let lo = centre.saturating_sub(3).max(1);
+        let hi = (centre + 3).min(143);
+        let mut t0 = lo;
+        let mut best_corr = i32::MIN;
+        for k in lo..=hi {
+            let mut corr = 0i32;
+            for n in 0..L_SUBFR {
+                corr = l_mac(corr, rs[HIST + n], Self::at(&rs, n, k));
+            }
+            if corr > best_corr {
+                best_corr = corr;
+                t0 = k;
+            }
+        }
+        let mut den32 = 0i32;
+        for n in 0..L_SUBFR {
+            let rk = Self::at(&rs, n, t0);
+            den32 = l_mac(den32, rk, rk);
+        }
+        let num = i128::from(best_corr);
+        let den = i128::from(den32);
+        let off = LtDecisionFx {
+            delay: t0,
+            frac: 0,
+            gain_q15: 0,
+            use_long: false,
+        };
+        let enabled = num > 0
+            && den > 0
+            && (!self.lat.lt_silence_floor || energy > 40)
+            && 2 * num * num >= energy * den;
+        if !enabled || (!self.lat.lt_over_unity_clamp && num > 2 * den) {
+            return off;
+        }
+        let gain_q15 = if num >= den {
+            32767
+        } else {
+            ((num << 15) / den) as i16
+        };
+        LtDecisionFx {
+            delay: t0,
+            frac: 0,
+            gain_q15,
+            use_long: false,
+        }
+    }
+
     /// §4.2.1 `H_p(z)` for one subframe, applied to the **residual**
     /// (clause 4.2: "the signal r̂ is then filtered through the
     /// long-term postfilter"): two-pass search + the eq (78)
     /// combination over `r̂(n)` / `r̂_T(n)`; advances the residual
     /// history. The residual must already sit in `r_buf[HIST..]`.
     fn long_term(&mut self, int_t1: usize) -> ([i16; L_SUBFR], LtDecisionFx) {
-        let mut d = self.decide(int_t1);
+        let mut d = if self.annex_a {
+            self.decide_integer(int_t1)
+        } else {
+            self.decide(int_t1)
+        };
         if self.force_lt_off {
             d.gain_q15 = 0;
             d.frac = 0;
@@ -693,7 +788,10 @@ impl PostfilterFx {
         for n in 0..L_SUBFR {
             // Optionally scale the input by 1/g_f first (the eq (84)
             // leading factor commutes; the rounding point differs).
-            let zin = if self.lat.gf_before {
+            let zin = if gf32_q12 == 0 {
+                // No `1/g_f` (the §A.4.2.2 form).
+                z[n]
+            } else if self.lat.gf_before {
                 if self.lat.gf_exact_div {
                     exact_div(z[n])
                 } else {
@@ -717,7 +815,7 @@ impl PostfilterFx {
 
             // 1/g_f: y·m·2^(e−33) with l_mult’s doubling folded in
             // (Q16 landing → round to Q0).
-            out[n] = if self.lat.gf_before {
+            out[n] = if self.lat.gf_before || gf32_q12 == 0 {
                 y
             } else if self.lat.gf_exact_div {
                 exact_div(y)
@@ -780,6 +878,37 @@ impl PostfilterFx {
         out
     }
 
+    /// §A.4.2.3 `H_t(z) = 1 + γ_t·k′_1·z⁻¹` (no `1/g_t`), `k′_1` from
+    /// the length-22 impulse response (eq (A.14)), `γ_t = 0.8` when
+    /// `k′_1 < 0`, else `0`.
+    fn tilt_annex_a(&mut self, t: &[i16; L_SUBFR], h: &[i16]) -> [i16; L_SUBFR] {
+        let mut rh0 = 0i64;
+        let mut rh1 = 0i64;
+        for j in 0..h.len() {
+            rh0 += i64::from(h[j]) * i64::from(h[j]);
+            if j + 1 < h.len() {
+                rh1 += i64::from(h[j]) * i64::from(h[j + 1]);
+            }
+        }
+        let k1_q15: i16 = if rh0 > 0 {
+            (-((rh1 << 15) / rh0)).clamp(-32768, 32767) as i16
+        } else {
+            0
+        };
+        let c = if k1_q15 < 0 {
+            mult(GAMMA_T_ANNEX_A_Q15, k1_q15)
+        } else {
+            0
+        };
+        let mut out = [0i16; L_SUBFR];
+        for (n, o) in out.iter_mut().enumerate() {
+            let prev = if n == 0 { self.tilt_prev } else { t[n - 1] };
+            *o = round(l_mac(l_deposit_h(t[n]), c, prev));
+        }
+        self.tilt_prev = t[L_SUBFR - 1];
+        out
+    }
+
     /// §4.2.4 adaptive gain control (eqs (88)–(90)) on the Q12 gain
     /// grid; the eq (88) ratio is held at the running gain on a silent
     /// postfiltered subframe.
@@ -790,7 +919,7 @@ impl PostfilterFx {
             num = l_add(num, i32::from(abs_s(s_hat[n])));
             den = l_add(den, i32::from(abs_s(sf[n])));
         }
-        let (num, den) = if self.lat.agc_energy {
+        let (num, den) = if self.lat.agc_energy || self.annex_a {
             let mut en = 0i64;
             let mut ed = 0i64;
             for n in 0..L_SUBFR {
@@ -813,7 +942,7 @@ impl PostfilterFx {
         };
         let g_target_q12: i16 = if den > 0 {
             let ratio = f64::from(num) / f64::from(den);
-            let ratio = if self.lat.agc_energy {
+            let ratio = if self.lat.agc_energy || self.annex_a {
                 ratio.sqrt()
             } else {
                 ratio
@@ -831,7 +960,12 @@ impl PostfilterFx {
         let mut out = [0i16; L_SUBFR];
         for (n, o) in out.iter_mut().enumerate() {
             let x2 = i16::from(self.lat.agc_x2);
-            let (pole, target_w) = if self.lat.agc_pole_q15 == 0 {
+            let (pole, target_w) = if self.annex_a {
+                (
+                    self.lat.agc_pole_a_q15,
+                    add(sub(32767, self.lat.agc_pole_a_q15), 1),
+                )
+            } else if self.lat.agc_pole_q15 == 0 {
                 (AGC_PREV_Q15, AGC_TARGET_Q15)
             } else {
                 // Complementary pair summing to exactly 2^15.
@@ -967,6 +1101,29 @@ impl PostfilterFx {
 
         // §4.2.1 H_p(z) on the residual.
         let (hp, decision) = self.long_term(int_t1);
+
+        if self.annex_a {
+            // §A.4.2: tilt compensation BEFORE the 1/Â(z/γ_d) synthesis,
+            // no g_f / g_t.
+            let h40 = impulse_response_q12_n(&apn, &apd);
+            let ht = self.tilt_annex_a(&hp, &h40[..ANNEX_A_IMPULSE_LEN]);
+            let hf = self.synthesis(&ht, &apd, (0, 0), 0);
+            let agc_gain_in = self.agc_q12;
+            let agc = self.agc(s, &hf);
+            let output = self.high_pass(&agc);
+            return SubframeTraceFx {
+                decision,
+                long_term: hp,
+                impulse: core::array::from_fn(|n| h40[n]),
+                gf_q12: 4096,
+                short_term: ht,
+                tilt: hf,
+                agc_gain_in_q12: agc_gain_in,
+                agc_gain_out_q12: self.agc_q12,
+                agc,
+                output,
+            };
+        }
 
         // 1/[g_f·Â(z/γ_d)] synthesis (impulse response shared with
         // §4.2.3).

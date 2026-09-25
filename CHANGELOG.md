@@ -21,6 +21,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   mismatch count. `PfLatitudeFx::with_overrides` parses
   `G729_FX_LAT="field=value,…"` for sweeps without recompiling; new
   hooks `agc_energy`, `lt_over_unity_clamp`, `lt_silence_floor`.
+- **Annex A §A.4.2 cascade on the fixed grid** (`PostfilterFx::new_annex_a`):
+  integer-only long-term search in `[T_cl − 3, T_cl + 3]` around the
+  current subframe's delay, no `1/g_f` / `1/g_t`, tilt before the
+  synthesis, `k′_1` from the length-22 impulse response with
+  `γ_t = 0.8/0`, energy-ratio AGC target with the printed 0.9/0.1 pair
+  (oracle-confirmed for Annex A). The g729a rows of the full-chain
+  harness and the output-stage oracle run it. g729a correlation ALGTHM
+  0.99763 → 0.99987, LSP 0.99689 → 0.99893, PITCH 0.99750 → 0.99981,
+  SPEECH 0.99755 → 0.99993, PARITY 0.99778 → 0.99996; exact share
+  ALGTHM 4.25 → 6.43 %, FIXED 20.19 → 23.68 %, LSP 3.45 → 5.31 %,
+  PITCH 2.00 → 5.37 %, SPEECH 15.61 → 18.02 %. Latitude
+  `agc_pole_a_q15`; decoder-side sweep hooks `G729_FX_DEC` and an
+  oracle sample cap `G729_FX_ORACLE_CAP` in the harness.
 - **§4.2.1 eq (78) normalisation**: the `1/(1 + γ_p·g_l)` scaling was
   doubled (`mpy_32_16` already keeps the Q16 grid), so long-term
   filtered subframes left the stage at ×2 and the AGC hid it. Fixed.

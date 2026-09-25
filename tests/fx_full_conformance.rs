@@ -47,8 +47,13 @@ fn read_pst(path: &Path) -> Vec<i16> {
 /// concealment primitives and latching the §4.4 voicing class from
 /// the §4.2.1 long-term decisions of good frames.
 fn decode_fx_full(label: &str, bit: &[u8]) -> Vec<i16> {
+    let annex_a = label.starts_with("g729a");
     let mut fx = FrameDecoderFx::new();
-    let mut pf = PostfilterFx::new();
+    let mut pf = if annex_a {
+        PostfilterFx::new_annex_a()
+    } else {
+        PostfilterFx::new()
+    };
     let n_frames = bit.len() / FRAME_BYTES;
     let mut out = Vec::with_capacity(n_frames * SAMPLES_PER_FRAME);
 
@@ -62,12 +67,18 @@ fn decode_fx_full(label: &str, bit: &[u8]) -> Vec<i16> {
             fx.decode_frame(&params)
         };
 
-        // Clause 4.2.1: both subframes anchor on int(T_1) of subframe 1.
+        // Clause 4.2.1: both subframes anchor on int(T_1) of subframe 1;
+        // §A.4.2.1 anchors each subframe on its own int(T).
         let int_t1 = usize::try_from(dec.sub[0].t_int.max(1)).unwrap();
         let mut periodic = false;
         for s in 0..2 {
+            let anchor = if annex_a {
+                usize::try_from(dec.sub[s].t_int.max(1)).unwrap()
+            } else {
+                int_t1
+            };
             let speech: [i16; SUBFRAME] = std::array::from_fn(|n| dec.speech[s * SUBFRAME + n]);
-            let (pcm, decision) = pf.process_subframe(&speech, &dec.sub[s].a_q12, int_t1);
+            let (pcm, decision) = pf.process_subframe(&speech, &dec.sub[s].a_q12, anchor);
             periodic |= decision.gain_q15 > 0;
             out.extend_from_slice(&pcm);
         }
@@ -412,16 +423,19 @@ fn fx_full_agc_output_oracle() {
     };
     let only = std::env::var("G729_FX_ORACLE").ok();
     let mut checked = 0usize;
-    for name in CLEAN_VECTORS {
+    for (corpus, name) in ["g729-core", "g729a"]
+        .iter()
+        .flat_map(|c| CLEAN_VECTORS.iter().map(move |n| (*c, *n)))
+    {
         if let Some(o) = &only {
-            if o != name {
+            if o != name && o.as_str() != format!("{corpus}/{name}") {
                 continue;
             }
         }
-        let label = format!("g729-core/{name}");
-        let bit = std::fs::read(root.join(format!("g729-core/{name}.BIT"))).unwrap();
-        let reference = read_pst(&root.join(format!("g729-core/{name}.PST")));
-        let (agc, tilt) = stage_signals(&bit);
+        let label = format!("{corpus}/{name}");
+        let bit = std::fs::read(root.join(format!("{corpus}/{name}.BIT"))).unwrap();
+        let reference = read_pst(&root.join(format!("{corpus}/{name}.PST")));
+        let (agc, tilt) = stage_signals(&bit, corpus == "g729a");
         let n = reference.len().min(agc.len());
         // A saturated reference sample frees the ramp ambiguity of the
         // inversion (any input above the clip point reproduces it), so
@@ -435,7 +449,11 @@ fn fx_full_agc_output_oracle() {
         let n = if std::env::var("G729_FX_ORACLE_FULL").is_ok() {
             n
         } else {
-            n.min(24_000)
+            let cap = std::env::var("G729_FX_ORACLE_CAP")
+                .ok()
+                .and_then(|c| c.parse().ok())
+                .unwrap_or(24_000);
+            n.min(cap)
         };
         let (recovered, inconsistent) = recover_agc_output(&reference[..n], &agc[..n]);
         if let Ok(dir) = std::env::var("G729_FX_ORACLE_DUMP") {
@@ -444,7 +462,11 @@ fn fx_full_agc_output_oracle() {
                 use std::fmt::Write as _;
                 let _ = writeln!(w, "{},{},{}", recovered[i], agc[i], tilt[i]);
             }
-            std::fs::write(format!("{dir}/oracle_{name}.csv"), w).unwrap();
+            std::fs::write(
+                format!("{dir}/oracle_{}_{name}.csv", corpus.replace('-', "_")),
+                w,
+            )
+            .unwrap();
         }
         let exact = (0..recovered.len())
             .filter(|&i| recovered[i] == i32::from(agc[i]))
@@ -512,9 +534,35 @@ fn fx_full_agc_output_oracle() {
 }
 
 /// Our own (AGC output, tilt output) stage signals for a `.BIT` stream.
-fn stage_signals(bit: &[u8]) -> (Vec<i16>, Vec<i16>) {
+fn stage_signals(bit: &[u8], annex_a: bool) -> (Vec<i16>, Vec<i16>) {
     let mut fx = FrameDecoderFx::new();
-    let mut pf = PostfilterFx::new();
+    let mut pf = if annex_a {
+        PostfilterFx::new_annex_a()
+    } else {
+        PostfilterFx::new()
+    };
+    if let Ok(spec) = std::env::var("G729_FX_DEC") {
+        // Decoder-side (§4.1) latitude: `exc_mode=N,energy_plain=B,
+        // code_trunc=B,code_q0=B,recon_ga=N,recon_gb=N,push_ga=N,push_gb=N`.
+        let mut grid = oxideav_g729::fx::gains::GainGridFx::default();
+        for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let (k, v) = item.split_once('=').expect("field=value");
+            let b = v == "1";
+            let i: i16 = v.parse().unwrap_or(0);
+            match k {
+                "exc_mode" => fx.exc_mode = i as u8,
+                "energy_plain" => fx.energy_plain = b,
+                "code_trunc" => grid.code_trunc = b,
+                "code_q0" => grid.code_q0 = b,
+                "recon_ga" => grid.recon_ga = i,
+                "recon_gb" => grid.recon_gb = i,
+                "push_ga" => grid.push_ga = i,
+                "push_gb" => grid.push_gb = i,
+                other => panic!("unknown decoder latitude field {other}"),
+            }
+        }
+        fx.set_gain_grid(grid);
+    }
     if let Ok(spec) = std::env::var("G729_FX_LAT") {
         pf.set_latitude(
             oxideav_g729::fx::postfilter::PfLatitudeFx::default().with_overrides(&spec),
@@ -534,8 +582,13 @@ fn stage_signals(bit: &[u8]) -> (Vec<i16>, Vec<i16>) {
         let int_t1 = usize::try_from(dec.sub[0].t_int.max(1)).unwrap();
         let mut periodic = false;
         for s in 0..2 {
+            let anchor = if annex_a {
+                usize::try_from(dec.sub[s].t_int.max(1)).unwrap()
+            } else {
+                int_t1
+            };
             let speech: [i16; SUBFRAME] = std::array::from_fn(|n| dec.speech[s * SUBFRAME + n]);
-            let t = pf.process_subframe_traced(&speech, &dec.sub[s].a_q12, int_t1);
+            let t = pf.process_subframe_traced(&speech, &dec.sub[s].a_q12, anchor);
             periodic |= t.decision.gain_q15 > 0;
             agc.extend_from_slice(&t.agc);
             tilt.extend_from_slice(&t.tilt);
@@ -560,11 +613,16 @@ fn fx_full_stage_dump() {
         return;
     };
     let (vector, out_path) = spec.split_once(':').expect("<vector>:<path>");
+    let annex_a = vector.starts_with("g729a");
     let bit = std::fs::read(root.join(format!("{vector}.BIT"))).unwrap();
     let reference = read_pst(&root.join(format!("{vector}.PST")));
     let mut w = String::new();
     let mut fx = FrameDecoderFx::new();
-    let mut pf = PostfilterFx::new();
+    let mut pf = if annex_a {
+        PostfilterFx::new_annex_a()
+    } else {
+        PostfilterFx::new()
+    };
     for f in 0..bit.len() / FRAME_BYTES {
         let frame = &bit[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
         let kind = serial::parse_frame(frame).unwrap();
@@ -577,8 +635,13 @@ fn fx_full_stage_dump() {
         let int_t1 = usize::try_from(dec.sub[0].t_int.max(1)).unwrap();
         let mut periodic = false;
         for s in 0..2 {
+            let anchor = if annex_a {
+                usize::try_from(dec.sub[s].t_int.max(1)).unwrap()
+            } else {
+                int_t1
+            };
             let speech: [i16; SUBFRAME] = std::array::from_fn(|n| dec.speech[s * SUBFRAME + n]);
-            let t = pf.process_subframe_traced(&speech, &dec.sub[s].a_q12, int_t1);
+            let t = pf.process_subframe_traced(&speech, &dec.sub[s].a_q12, anchor);
             periodic |= t.decision.gain_q15 > 0;
             let base = f * SAMPLES_PER_FRAME + s * SUBFRAME;
             for (n, &sp) in speech.iter().enumerate() {
