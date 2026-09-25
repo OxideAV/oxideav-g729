@@ -6,6 +6,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/OxideAV/oxideav-g729/compare/v0.0.8...v0.0.9) - 2026-09-25
+
+### Other
+
+- eq (83) over-unity -- the printed 0 <= g_l <= 1 bound wins under the output-stage oracle (FIXED 34.75 -> 57.07 % exact, max|d| 368 -> 19)
+- Annex A section A.4.2 cascade on the fixed grid -- integer-delay harmonic filter, tilt-before-synthesis, eq (A.15) energy AGC with the printed 0.9 pole
+- exact section 4.2.5 inversion oracle -- eq (78) normalisation fix + eq (90) re-pinned from the recovered gain trajectory
+- Annex B encoder side -- section B.4.1 DTX decision + section B.4.2 SID quantisation under a locked-VAD harness
+- registry encoder switches to the fixed-point chain + round-455 README/CHANGELOG rollup
+- section 3.9 on the fixed grid -- staged-threshold preselection on the decoder's gain grid
+- sections 3.7 + 3.8.1 on the fixed grid -- five interpolated fractional candidates (locked T1 75.5 -> 80.9, T2 76.3 -> 81.0)
+- section 3.4 on the fixed grid -- Word16-mantissa normalisation + strict favour-lower compare (open-loop miss 7.2 -> 5.0)
+- section 3.3 hysteresis unit test on the base-10 thresholds
+- section 3.3 on the fixed grid -- the eq (28) logarithm is base 10 (locked C1 45 -> 65)
+- fixed-point encoder chain skeleton + locked-history stage-isolation harness
+
 ### Added
 
 - **Round 461 — exact §4.2.5 inversion oracle + two §4.2 fixes.**
