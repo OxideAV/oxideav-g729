@@ -24,6 +24,68 @@ subframe is now byte-exact) and gave the Annex B comfort noise its
 (§3.3–§3.10) onto the fixed grid, sharing the decoder's primitives, and
 switched the registry encoder to it.
 
+## Round 461 — the §4.2 cascade under an exact output-stage oracle
+
+Round 461 attacks the remaining decoder residual with a new
+instrument instead of another black-box sweep: **the §4.2.5 output
+high-pass is inverted exactly on the reference `.PST`**
+(`tests/fx_full_conformance.rs::fx_full_agc_output_oracle`). The
+crate's fixed-point eq (91) model is run forward over a beam of
+candidate input paths and every path that reproduces the reference
+output bit for bit is kept; the survivor is the reference decoder's
+own AGC output `2·sf′(n)`, sample by sample. The inversion stays
+consistent over every clean base vector up to the first clipped
+reference sample (ALGTHM 1162, SPEECH 221796 — a saturated output
+frees the filter's DC/ramp ambiguity), which **pins the eq (91)
+schedule** (Q1 input grid, exact 48-bit Word32 feedback products; the
+DPF `mpy_32_16` and Word16-feedback variants all drift). With the
+reference's pre-high-pass signal in hand, every earlier stage can be
+scored without the output stage's state in the way. Two findings
+landed:
+
+- **§4.2.1 eq (78) carried a spurious ×2.** The `1/(1 + γ_p·g_l)`
+  normalisation was applied through `mpy_32_16` (which keeps the Q16
+  grid) *and* an extra `l_shl(…, 1)`, so every long-term-filtered
+  subframe left the stage at twice its level — invisible in the
+  earlier metrics because the §4.2.4 AGC renormalised it (our AGC
+  gain sat at ≈ 0.53 on periodic subframes where the reference's is
+  ≈ 1.05). Fixed; the r419/r452 pins fitted with the bug present
+  (over-unity disable, silence floor) are now latitude hooks
+  (`lt_over_unity_clamp`, `lt_silence_floor`) — the silence floor is
+  corpus-neutral, the over-unity choice splits the corpus (clamping
+  cleans FIXED/ALGTHM, disabling cleans LSP/PITCH) and stays open.
+- **§4.2.4 eq (90) does not run with the printed 0.85/0.15 pair.**
+  The recovered AGC output divided by our (shape-identical,
+  correlation 1.0000) pre-AGC signal exposes the reference's gain
+  trajectory directly: it converges to the printed eq (88) target
+  `Σ|ŝ|/Σ|sf|` (TAME frames 4–5: 1.1130 recovered vs 1.1133 computed,
+  against 1.123 for the Annex A energy form), it starts every vector
+  at 1.0 through the whole of frame-0 subframe 1, and it approaches
+  the target with a per-sample pole of **≈ 0.9875** (TAME frame 2
+  subframe 0 ramps 1.086 → 1.164 toward 1.290 over 40 samples; PITCH
+  subframes 16–24 reproduce to ±0.002 with that pole and to nothing
+  with 0.85). The crate now runs the recursion with the complementary
+  Q15 pair `32358/410` on a rounded Word32 accumulator (a truncating
+  Word16 pair drifts one Q12 LSB per sample; the reference holds a
+  stationary gain to 0.05 %). The r452 `agc_lag` reading was an
+  artefact of the fast pole: with the slow pole the current-subframe
+  target reproduces the onsets that the lag had. The mechanism behind
+  0.9875 (≈ 1 − 1/80) is not derivable from the printed clause and is
+  recorded as a docs gap.
+
+**Measured** (base corpus, full fixed-point chain vs `.PST`; r455 →
+r461): correlation ALGTHM 0.99291 → 0.99993, PITCH 0.99676 →
+0.99936, SPEECH 0.99900 → 0.99984, TAME 0.99991 → 0.99996, PARITY
+0.99898 → 0.99996; max |Δ| ALGTHM 10172 → 1234, PITCH 9894 → 4504,
+PARITY 3434 → 248, TAME 2700 → 633; exact share ALGTHM 4.04 → 7.68 %,
+PITCH 1.98 → 5.88 %, SPEECH 21.80 → 24.47 % (clean frames 285 → 316),
+PARITY 26.59 → 29.54 %. The oracle's per-subframe shape residual
+(reference pre-AGC signal vs ours after a least-squares gain) is
+0.012 on TAME, 0.04 on PITCH/SPEECH and 0.5 on LSP, i.e. the
+pre-AGC cascade is right to about a percent and the LSB-level
+schedule of §4.2.2/§4.2.3 plus the exact §4.2.4 arithmetic are what
+remain.
+
 ## Round 455 — the encoder mid-chain on the fixed grid
 
 `fx::encoder::FrameEncoderFx` drives clause 3 on the Word16/Word32

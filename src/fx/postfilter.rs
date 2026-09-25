@@ -176,6 +176,19 @@ pub struct PfLatitudeFx {
     /// eq (85)/(87) truncated impulse-response length (0 = the printed
     /// 20; sweep hook, max 40; r452 measured: 22/32/40 all neutral).
     pub gf_len: u8,
+    /// eq (88) target as the square root of the ENERGY ratio
+    /// `√(Σŝ²/Σsf²)` (the Annex A eq (A.15) form) instead of the
+    /// printed ratio of absolute sums.
+    pub agc_energy: bool,
+    /// eq (83) over-unity handling: clamp `g_l` to 1 as printed
+    /// (`true`) or treat a raw ratio above 2 as disabled (`false`, the
+    /// r419 black-box pin — fitted while the eq (78) output carried a
+    /// spurious ×2, so re-measured in r461).
+    pub lt_over_unity_clamp: bool,
+    /// Silence enable floor `Σr̂² ≤ 40` disables the long-term filter
+    /// (`true`, the r419 pin) or the printed eq (82) test alone decides
+    /// (`false`).
+    pub lt_silence_floor: bool,
 }
 
 impl Default for PfLatitudeFx {
@@ -198,13 +211,55 @@ impl Default for PfLatitudeFx {
             agc_x2: true,
             agc_sqrt: false,
             agc_apply_first: false,
-            agc_pole_q15: 0,
+            agc_pole_q15: 32358,
             agc_lag: false,
             gf_exact_div: false,
             tilt_exact_div: false,
             lt_tap_shift: 0,
             gf_len: 0,
+            agc_energy: false,
+            lt_over_unity_clamp: false,
+            lt_silence_floor: true,
         }
+    }
+}
+
+impl PfLatitudeFx {
+    /// Applies `field=value` overrides from a comma-separated spec
+    /// (the black-box sweep hook used by the conformance harness, e.g.
+    /// `G729_FX_LAT="lt_over_unity_clamp=1,agc_pole_q15=32358"`).
+    /// Unknown fields panic so a typo never silently measures the
+    /// default.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_overrides(mut self, spec: &str) -> Self {
+        for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let (k, v) = item.split_once('=').expect("field=value");
+            let b = v == "1" || v == "true";
+            let i: i16 = v.parse().unwrap_or(0);
+            match k {
+                "resid_round" => self.resid_round = b,
+                "syn_round" => self.syn_round = b,
+                "lt_round" => self.lt_round = b,
+                "gf_before" => self.gf_before = b,
+                "hp_wide" => self.hp_wide = b,
+                "agc_shift" => self.agc_shift = i,
+                "agc_x2" => self.agc_x2 = b,
+                "agc_sqrt" => self.agc_sqrt = b,
+                "agc_apply_first" => self.agc_apply_first = b,
+                "agc_pole_q15" => self.agc_pole_q15 = i,
+                "agc_lag" => self.agc_lag = b,
+                "gf_exact_div" => self.gf_exact_div = b,
+                "tilt_exact_div" => self.tilt_exact_div = b,
+                "lt_tap_shift" => self.lt_tap_shift = i,
+                "gf_len" => self.gf_len = i as u8,
+                "agc_energy" => self.agc_energy = b,
+                "lt_over_unity_clamp" => self.lt_over_unity_clamp = b,
+                "lt_silence_floor" => self.lt_silence_floor = b,
+                other => panic!("unknown latitude field {other}"),
+            }
+        }
+        self
     }
 }
 
@@ -517,7 +572,7 @@ impl PostfilterFx {
         // the whole silence-cluster class of divergence events on
         // SPEECH; the threshold is insensitive from 40 to 2560).
         let enabled = have
-            && energy > 40
+            && (!self.lat.lt_silence_floor || energy > 40)
             && 2 * i128::from(num) * i128::from(num) >= i128::from(energy) * i128::from(den);
 
         if !enabled {
@@ -539,7 +594,7 @@ impl PostfilterFx {
         // wrecks the onset-heavy FIXED vectors (corr 0.9502/0.9756
         // clamped vs 0.9855/0.9918 disabled); disabling everything
         // over unity instead costs SPEECH/PITCH (0.9953/0.9926).
-        if num > 2 * den {
+        if !self.lat.lt_over_unity_clamp && num > 2 * den {
             return LtDecisionFx {
                 delay: t0,
                 frac: 0,
@@ -598,7 +653,8 @@ impl PostfilterFx {
                 );
                 let acc = l_mac(l_deposit_h(self.r_buf[HIST + n]), g_half, r_t);
                 let (hi, lo) = l_extract(acc);
-                let scaled = l_shl(mpy_32_16(hi, lo, inv_q15), 1);
+                // `mpy_32_16` keeps the Q16 grid (acc · inv/2^15).
+                let scaled = mpy_32_16(hi, lo, inv_q15);
                 *o = if self.lat.lt_round {
                     round(scaled)
                 } else {
@@ -734,6 +790,19 @@ impl PostfilterFx {
             num = l_add(num, i32::from(abs_s(s_hat[n])));
             den = l_add(den, i32::from(abs_s(sf[n])));
         }
+        let (num, den) = if self.lat.agc_energy {
+            let mut en = 0i64;
+            let mut ed = 0i64;
+            for n in 0..L_SUBFR {
+                en += i64::from(s_hat[n]) * i64::from(s_hat[n]);
+                ed += i64::from(sf[n]) * i64::from(sf[n]);
+            }
+            // Scale both to a common Word32 grid preserving the ratio.
+            let sh = (64 - en.max(ed).leading_zeros() as i32 - 30).max(0);
+            ((en >> sh) as i32, (ed >> sh) as i32)
+        } else {
+            (num, den)
+        };
         let shift = self.lat.agc_shift;
         let (num, den) = if self.lat.agc_lag {
             let prev = self.agc_prev_sums;
@@ -744,6 +813,11 @@ impl PostfilterFx {
         };
         let g_target_q12: i16 = if den > 0 {
             let ratio = f64::from(num) / f64::from(den);
+            let ratio = if self.lat.agc_energy {
+                ratio.sqrt()
+            } else {
+                ratio
+            };
             let ratio = if self.lat.agc_sqrt {
                 ratio.sqrt()
             } else {
@@ -760,14 +834,22 @@ impl PostfilterFx {
             let (pole, target_w) = if self.lat.agc_pole_q15 == 0 {
                 (AGC_PREV_Q15, AGC_TARGET_Q15)
             } else {
-                (self.lat.agc_pole_q15, sub(32767, self.lat.agc_pole_q15))
+                // Complementary pair summing to exactly 2^15.
+                (
+                    self.lat.agc_pole_q15,
+                    add(sub(32767, self.lat.agc_pole_q15), 1),
+                )
             };
+            // eq (90) recursion on a Word32 accumulator, landed by
+            // rounding (a truncating Word16 pair drifts one Q12 LSB
+            // per sample at unit gain — the reference's stationary
+            // gain holds to 0.05 % across subframes).
+            let recurse = |g: i16| -> i16 { round(l_mac(l_mult(pole, g), target_w, g_target_q12)) };
             if self.lat.agc_apply_first {
                 *o = round(l_shl(l_mult(sf[n], self.agc_q12), 3 - shift + x2));
-                self.agc_q12 = add(mult(pole, self.agc_q12), mult(target_w, g_target_q12));
+                self.agc_q12 = recurse(self.agc_q12);
             } else {
-                // eq (90): g(n) = 0.85·g(n−1) + 0.15·G (Q15 weights).
-                self.agc_q12 = add(mult(pole, self.agc_q12), mult(target_w, g_target_q12));
+                self.agc_q12 = recurse(self.agc_q12);
                 // eq (89): sf′(n) = g(n)·sf(n) — product to Q16, round
                 // (or to Q17 → Q1 when the ×2 upscale is folded in).
                 *o = round(l_shl(l_mult(sf[n], self.agc_q12), 3 - shift + x2));

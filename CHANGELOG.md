@@ -8,6 +8,32 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Round 461 — exact §4.2.5 inversion oracle + two §4.2 fixes.**
+  `tests/fx_full_conformance.rs::fx_full_agc_output_oracle` inverts
+  the fixed-point output high-pass on the reference `.PST` (beam
+  search over integer input paths, ranked against our gain-scaled
+  AGC output; trusted up to the first clipped reference sample) and
+  reports the reference's own AGC output against ours — exact share,
+  first divergence and a per-subframe least-squares shape residual.
+  The inversion is consistent over every clean base vector, pinning
+  the eq (91) schedule. `fx_full_stage_dump` writes whole-vector stage
+  signals for offline fitting; the report line now carries the
+  mismatch count. `PfLatitudeFx::with_overrides` parses
+  `G729_FX_LAT="field=value,…"` for sweeps without recompiling; new
+  hooks `agc_energy`, `lt_over_unity_clamp`, `lt_silence_floor`.
+- **§4.2.1 eq (78) normalisation**: the `1/(1 + γ_p·g_l)` scaling was
+  doubled (`mpy_32_16` already keeps the Q16 grid), so long-term
+  filtered subframes left the stage at ×2 and the AGC hid it. Fixed.
+- **§4.2.4 eq (90) re-pinned from the recovered gain trajectory**: the
+  target is the printed `Σ|ŝ|/Σ|sf|` of the current subframe (no lag),
+  the per-sample pole is ≈ 0.9875 (Q15 pair `32358/410`, complementary
+  to 2^15) rather than the printed 0.85/0.15, and the recursion runs
+  on a rounded Word32 accumulator. Measured: ALGTHM corr 0.99291 →
+  0.99993 (max |Δ| 10172 → 1234), PITCH 0.99676 → 0.99936, SPEECH
+  0.99900 → 0.99984, PARITY 0.99898 → 0.99996 (max |Δ| 3434 → 248);
+  exact share ALGTHM 4.04 → 7.68 %, PITCH 1.98 → 5.88 %, SPEECH 21.80
+  → 24.47 %, PARITY 26.59 → 29.54 %.
+
 - **Round 455 — fixed-point encoder chain (`fx::encoder::FrameEncoderFx`)
   + stage-isolation harness.** The clause-3 encoder now has a Word16/
   Word32 driver that shares every decoder-side primitive with

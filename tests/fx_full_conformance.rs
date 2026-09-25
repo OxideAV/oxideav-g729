@@ -85,6 +85,8 @@ struct Metrics {
     rms_ratio: f64,
     exact_pct: f64,
     max_delta: i32,
+    diff_count: usize,
+    total: usize,
     first_div: Option<usize>,
     /// (start, length) of the longest byte-exact run.
     longest_run: (usize, usize),
@@ -143,6 +145,8 @@ fn metrics(out: &[i16], reference: &[i16]) -> Metrics {
         rms_ratio: (oe / re.max(1.0)).sqrt(),
         exact_pct: 100.0 * exact as f64 / n as f64,
         max_delta,
+        diff_count: n - exact,
+        total: n,
         first_div,
         longest_run,
         clean_frames,
@@ -158,10 +162,12 @@ fn report(label: &str, out: &[i16], reference: &[i16]) -> Metrics {
             let sub = (i % SAMPLES_PER_FRAME) / SUBFRAME;
             let off = i % SUBFRAME;
             eprintln!(
-                "{label}: corr {:.5}  rms {:.3}x  exact {:.2}%  max|d| {}  first-div @{} (frame {frame} sub {sub} n {off}: {} vs {})  run {}@{}  clean {}/{}",
+                "{label}: corr {:.5}  rms {:.3}x  exact {:.2}% (≠ {} of {})  max|d| {}  first-div @{} (frame {frame} sub {sub} n {off}: {} vs {})  run {}@{}  clean {}/{}",
                 m.corr,
                 m.rms_ratio,
                 m.exact_pct,
+                m.diff_count,
+                m.total,
                 m.max_delta,
                 i,
                 out[i],
@@ -290,6 +296,324 @@ fn fx_full_trace_dump() {
             eprintln!("ref     {:?}", &refsl[..12.min(refsl.len())]);
         }
     }
+}
+
+/// Exact inversion of the fixed-point §4.2.5 output stage: recovers
+/// the reference decoder's AGC output `2·sf′(n)` (the Q1 grid the
+/// high-pass consumes) from a `.PST` sample sequence, running the
+/// crate's own high-pass model forward over a beam of candidate input
+/// paths and keeping every path that reproduces the reference output
+/// exactly. Because the eq (91) filter has a double zero at DC, the
+/// input is recoverable only up to a slowly drifting offset; the beam
+/// is ranked by distance from `guide` (our own AGC output) so the
+/// physically plausible path wins the ties.
+///
+/// Returns `(recovered, first_inconsistent)`: `recovered[n]` is the
+/// best path's input at `n`; `first_inconsistent` is the first index
+/// at which no candidate reproduced the reference (the high-pass model
+/// itself is wrong there) or `None` when the whole vector inverts.
+fn recover_agc_output(reference: &[i16], guide: &[i16]) -> (Vec<i32>, Option<usize>) {
+    const B: [i32; 3] = [7699, -15398, 7699];
+    const A: [i32; 3] = [8192, 15836, -7667];
+    const BEAM: usize = 32;
+    #[derive(Clone)]
+    struct Path {
+        hx: [i32; 2],
+        hy: [i32; 2],
+        xs: Vec<i32>,
+        cost: i64,
+    }
+    fn sat32(v: i64) -> i32 {
+        v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    }
+    fn round16(l: i32) -> i32 {
+        i32::from((sat32(i64::from(l) + 0x8000) >> 16) as i16)
+    }
+    fn step(p: &Path, x: i32) -> ([i32; 2], [i32; 2], i32) {
+        // acc = L_mult(x, b0) + L_mac(hx0, b1) + L_mac(hx1, b2) + wide feedback.
+        let mut acc = sat32(2 * i64::from(x) * i64::from(B[0]));
+        acc = sat32(i64::from(acc) + 2 * i64::from(p.hx[0]) * i64::from(B[1]));
+        acc = sat32(i64::from(acc) + 2 * i64::from(p.hx[1]) * i64::from(B[2]));
+        let fb1 = ((i64::from(p.hy[0]) * i64::from(A[1])) >> 15) << 2;
+        let fb2 = ((i64::from(p.hy[1]) * i64::from(A[2])) >> 15) << 2;
+        acc = sat32(i64::from(acc) + i64::from(sat32(fb1)));
+        acc = sat32(i64::from(acc) + i64::from(sat32(fb2)));
+        let y = round16(sat32(i64::from(acc) << 2));
+        ([x, p.hx[0]], [acc, p.hy[0]], y)
+    }
+    let mut paths = vec![Path {
+        hx: [0; 2],
+        hy: [0; 2],
+        xs: Vec::with_capacity(reference.len()),
+        cost: 0,
+    }];
+    // Running gain ratio recovered/guide (Q16), refreshed every
+    // subframe from the best path, so the beam is ranked against the
+    // guide's SHAPE rather than its level (an offset path is invisible
+    // to the double-zero-at-DC filter and must be priced explicitly).
+    let mut gain_q16: i64 = 65536;
+    for (n, &r) in reference.iter().enumerate() {
+        if n > 0 && n % SUBFRAME == 0 {
+            let best = paths.iter().min_by_key(|p| p.cost).unwrap();
+            let b = n - SUBFRAME;
+            let num: i64 = (0..SUBFRAME)
+                .map(|i| i64::from(best.xs[b + i]) * i64::from(guide[b + i]))
+                .sum();
+            let den: i64 = (0..SUBFRAME)
+                .map(|i| i64::from(guide[b + i]) * i64::from(guide[b + i]))
+                .sum();
+            if den > 40 * 100 * 100 {
+                gain_q16 = (num * 65536 / den).clamp(32768, 131072);
+            }
+        }
+        let mut next: Vec<Path> = Vec::new();
+        for p in &paths {
+            // Solve round((2·b0·x + c) << 2) == r for x near the linear estimate.
+            let (_, _, y0) = step(p, 0);
+            let est = (i64::from(r) - i64::from(y0)) * 65536 / (8 * i64::from(B[0]));
+            for x in (est - 3)..=(est + 3) {
+                let x = x as i32;
+                let (hx, hy, y) = step(p, x);
+                if y == i32::from(r) {
+                    let mut xs = p.xs.clone();
+                    xs.push(x);
+                    let target = (gain_q16 * i64::from(guide[n.min(guide.len() - 1)])) >> 16;
+                    let cost = p.cost + (i64::from(x) - target).abs();
+                    next.push(Path { hx, hy, xs, cost });
+                }
+            }
+        }
+        if next.is_empty() {
+            let best = paths.into_iter().min_by_key(|p| p.cost).unwrap();
+            return (best.xs, Some(n));
+        }
+        next.sort_by_key(|p| p.cost);
+        next.truncate(BEAM);
+        paths = next;
+    }
+    let best = paths.into_iter().min_by_key(|p| p.cost).unwrap();
+    (best.xs, None)
+}
+
+/// Stage-isolated §4.2 scoring against the reference: inverts the
+/// §4.2.5 output stage on the `.PST` (validating the high-pass model
+/// on the way — an inconsistent inversion means the eq (91) schedule
+/// is wrong at that sample) and scores our AGC output `2·sf′(n)`
+/// against the recovered reference sequence — exact share, first
+/// divergence, and the per-subframe least-squares gain ratio between
+/// the reference's postfiltered signal and ours (the AGC-trajectory
+/// instrument: the ratio's per-sample smoothness measures the shape
+/// agreement of the pre-AGC cascade independently of the gain).
+#[test]
+fn fx_full_agc_output_oracle() {
+    let Some(root) = conformance_root() else {
+        eprintln!("g729 conformance corpus absent — skipping agc-output oracle");
+        return;
+    };
+    let only = std::env::var("G729_FX_ORACLE").ok();
+    let mut checked = 0usize;
+    for name in CLEAN_VECTORS {
+        if let Some(o) = &only {
+            if o != name {
+                continue;
+            }
+        }
+        let label = format!("g729-core/{name}");
+        let bit = std::fs::read(root.join(format!("g729-core/{name}.BIT"))).unwrap();
+        let reference = read_pst(&root.join(format!("g729-core/{name}.PST")));
+        let (agc, tilt) = stage_signals(&bit);
+        let n = reference.len().min(agc.len());
+        // A saturated reference sample frees the ramp ambiguity of the
+        // inversion (any input above the clip point reproduces it), so
+        // the recovered sequence is trusted only before the first one.
+        let first_sat = reference[..n]
+            .iter()
+            .position(|&v| v == i16::MAX || v == i16::MIN);
+        let n = first_sat.unwrap_or(n);
+        // The beam search is O(samples × beam); CI runs the head of
+        // every vector, `G729_FX_ORACLE_FULL=1` the whole corpus.
+        let n = if std::env::var("G729_FX_ORACLE_FULL").is_ok() {
+            n
+        } else {
+            n.min(24_000)
+        };
+        let (recovered, inconsistent) = recover_agc_output(&reference[..n], &agc[..n]);
+        if let Ok(dir) = std::env::var("G729_FX_ORACLE_DUMP") {
+            let mut w = String::new();
+            for i in 0..recovered.len() {
+                use std::fmt::Write as _;
+                let _ = writeln!(w, "{},{},{}", recovered[i], agc[i], tilt[i]);
+            }
+            std::fs::write(format!("{dir}/oracle_{name}.csv"), w).unwrap();
+        }
+        let exact = (0..recovered.len())
+            .filter(|&i| recovered[i] == i32::from(agc[i]))
+            .count();
+        let first_div = (0..recovered.len()).find(|&i| recovered[i] != i32::from(agc[i]));
+        // Per-subframe least-squares gain ratio reference/ours on the
+        // pre-AGC signal (ours: tilt output; theirs: recovered/2/g).
+        let mut worst_shape = 0.0f64;
+        let mut shape_sum = 0.0f64;
+        let mut shape_cnt = 0usize;
+        let mut bad_shape = 0usize;
+        for k in 0..recovered.len() / SUBFRAME {
+            let b = k * SUBFRAME;
+            let num: f64 = (0..SUBFRAME)
+                .map(|i| f64::from(recovered[b + i]) * f64::from(tilt[b + i]))
+                .sum();
+            let den: f64 = (0..SUBFRAME)
+                .map(|i| 4.0 * f64::from(tilt[b + i]) * f64::from(tilt[b + i]))
+                .sum();
+            if den < 4.0 * 40.0 * 100.0 * 100.0 {
+                continue;
+            }
+            let gain = 2.0 * num / den;
+            // Residual after removing the LS gain, relative.
+            let res: f64 = (0..SUBFRAME)
+                .map(|i| {
+                    let e = f64::from(recovered[b + i]) - gain * 2.0 * f64::from(tilt[b + i]);
+                    e * e
+                })
+                .sum();
+            let rel = (res / (num * num / den).max(1.0)).sqrt();
+            shape_sum += rel;
+            shape_cnt += 1;
+            worst_shape = worst_shape.max(rel);
+            if rel > 0.1 {
+                bad_shape += 1;
+            }
+        }
+        eprintln!(
+            "{label}: hp-inversion {}  (trusted range {} samples{})  agc-input exact {}/{} ({:.2}%)  first-div {:?}  shape-residual mean {:.4} worst {:.4} bad(>0.1) {} over {} loud subframes",
+            match inconsistent {
+                None => "consistent".to_string(),
+                Some(i) => format!("INCONSISTENT at {i}"),
+            },
+            n,
+            first_sat.map_or(String::new(), |i| format!(", reference clips at {i}")),
+            exact,
+            recovered.len(),
+            100.0 * exact as f64 / recovered.len().max(1) as f64,
+            first_div,
+            if shape_cnt > 0 { shape_sum / shape_cnt as f64 } else { 0.0 },
+            worst_shape,
+            bad_shape,
+            shape_cnt
+        );
+        checked += 1;
+        // The eq (91) model is pinned: the inversion must stay
+        // consistent over every clean base vector.
+        assert!(
+            inconsistent.is_none(),
+            "{label}: §4.2.5 model inconsistent at sample {inconsistent:?}"
+        );
+    }
+    assert!(checked >= 1);
+}
+
+/// Our own (AGC output, tilt output) stage signals for a `.BIT` stream.
+fn stage_signals(bit: &[u8]) -> (Vec<i16>, Vec<i16>) {
+    let mut fx = FrameDecoderFx::new();
+    let mut pf = PostfilterFx::new();
+    if let Ok(spec) = std::env::var("G729_FX_LAT") {
+        pf.set_latitude(
+            oxideav_g729::fx::postfilter::PfLatitudeFx::default().with_overrides(&spec),
+        );
+    }
+    let mut agc = Vec::new();
+    let mut tilt = Vec::new();
+    for f in 0..bit.len() / FRAME_BYTES {
+        let frame = &bit[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+        let kind = serial::parse_frame(frame).unwrap();
+        let dec = if matches!(kind, FrameKind::Erased) {
+            fx.decode_erased_frame()
+        } else {
+            let params = unpack_parameters(&kind).unwrap();
+            fx.decode_frame(&params)
+        };
+        let int_t1 = usize::try_from(dec.sub[0].t_int.max(1)).unwrap();
+        let mut periodic = false;
+        for s in 0..2 {
+            let speech: [i16; SUBFRAME] = std::array::from_fn(|n| dec.speech[s * SUBFRAME + n]);
+            let t = pf.process_subframe_traced(&speech, &dec.sub[s].a_q12, int_t1);
+            periodic |= t.decision.gain_q15 > 0;
+            agc.extend_from_slice(&t.agc);
+            tilt.extend_from_slice(&t.tilt);
+        }
+        if !matches!(kind, FrameKind::Erased) {
+            fx.erasure_periodic = periodic;
+        }
+    }
+    (agc, tilt)
+}
+
+/// Whole-vector stage dump for the offline schedule-fitting rig.
+/// Gated on `G729_FX_DUMP=<corpus>/<name>:<out.csv>`; a no-op otherwise.
+/// One CSV row per sample: `speech,lt,st,tilt,agc,out,ref,gf,gain_in,
+/// gain_out,lt_gain,lt_delay,lt_frac,lt_long,t_int,a1..a10`.
+#[test]
+fn fx_full_stage_dump() {
+    let Ok(spec) = std::env::var("G729_FX_DUMP") else {
+        return;
+    };
+    let Some(root) = conformance_root() else {
+        return;
+    };
+    let (vector, out_path) = spec.split_once(':').expect("<vector>:<path>");
+    let bit = std::fs::read(root.join(format!("{vector}.BIT"))).unwrap();
+    let reference = read_pst(&root.join(format!("{vector}.PST")));
+    let mut w = String::new();
+    let mut fx = FrameDecoderFx::new();
+    let mut pf = PostfilterFx::new();
+    for f in 0..bit.len() / FRAME_BYTES {
+        let frame = &bit[f * FRAME_BYTES..(f + 1) * FRAME_BYTES];
+        let kind = serial::parse_frame(frame).unwrap();
+        let dec = if matches!(kind, FrameKind::Erased) {
+            fx.decode_erased_frame()
+        } else {
+            let params = unpack_parameters(&kind).unwrap();
+            fx.decode_frame(&params)
+        };
+        let int_t1 = usize::try_from(dec.sub[0].t_int.max(1)).unwrap();
+        let mut periodic = false;
+        for s in 0..2 {
+            let speech: [i16; SUBFRAME] = std::array::from_fn(|n| dec.speech[s * SUBFRAME + n]);
+            let t = pf.process_subframe_traced(&speech, &dec.sub[s].a_q12, int_t1);
+            periodic |= t.decision.gain_q15 > 0;
+            let base = f * SAMPLES_PER_FRAME + s * SUBFRAME;
+            for (n, &sp) in speech.iter().enumerate() {
+                let r = reference.get(base + n).copied().unwrap_or(0);
+                use std::fmt::Write as _;
+                let _ = write!(
+                    w,
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                    sp,
+                    t.long_term[n],
+                    t.short_term[n],
+                    t.tilt[n],
+                    t.agc[n],
+                    t.output[n],
+                    r,
+                    t.gf_q12,
+                    t.agc_gain_in_q12,
+                    t.agc_gain_out_q12,
+                    t.decision.gain_q15,
+                    t.decision.delay,
+                    t.decision.frac,
+                    u8::from(t.decision.use_long),
+                    dec.sub[s].t_int
+                );
+                for a in &dec.sub[s].a_q12[1..] {
+                    let _ = write!(w, ",{a}");
+                }
+                w.push('\n');
+            }
+        }
+        if !matches!(kind, FrameKind::Erased) {
+            fx.erasure_periodic = periodic;
+        }
+    }
+    std::fs::write(out_path, w).unwrap();
 }
 
 /// The decoder-only stress vectors through the full fx chain: PARITY
