@@ -34,6 +34,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   PITCH 2.00 → 5.37 %, SPEECH 15.61 → 18.02 %. Latitude
   `agc_pole_a_q15`; decoder-side sweep hooks `G729_FX_DEC` and an
   oracle sample cap `G729_FX_ORACLE_CAP` in the harness.
+- **eq (83) over-unity: the printed bound wins.** Re-measured with
+  the oracle's per-subframe shape residual on both corpora, clamping
+  `g_l` to 1 beats the r419 disable-above-2 pin (fitted with the ×2
+  present) and disable-above-1 everywhere: FIXED exact 34.75 →
+  57.07 % (max |Δ| 368 → 19), PITCH 5.88 → 7.13 %, LSP max |Δ| 1029 →
+  530, g729a FIXED max |Δ| 450 → 51, PITCH 3940 → 987. Default flipped
+  (`lt_over_unity_clamp = true`; `lt_over_unity_disable_all` hook
+  added); per-corpus floors ratcheted.
 - **§4.2.1 eq (78) normalisation**: the `1/(1 + γ_p·g_l)` scaling was
   doubled (`mpy_32_16` already keeps the Q16 grid), so long-term
   filtered subframes left the stage at ×2 and the AGC hid it. Fixed.

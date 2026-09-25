@@ -52,8 +52,13 @@ landed:
   ≈ 1.05). Fixed; the r419/r452 pins fitted with the bug present
   (over-unity disable, silence floor) are now latitude hooks
   (`lt_over_unity_clamp`, `lt_silence_floor`) — the silence floor is
-  corpus-neutral, the over-unity choice splits the corpus (clamping
-  cleans FIXED/ALGTHM, disabling cleans LSP/PITCH) and stays open.
+  corpus-neutral; the over-unity choice, re-measured with the oracle's
+  shape residual on both corpora, goes to the **printed eq (83) bound
+  `0 ≤ g_l ≤ 1`** (clamp): FIXED's exact share 34.75 → 57.07 % with
+  max |Δ| 368 → 19, PITCH 5.88 → 7.13 %, LSP max |Δ| 1029 → 530,
+  g729a FIXED max |Δ| 450 → 51 and PITCH 3940 → 987; disabling above
+  any ratio > 1 is worst everywhere (the r419 disable-above-2 pin was
+  fitted with the ×2 present).
 - **§4.2.4 eq (90) does not run with the printed 0.85/0.15 pair.**
   The recovered AGC output divided by our (shape-identical,
   correlation 1.0000) pre-AGC signal exposes the reference's gain
@@ -100,12 +105,14 @@ silence threshold on the energies (`Σsf² ≤ 3…7` → `G = 0`) only partly
 reproduces; recorded as a docs gap.
 
 **Measured** (base corpus, full fixed-point chain vs `.PST`; r455 →
-r461): correlation ALGTHM 0.99291 → 0.99993, PITCH 0.99676 →
-0.99936, SPEECH 0.99900 → 0.99984, TAME 0.99991 → 0.99996, PARITY
-0.99898 → 0.99996; max |Δ| ALGTHM 10172 → 1234, PITCH 9894 → 4504,
-PARITY 3434 → 248, TAME 2700 → 633; exact share ALGTHM 4.04 → 7.68 %,
-PITCH 1.98 → 5.88 %, SPEECH 21.80 → 24.47 % (clean frames 285 → 316),
-PARITY 26.59 → 29.54 %. The oracle's per-subframe shape residual
+r461 close): correlation ALGTHM 0.99291 → 0.99994, FIXED 0.98557 →
+0.99995, LSP 0.99566 → 0.99882, PITCH 0.99676 → 0.99997, SPEECH
+0.99900 → 0.99994, TAME 0.99991 → 0.99996, PARITY 0.99898 → 0.99996;
+max |Δ| ALGTHM 10172 → 1234, FIXED 330 → 19, LSP 2331 → 530, PITCH
+9894 → 3151, SPEECH 4114 → 1336, PARITY 3434 → 248, TAME 2700 → 633;
+exact share ALGTHM 4.04 → 7.82 %, FIXED 34.45 → 57.07 %, LSP 4.01 →
+5.21 %, PITCH 1.98 → 7.13 %, SPEECH 21.80 → 24.51 % (clean frames 285
+→ 316), PARITY 26.59 → 29.57 %. The oracle's per-subframe shape residual
 (reference pre-AGC signal vs ours after a least-squares gain) is
 0.012 on TAME, 0.04 on PITCH/SPEECH and 0.5 on LSP, i.e. the
 pre-AGC cascade is right to about a percent and the LSB-level

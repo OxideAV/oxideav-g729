@@ -195,6 +195,10 @@ pub struct PfLatitudeFx {
     /// (`true`, the r419 pin) or the printed eq (82) test alone decides
     /// (`false`).
     pub lt_silence_floor: bool,
+    /// eq (83): disable the filter whenever the raw ratio exceeds 1
+    /// (`num > den`) instead of clamping (sweep hook; overrides
+    /// `lt_over_unity_clamp`).
+    pub lt_over_unity_disable_all: bool,
     /// §A.4.2.4 recursion pole on Q15 (printed `0.9` = 29491) for the
     /// Annex A cascade; the complementary weight is `2^15 − pole`.
     pub agc_pole_a_q15: i16,
@@ -227,8 +231,9 @@ impl Default for PfLatitudeFx {
             lt_tap_shift: 0,
             gf_len: 0,
             agc_energy: false,
-            lt_over_unity_clamp: false,
+            lt_over_unity_clamp: true,
             lt_silence_floor: true,
+            lt_over_unity_disable_all: false,
             agc_pole_a_q15: 29491,
         }
     }
@@ -267,6 +272,7 @@ impl PfLatitudeFx {
                 "lt_over_unity_clamp" => self.lt_over_unity_clamp = b,
                 "lt_silence_floor" => self.lt_silence_floor = b,
                 "agc_pole_a_q15" => self.agc_pole_a_q15 = i,
+                "lt_over_unity_disable_all" => self.lt_over_unity_disable_all = b,
                 other => panic!("unknown latitude field {other}"),
             }
         }
@@ -627,7 +633,9 @@ impl PostfilterFx {
         // wrecks the onset-heavy FIXED vectors (corr 0.9502/0.9756
         // clamped vs 0.9855/0.9918 disabled); disabling everything
         // over unity instead costs SPEECH/PITCH (0.9953/0.9926).
-        if !self.lat.lt_over_unity_clamp && num > 2 * den {
+        if (self.lat.lt_over_unity_disable_all && num > den)
+            || (!self.lat.lt_over_unity_clamp && num > 2 * den)
+        {
             return LtDecisionFx {
                 delay: t0,
                 frac: 0,
@@ -691,7 +699,10 @@ impl PostfilterFx {
             && den > 0
             && (!self.lat.lt_silence_floor || energy > 40)
             && 2 * num * num >= energy * den;
-        if !enabled || (!self.lat.lt_over_unity_clamp && num > 2 * den) {
+        if !enabled
+            || (self.lat.lt_over_unity_disable_all && num > den)
+            || (!self.lat.lt_over_unity_clamp && num > 2 * den)
+        {
             return off;
         }
         let gain_q15 = if num >= den {

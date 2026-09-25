@@ -198,21 +198,27 @@ fn report(label: &str, out: &[i16], reference: &[i16]) -> Metrics {
 }
 
 /// Per-vector pinned floors `(corr, exact%)` for the full fixed-point
-/// chain on the clean vectors, both corpora (measured r452, base /
-/// g729a: ALGTHM 4.04 / 3.61, FIXED 34.45 / 20.14, LSP 4.01 / 3.72,
-/// PITCH 1.98 / 1.90, SPEECH 21.80 / 15.76, TAME 0.81 / 0.48 exact%;
-/// corr 0.9856–0.9999). The r419 numbers were ALGTHM 1.89, FIXED
-/// 19.09, LSP 3.49, PITCH 1.84, SPEECH 14.02, TAME 0.78.
-fn floors(name: &str) -> (f64, f64) {
-    match name {
-        "ALGTHM" => (0.99, 3.0),
-        // FIXED is the §4.2.1 stress case (measured 0.9855/0.9918
-        // with the over-unity disable guard; 0.9502/0.9756 without).
-        "FIXED" => (0.97, 18.0),
-        "LSP" => (0.99, 3.2),
-        "PITCH" => (0.99, 1.5),
-        "SPEECH" => (0.99, 14.0),
-        "TAME" => (0.995, 0.4),
+/// chain on the clean vectors, per corpus (measured r461 after the
+/// eq (78) fix, the eq (90) re-pin, the eq (83) clamp and the Annex A
+/// cascade — base / g729a: ALGTHM 7.82 / 6.43, FIXED 57.07 / 27.79,
+/// LSP 5.21 / 5.32, PITCH 7.13 / 5.94, SPEECH 24.51 / 18.04, TAME
+/// 1.10 / 0.69 exact %; corr 0.9988–0.99999). The r452 numbers were
+/// ALGTHM 4.04 / 3.61, FIXED 34.45 / 20.14, LSP 4.01 / 3.72, PITCH
+/// 1.98 / 1.90, SPEECH 21.80 / 15.76, TAME 0.81 / 0.48.
+fn floors(corpus: &str, name: &str) -> (f64, f64) {
+    match (corpus, name) {
+        ("g729-core", "ALGTHM") => (0.9999, 7.0),
+        ("g729-core", "FIXED") => (0.9999, 50.0),
+        ("g729-core", "LSP") => (0.998, 4.8),
+        ("g729-core", "PITCH") => (0.9999, 6.5),
+        ("g729-core", "SPEECH") => (0.9999, 23.0),
+        ("g729-core", "TAME") => (0.9999, 1.0),
+        (_, "ALGTHM") => (0.9998, 6.0),
+        (_, "FIXED") => (0.9998, 25.0),
+        (_, "LSP") => (0.999, 5.0),
+        (_, "PITCH") => (0.9999, 5.5),
+        (_, "SPEECH") => (0.9999, 17.0),
+        (_, "TAME") => (0.9999, 0.6),
         _ => (0.99, 1.0),
     }
 }
@@ -237,7 +243,7 @@ fn fx_full_clean_vectors() {
             let reference = read_pst(&pst_path);
             let out = decode_fx_full(&label, &bit);
             let m = report(&label, &out, &reference);
-            let (corr_floor, exact_floor) = floors(name);
+            let (corr_floor, exact_floor) = floors(corpus, name);
             assert!(
                 m.corr >= corr_floor,
                 "{label}: corr {:.4} under floor {corr_floor}",
@@ -695,9 +701,10 @@ fn fx_full_stress_vectors() {
     // model — its correlation is near zero by construction (measured
     // −0.05; the float-§4.2 hybrid measures 0.25).
     let cases = [
-        ("PARITY", [0.99, 0.99]),
+        // r461: 0.99996 / 0.99996.
+        ("PARITY", [0.9999, 0.9999]),
         ("OVERFLOW", [0.70, -0.30]),
-        // ERASURE measured 0.922 / 0.887 (the concealed stretches
+        // ERASURE measured 0.923 / 0.887 (the concealed stretches
         // re-sync a little differently through the fx cascade than
         // the float hybrid's 0.91/0.94).
         ("ERASURE", [0.88, 0.86]),
