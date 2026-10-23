@@ -19,7 +19,7 @@ use oxideav_g729::lp_synthesis::{SynthesizedFrame, SynthesizedSubframe};
 use oxideav_g729::parameters::unpack_parameters;
 use oxideav_g729::pitch_decode::PitchDelay;
 use oxideav_g729::postfilter_cascade::PostfilterCascade;
-use oxideav_g729::serial::{self, FrameKind, FRAME_BYTES};
+use oxideav_g729::serial::{self, FRAME_BYTES, FrameKind};
 
 const SAMPLES_PER_FRAME: usize = 80;
 const SUBFRAME: usize = 40;
@@ -43,7 +43,9 @@ fn conformance_root() -> Option<PathBuf> {
 fn read_pst(path: &Path) -> Vec<i16> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }

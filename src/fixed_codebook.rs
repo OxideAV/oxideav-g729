@@ -80,7 +80,7 @@
 //!   during the algebraic-codebook search; the decode path described
 //!   by clause 4.1.4 only references eqs (45) and (48).
 
-use crate::parameters::{Parameters, C_BITS, S_BITS};
+use crate::parameters::{C_BITS, Parameters, S_BITS};
 
 /// G.729 subframe size in samples — the length of the fixed-codebook
 /// codevector `c(n)` per spec clause 2.1 / eq (45).

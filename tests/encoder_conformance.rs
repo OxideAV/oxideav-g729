@@ -32,9 +32,9 @@ use std::path::{Path, PathBuf};
 
 use oxideav_g729::decode_chain::FrameDecoder;
 use oxideav_g729::encode_chain::FrameEncoder;
-use oxideav_g729::parameters::{unpack_parameters, Parameters};
+use oxideav_g729::parameters::{Parameters, unpack_parameters};
 use oxideav_g729::pitch_decode::decode_t1_from_p1;
-use oxideav_g729::serial::{parse_frame, FrameKind, FRAME_BYTES};
+use oxideav_g729::serial::{FRAME_BYTES, FrameKind, parse_frame};
 
 const SAMPLES_PER_FRAME: usize = 80;
 
@@ -57,7 +57,9 @@ fn conformance_root() -> Option<PathBuf> {
 fn read_pcm(path: &Path) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])))
         .collect()
 }
@@ -199,7 +201,7 @@ fn locked_history_lsp_agreement_floors() {
     use oxideav_g729::lp_to_lsp::lp_to_lsp;
     use oxideav_g729::lsf_conversion::lsp_to_lsf_q13;
     use oxideav_g729::lsp_quantize::{
-        advance_history_q13, search_lsp_indices_q13, startup_history_q13, FxLatitude,
+        FxLatitude, advance_history_q13, search_lsp_indices_q13, startup_history_q13,
     };
     use oxideav_g729::preprocess::Preprocessor;
     use oxideav_g729::tables::{L_WINDOW, M};
@@ -306,7 +308,7 @@ fn reference_taming_fingerprint() {
     use oxideav_g729::gain_index_map::{demap_ga, demap_gb};
     use oxideav_g729::gain_reconstruct::reconstruct_gains;
     use oxideav_g729::pitch_decode::{decode_t2_from_p2, derive_t_min};
-    use oxideav_g729::taming::{Taming, GPCLIP, THRESH_ERR};
+    use oxideav_g729::taming::{GPCLIP, THRESH_ERR, Taming};
 
     let Some(root) = conformance_root() else {
         eprintln!("skip: conformance corpus not present");
@@ -317,7 +319,7 @@ fn reference_taming_fingerprint() {
         let bit_bytes = std::fs::read(root.join(format!("g729-core/{name}.BIT"))).unwrap();
         let mut tam = Taming::new();
         let mut peak_acc_with_high_gp = 0.0f64;
-        for chunk in bit_bytes.chunks_exact(FRAME_BYTES) {
+        for chunk in bit_bytes.as_chunks::<FRAME_BYTES>().0 {
             let frame = parse_frame(chunk).unwrap();
             let FrameKind::Active(_) = frame else {
                 continue;
@@ -407,7 +409,7 @@ fn bitstream_writer_is_byte_exact_inverse() {
     let mut checked = 0usize;
     for name in VECTORS {
         let bit_bytes = std::fs::read(root.join(format!("g729-core/{name}.BIT"))).unwrap();
-        for (f, chunk) in bit_bytes.chunks_exact(FRAME_BYTES).enumerate() {
+        for (f, chunk) in bit_bytes.as_chunks::<FRAME_BYTES>().0.iter().enumerate() {
             let frame = parse_frame(chunk).unwrap();
             let FrameKind::Active(_) = frame else {
                 continue;

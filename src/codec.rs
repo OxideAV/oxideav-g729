@@ -76,19 +76,19 @@ fn bits_to_payload(bits: &[bool; BITS_PER_FRAME]) -> [u8; PACKED_FRAME_BYTES] {
 
 /// Validates the audio-side parameters shared by both factories.
 fn check_params(params: &CodecParameters) -> Result<()> {
-    if let Some(sr) = params.sample_rate {
-        if sr != SAMPLE_RATE {
-            return Err(Error::unsupported(format!(
-                "g729: sample rate {sr} unsupported (G.729 is {SAMPLE_RATE} Hz only)"
-            )));
-        }
+    if let Some(sr) = params.sample_rate
+        && sr != SAMPLE_RATE
+    {
+        return Err(Error::unsupported(format!(
+            "g729: sample rate {sr} unsupported (G.729 is {SAMPLE_RATE} Hz only)"
+        )));
     }
-    if let Some(ch) = params.channels {
-        if ch != CHANNELS {
-            return Err(Error::unsupported(format!(
-                "g729: {ch} channels unsupported (G.729 is mono)"
-            )));
-        }
+    if let Some(ch) = params.channels
+        && ch != CHANNELS
+    {
+        return Err(Error::unsupported(format!(
+            "g729: {ch} channels unsupported (G.729 is mono)"
+        )));
     }
     Ok(())
 }
@@ -141,7 +141,7 @@ impl oxideav_core::Decoder for G729Decoder {
     }
 
     fn send_packet(&mut self, packet: &Packet) -> Result<()> {
-        if packet.data.is_empty() || packet.data.len() % PACKED_FRAME_BYTES != 0 {
+        if packet.data.is_empty() || !packet.data.len().is_multiple_of(PACKED_FRAME_BYTES) {
             return Err(Error::invalid(format!(
                 "g729: packet length {} is not a positive multiple of the {PACKED_FRAME_BYTES}-octet frame size",
                 packet.data.len()
@@ -149,7 +149,7 @@ impl oxideav_core::Decoder for G729Decoder {
         }
         let n_frames = packet.data.len() / PACKED_FRAME_BYTES;
         let mut pcm = Vec::with_capacity(n_frames * SAMPLES_PER_FRAME * 2);
-        for chunk in packet.data.chunks_exact(PACKED_FRAME_BYTES) {
+        for chunk in packet.data.as_chunks::<PACKED_FRAME_BYTES>().0 {
             let bits = payload_to_bits(chunk);
             let params = unpack_bit_array(&bits);
             let dec = self.chain.decode_frame(&params);
@@ -300,7 +300,9 @@ impl oxideav_core::Encoder for G729Encoder {
         }
         self.buf.extend(
             plane
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| i16::from_le_bytes([c[0], c[1]])),
         );
         self.drain_full_frames();
@@ -423,7 +425,7 @@ mod tests {
                         panic!("expected audio frame");
                     };
                     assert_eq!(a.samples as usize, SAMPLES_PER_FRAME);
-                    for c in a.data[0].chunks_exact(2) {
+                    for c in a.data[0].as_chunks::<2>().0 {
                         let s = f64::from(i16::from_le_bytes([c[0], c[1]]));
                         energy += s * s;
                     }

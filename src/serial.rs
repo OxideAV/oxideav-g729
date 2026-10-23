@@ -135,10 +135,9 @@ pub enum SerialError {
 impl core::fmt::Display for SerialError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::WrongLength(n) => write!(
-                f,
-                "g729 serial frame must be {FRAME_BYTES} bytes; got {n}"
-            ),
+            Self::WrongLength(n) => {
+                write!(f, "g729 serial frame must be {FRAME_BYTES} bytes; got {n}")
+            }
             Self::BadSync(v) => write!(
                 f,
                 "g729 serial sync word mismatch: expected 0x{SYNC_WORD:04X}, got 0x{v:04X}"
@@ -211,7 +210,7 @@ pub fn parse_frame(frame_bytes: &[u8]) -> Result<FrameKind, SerialError> {
                 return Err(SerialError::BadBitWord {
                     index: i,
                     value: other,
-                })
+                });
             }
         }
     }
@@ -234,7 +233,7 @@ pub fn parse_frame(frame_bytes: &[u8]) -> Result<FrameKind, SerialError> {
                 return Err(SerialError::BadBitWord {
                     index: i,
                     value: other,
-                })
+                });
             }
         };
     }
@@ -268,7 +267,7 @@ pub fn write_frame(bits: &[bool; crate::tables::BITS_PER_FRAME]) -> [u8; FRAME_B
 /// of 164 bytes (a partial trailing frame is a corruption signal under
 /// the ITU encoder's fixed-cadence output).
 pub fn frame_count(bitstream_bytes: &[u8]) -> Result<usize, SerialError> {
-    if bitstream_bytes.len() % FRAME_BYTES != 0 {
+    if !bitstream_bytes.len().is_multiple_of(FRAME_BYTES) {
         return Err(SerialError::WrongLength(bitstream_bytes.len()));
     }
     Ok(bitstream_bytes.len() / FRAME_BYTES)

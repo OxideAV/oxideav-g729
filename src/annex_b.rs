@@ -98,7 +98,7 @@
 //! exposes the synthesized excitation directly until that filter envelope
 //! can be reconstructed.
 
-use crate::cng::{synthesize_cng_subframe, CngGainSmoother, CngRandom, CngSubframeShapes};
+use crate::cng::{CngGainSmoother, CngRandom, CngSubframeShapes, synthesize_cng_subframe};
 use crate::fixed_codebook::SUBFRAME_SIZE;
 use crate::serial::{BIT_ERASED, BIT_ONE, BIT_ZERO, SYNC_WORD};
 
@@ -324,7 +324,7 @@ pub fn parse_annex_b_frame(bytes: &[u8]) -> Result<(AnnexBFrame, usize), AnnexBE
                     return Err(AnnexBError::BadBitWord {
                         index: i,
                         value: other,
-                    })
+                    });
                 }
             }
         }

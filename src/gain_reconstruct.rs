@@ -62,9 +62,9 @@
 //! well inside `i32` range, the same for the GC column), so the
 //! summation cannot overflow.
 
-use crate::gain_index_map::{demap_frame, demap_ga, demap_gb, GainIndexMapError};
+use crate::gain_index_map::{GainIndexMapError, demap_frame, demap_ga, demap_gb};
 use crate::parameters::Parameters;
-use crate::tables::{gain_ga_entry, gain_gb_entry, GAIN_VQ_COL_GC, GAIN_VQ_COL_GP, NCODE1, NCODE2};
+use crate::tables::{GAIN_VQ_COL_GC, GAIN_VQ_COL_GP, NCODE1, NCODE2, gain_ga_entry, gain_gb_entry};
 
 /// Q14 scaling divisor (`2^14 = 16384`) for the `g_p` columns of the
 /// GA / GB codebooks.

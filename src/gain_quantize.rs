@@ -37,7 +37,7 @@
 //! writer.
 
 use crate::gain_reconstruct::reconstruct_gains;
-use crate::tables::{gain_ga_entry, gain_gb_entry, GAIN_VQ_COL_GC, GAIN_VQ_COL_GP, NCODE1, NCODE2};
+use crate::tables::{GAIN_VQ_COL_GC, GAIN_VQ_COL_GP, NCODE1, NCODE2, gain_ga_entry, gain_gb_entry};
 
 /// Samples per subframe.
 pub const L_SUBFR: usize = 40;

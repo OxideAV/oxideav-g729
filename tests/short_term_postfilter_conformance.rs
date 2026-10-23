@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use oxideav_g729::decode_chain::FrameDecoder;
 use oxideav_g729::lp_synthesis::Synthesizer;
-use oxideav_g729::serial::{self, FrameKind, FRAME_BYTES};
+use oxideav_g729::serial::{self, FRAME_BYTES, FrameKind};
 use oxideav_g729::short_term_postfilter::ShortTermPostfilter;
 
 /// Walks parent directories from `CARGO_MANIFEST_DIR` looking for

@@ -73,13 +73,15 @@ fn conformance_root() -> Option<PathBuf> {
 fn read_pst(path: &Path) -> Vec<i16> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     assert!(
-        bytes.len() % 2 == 0,
+        bytes.len().is_multiple_of(2),
         "{}: odd byte count {}",
         path.display(),
         bytes.len()
     );
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }

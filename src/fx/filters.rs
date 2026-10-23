@@ -46,11 +46,7 @@ pub struct FilterLatitude {
 #[inline]
 fn land(acc: i32, trunc: bool) -> i16 {
     let v = l_shl(acc, 3);
-    if trunc {
-        extract_h(v)
-    } else {
-        round(v)
-    }
+    if trunc { extract_h(v) } else { round(v) }
 }
 
 /// eq (27) / §3.3: bandwidth-expands an LP coefficient set,

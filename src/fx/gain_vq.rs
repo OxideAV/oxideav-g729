@@ -234,7 +234,7 @@ pub fn quantize_gains_fx_lat(
     let (ga_set, gb_set): (Vec<usize>, Vec<usize>) = if lat.exhaustive {
         ((0..NCODE1).collect(), (0..NCODE2).collect())
     } else if lat.rank_select {
-        use crate::tables::{gain_ga_entry, gain_gb_entry, GAIN_VQ_COL_GC, GAIN_VQ_COL_GP};
+        use crate::tables::{GAIN_VQ_COL_GC, GAIN_VQ_COL_GP, gain_ga_entry, gain_gb_entry};
         let mut ga: Vec<usize> = (0..NCODE1).collect();
         ga.sort_by(|&a, &b| {
             let da = (f64::from(gain_ga_entry(a)[GAIN_VQ_COL_GC]) / 8192.0 - gamma_opt).abs();

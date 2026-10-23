@@ -92,7 +92,7 @@
 
 use core::f32::consts::PI;
 
-use crate::lsp_reconstruct::{codebook_sum, rearrange_pass, LspReconstructor, REARRANGE_J1};
+use crate::lsp_reconstruct::{LspReconstructor, REARRANGE_J1, codebook_sum, rearrange_pass};
 use crate::tables::{self, M, MA_NP, NC0, NC1};
 
 /// Q13 unit (`2^13`) for the LSP codebook literals.
@@ -162,13 +162,7 @@ fn reconstruct_omega(
 /// (radians), with the `w_5`, `w_6` ×1.2 boost applied.
 #[must_use]
 pub fn lsf_weights(omega: &[f32; M]) -> [f32; M] {
-    let piece = |d: f32| -> f32 {
-        if d > 0.0 {
-            1.0
-        } else {
-            10.0 * d * d + 1.0
-        }
-    };
+    let piece = |d: f32| -> f32 { if d > 0.0 { 1.0 } else { 10.0 * d * d + 1.0 } };
     let mut w = [1.0f32; M];
     // w_1 (idx 0): uses ω_2 (idx 1).
     w[0] = piece(omega[1] - 0.04 * PI - 1.0);
@@ -498,13 +492,7 @@ pub fn rearrange_pass_q13(coefs: &mut [i32; M], j: i32, round: bool) {
 #[must_use]
 fn lsf_weights_q(omega_q13: &[i32; M], weight_shift: u32) -> [i64; M] {
     let unit = f64::from(1u32 << 13);
-    let piece = |d: f64| -> f64 {
-        if d > 0.0 {
-            1.0
-        } else {
-            10.0 * d * d + 1.0
-        }
-    };
+    let piece = |d: f64| -> f64 { if d > 0.0 { 1.0 } else { 10.0 * d * d + 1.0 } };
     let om = |i: usize| f64::from(omega_q13[i]) / unit;
     let mut w = [1.0f64; M];
     w[0] = piece(om(1) - 0.04 * core::f64::consts::PI - 1.0);

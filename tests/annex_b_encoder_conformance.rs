@@ -17,11 +17,11 @@
 
 use std::path::{Path, PathBuf};
 
-use oxideav_g729::annex_b::{parse_annex_b_stream, AnnexBFrame};
+use oxideav_g729::annex_b::{AnnexBFrame, parse_annex_b_stream};
 use oxideav_g729::annex_b_encoder::{
-    absolute_autocorrelation, DtxDecision, DtxEncoder, DtxLatitude,
+    DtxDecision, DtxEncoder, DtxLatitude, absolute_autocorrelation,
 };
-use oxideav_g729::fx::analysis::{analyze_window_fx, FrontEndLatitude, PreprocessorFx};
+use oxideav_g729::fx::analysis::{FrontEndLatitude, PreprocessorFx, analyze_window_fx};
 use oxideav_g729::tables::L_WINDOW;
 
 const SAMPLES_PER_FRAME: usize = 80;
@@ -41,7 +41,9 @@ fn conformance_root() -> Option<PathBuf> {
 fn read_pcm(path: &Path) -> Vec<i16> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }

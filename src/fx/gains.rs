@@ -47,7 +47,7 @@ use crate::fx::ops::{
     add, extract_h, extract_l, l_add, l_deposit_l, l_mac, l_shl, l_shr, l_shr_r, l_sub, mult,
     round, sub,
 };
-use crate::tables::{gain_ga_entry, gain_gb_entry, GAIN_QUANT_MA_PREDICTOR_Q13, MA_NP};
+use crate::tables::{GAIN_QUANT_MA_PREDICTOR_Q13, MA_NP, gain_ga_entry, gain_gb_entry};
 use crate::tables::{GAIN_VQ_COL_GC, GAIN_VQ_COL_GP};
 
 /// Subframe length the eq (66) energy averages over.

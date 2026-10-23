@@ -291,11 +291,7 @@ fn correlation_rows(
             .iter()
             .map(|&(m, e)| {
                 let s = e_max - e;
-                if s >= 31 {
-                    0
-                } else {
-                    l_shr(m, s as i16)
-                }
+                if s >= 31 { 0 } else { l_shr(m, s as i16) }
             })
             .collect()
     }
@@ -437,7 +433,7 @@ pub fn pitch_gain_q14_lat(x: &[i16; L_SUBFR], y: &[i16; L_SUBFR], lat: &ClosedLo
         ex += 1;
     }
     let q = div_s(mx, my); // (mx/my) on Q15
-                           // g_p = q · 2^(ex − ey), wanted on Q14: shift by (ex − ey − 1).
+    // g_p = q · 2^(ex − ey), wanted on Q14: shift by (ex − ey − 1).
     let shift = ex - ey - 1;
     let g = if shift >= 0 {
         l_shl(i32::from(q), shift as i16)

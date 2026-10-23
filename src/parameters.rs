@@ -630,7 +630,7 @@ mod tests {
         assert_eq!(Layout::OFFSETS[12], 69); // S2
         assert_eq!(Layout::OFFSETS[13], 73); // GA2
         assert_eq!(Layout::OFFSETS[14], 76); // GB2
-                                             // Final slot (after GB2) lands exactly on the 80-bit budget.
+        // Final slot (after GB2) lands exactly on the 80-bit budget.
         assert_eq!(Layout::OFFSETS[14] + Layout::WIDTHS[14], BITS_PER_FRAME);
     }
 

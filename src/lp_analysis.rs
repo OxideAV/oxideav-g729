@@ -76,7 +76,7 @@
 //! accumulator.
 
 use crate::tables::{
-    LPC_HAMMING_WINDOW_Q15, LPC_LAG_WINDOW_HIGH_Q15, LPC_LAG_WINDOW_LOW_Q15, L_WINDOW, M,
+    L_WINDOW, LPC_HAMMING_WINDOW_Q15, LPC_LAG_WINDOW_HIGH_Q15, LPC_LAG_WINDOW_LOW_Q15, M,
 };
 
 /// High-half Q15 scale for the lag window (`2^15`).

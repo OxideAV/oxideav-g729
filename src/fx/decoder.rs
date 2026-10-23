@@ -12,8 +12,8 @@
 //! postfilter's voicing decision).
 
 use crate::fx::excitation::{
-    build_codevector_q13, build_excitation, build_excitation_mode, pred_lt3, syn_filt,
-    syn_filt_check, EXC_BUF, L_SUBFR, PIT_MAX, SHARP_INIT_Q14, SHARP_MAX_Q14, SHARP_MIN_Q14,
+    EXC_BUF, L_SUBFR, PIT_MAX, SHARP_INIT_Q14, SHARP_MAX_Q14, SHARP_MIN_Q14, build_codevector_q13,
+    build_excitation, build_excitation_mode, pred_lt3, syn_filt, syn_filt_check,
 };
 use crate::fx::gains::{DecodedGainsFx, GainDecoderFx};
 use crate::fx::lsp::LspDecoderFx;

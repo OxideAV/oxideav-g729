@@ -28,9 +28,9 @@
 use std::path::{Path, PathBuf};
 
 use oxideav_g729::parameters::{
-    self, unpack_parameters, C_BITS, GA_BITS, GB_BITS, P0_BITS, P1_BITS, P2_BITS, S_BITS,
+    self, C_BITS, GA_BITS, GB_BITS, P0_BITS, P1_BITS, P2_BITS, S_BITS, unpack_parameters,
 };
-use oxideav_g729::serial::{self, FrameKind, FRAME_BYTES, FRAME_WORDS};
+use oxideav_g729::serial::{self, FRAME_BYTES, FRAME_WORDS, FrameKind};
 use oxideav_g729::tables::{self, BITS_PER_FRAME, L0_BITS, L1_BITS, L2_BITS, L3_BITS, NC0, NC1};
 
 /// Walks parent directories from `CARGO_MANIFEST_DIR` looking for
@@ -772,7 +772,7 @@ fn gain_reconstruct_in_domain_on_full_corpus() {
 /// `γ̂` sequence.
 #[test]
 fn gain_predict_finite_on_full_corpus() {
-    use oxideav_g729::gain_predict::{GainPredictor, CODEVECTOR_LEN};
+    use oxideav_g729::gain_predict::{CODEVECTOR_LEN, GainPredictor};
     use oxideav_g729::gain_reconstruct::reconstruct_frame_gains;
     let Some(root) = conformance_root() else {
         eprintln!("skip: conformance corpus not present");
@@ -860,7 +860,7 @@ fn gain_predict_finite_on_full_corpus() {
 /// walking the corpus.
 #[test]
 fn pitch_decode_in_domain_on_full_corpus() {
-    use oxideav_g729::pitch_decode::{decode_frame, T_MAX_CEIL, T_MIN_FLOOR, T_WINDOW};
+    use oxideav_g729::pitch_decode::{T_MAX_CEIL, T_MIN_FLOOR, T_WINDOW, decode_frame};
     let Some(root) = conformance_root() else {
         eprintln!("skip: conformance corpus not present");
         return;
@@ -1022,7 +1022,7 @@ fn pitch_decode_round_trips_pitch_corpus() {
 #[test]
 fn fixed_codebook_in_domain_on_full_corpus() {
     use oxideav_g729::fixed_codebook::{
-        build_codevector, decode_frame, NUM_PULSES, SUBFRAME_SIZE, TRACK_STRIDE,
+        NUM_PULSES, SUBFRAME_SIZE, TRACK_STRIDE, build_codevector, decode_frame,
     };
     let Some(root) = conformance_root() else {
         eprintln!("skip: conformance corpus not present");

@@ -41,8 +41,8 @@ use crate::fx::dsp::{l_comp, l_extract, mpy_32, mpy_32_16};
 use crate::fx::ops::{l_add, l_mac, l_mult, l_shl, mult_r, norm_l, round, shr};
 use crate::lp_analysis::N_LAGS;
 use crate::tables::{
-    HPF_PREPROC_140HZ_A_Q12, HPF_PREPROC_140HZ_B_Q12, LPC_HAMMING_WINDOW_Q15,
-    LPC_LAG_WINDOW_HIGH_Q15, LPC_LAG_WINDOW_LOW_Q15, L_WINDOW,
+    HPF_PREPROC_140HZ_A_Q12, HPF_PREPROC_140HZ_B_Q12, L_WINDOW, LPC_HAMMING_WINDOW_Q15,
+    LPC_LAG_WINDOW_HIGH_Q15, LPC_LAG_WINDOW_LOW_Q15,
 };
 
 /// A Word32 value carried in the DPF `(hi, lo)` split

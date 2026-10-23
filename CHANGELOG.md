@@ -6,6 +6,10 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- edition 2024, MSRV 1.95
+
 ### Added
 
 - **Round 461 — exact §4.2.5 inversion oracle + two §4.2 fixes.**

@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 
 use oxideav_g729::decode_chain::{DecodedFrame, FrameDecodeError, FrameDecoder};
 use oxideav_g729::lsp_reconstruct::{CLAMP_CEIL, CLAMP_FLOOR};
-use oxideav_g729::serial::{self, FrameKind, FRAME_BYTES};
+use oxideav_g729::serial::{self, FRAME_BYTES, FrameKind};
 use oxideav_g729::tables::M;
 
 /// Walks parent directories from `CARGO_MANIFEST_DIR` looking for

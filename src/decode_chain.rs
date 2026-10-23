@@ -80,17 +80,17 @@ use crate::concealment::Concealer;
 use crate::fixed_codebook::{self, FixedCodebookError, FixedCodebookPulses, SUBFRAME_SIZE};
 use crate::gain_predict::{GainPredictor, PredictedGain};
 use crate::gain_reconstruct::{
-    reconstruct_gains_from_transmitted, GainReconstructError, QuantisedGains,
+    GainReconstructError, QuantisedGains, reconstruct_gains_from_transmitted,
 };
 use crate::lp_synthesis::{SynthesizedFrame, Synthesizer};
-use crate::lsp_interpolate::{omega_to_q, LspInterpolator, SUBFRAMES_PER_FRAME};
+use crate::lsp_interpolate::{LspInterpolator, SUBFRAMES_PER_FRAME, omega_to_q};
 use crate::lsp_reconstruct::{LspReconstructError, LspReconstructor};
-use crate::lsp_to_lp::{lsp_to_lp, LpCoefficients};
-use crate::parameters::{unpack_parameters, ParameterError, Parameters};
-use crate::pitch_decode::{decode_t1_from_p1, decode_t2_from_p2, derive_t_min, PitchDelay};
+use crate::lsp_to_lp::{LpCoefficients, lsp_to_lp};
+use crate::parameters::{ParameterError, Parameters, unpack_parameters};
+use crate::pitch_decode::{PitchDelay, decode_t1_from_p1, decode_t2_from_p2, derive_t_min};
 use crate::pitch_sharpen::{clamp_beta, sharpen};
 use crate::postfilter_cascade::{PostfilterCascade, PostfilteredFrame};
-use crate::serial::{parse_frame, FrameKind, SerialError};
+use crate::serial::{FrameKind, SerialError, parse_frame};
 use crate::tables::M;
 
 /// Clause 4.3 / Table 9 initial value of the eq (47) pitch-sharpening
@@ -900,7 +900,7 @@ mod tests {
     use crate::gain_predict::GainPredictor;
     use crate::parameters::FRAME_BITS;
     use crate::pitch_sharpen::{BETA_MAX, BETA_MIN};
-    use crate::serial::{BITS_HEADER, BIT_ONE, BIT_ZERO, SYNC_WORD};
+    use crate::serial::{BIT_ONE, BIT_ZERO, BITS_HEADER, SYNC_WORD};
 
     /// A frame whose pitch parity holds under the corpus-validated
     /// odd-parity rule: P1 = 0b1100_0000 → six MSBs XOR-reduce to 0
@@ -1385,12 +1385,14 @@ mod tests {
     #[test]
     fn postfiltered_entry_point_produces_finite_output_and_advances_state() {
         let mut chain = FrameDecoder::new();
-        assert!(chain
-            .postfilter()
-            .long_term()
-            .s_hist()
-            .iter()
-            .all(|&x| x == 0.0));
+        assert!(
+            chain
+                .postfilter()
+                .long_term()
+                .s_hist()
+                .iter()
+                .all(|&x| x == 0.0)
+        );
 
         let pf = chain
             .decode_parameters_to_postfiltered(&parity_ok_params())
@@ -1401,12 +1403,14 @@ mod tests {
 
         // A non-silent frame leaves a non-zero history in the long-term
         // postfilter stage.
-        assert!(chain
-            .postfilter()
-            .long_term()
-            .s_hist()
-            .iter()
-            .any(|&x| x != 0.0));
+        assert!(
+            chain
+                .postfilter()
+                .long_term()
+                .s_hist()
+                .iter()
+                .any(|&x| x != 0.0)
+        );
     }
 
     /// The serial / frame-kind / parameter post-filtered entry points all
@@ -1466,12 +1470,14 @@ mod tests {
             .decode_frame_kind_to_postfiltered(&FrameKind::Erased)
             .unwrap_err();
         assert_eq!(err, FrameDecodeError::Erased);
-        assert!(chain
-            .postfilter()
-            .long_term()
-            .s_hist()
-            .iter()
-            .all(|&x| x == 0.0));
+        assert!(
+            chain
+                .postfilter()
+                .long_term()
+                .s_hist()
+                .iter()
+                .all(|&x| x == 0.0)
+        );
         assert_eq!(
             chain.postfilter().agc().gain(),
             crate::adaptive_gain_control::G_INIT

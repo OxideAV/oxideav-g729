@@ -120,11 +120,7 @@ impl AdaptiveGainControl {
     pub fn target_ratio(s_hat: &[f32; SUBFRAME_SIZE], sf: &[f32; SUBFRAME_SIZE]) -> Option<f32> {
         let num: f32 = s_hat.iter().map(|v| v.abs()).sum();
         let den: f32 = sf.iter().map(|v| v.abs()).sum();
-        if den > 0.0 {
-            Some(num / den)
-        } else {
-            None
-        }
+        if den > 0.0 { Some(num / den) } else { None }
     }
 
     /// Apply §4.2.4 adaptive gain control to one 40-sample subframe.

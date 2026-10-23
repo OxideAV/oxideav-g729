@@ -72,7 +72,7 @@
 //!   never-tame reading. See
 //!   `tests/encoder_conformance.rs::reference_taming_fingerprint`.
 
-use crate::tables::{taming_zone, TAMING_ZONES};
+use crate::tables::{TAMING_ZONES, taming_zone};
 
 /// Interpolation-window reach of the eq (40) adaptive-codebook filter:
 /// the number of consecutive integer delays whose excitation memory a

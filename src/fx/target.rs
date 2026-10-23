@@ -25,7 +25,7 @@
 //! products land on the doubled Q15 grid exactly like the decoder's
 //! eq (75) excitation build, then round to Q0.
 
-use crate::fx::filters::{residu_lat, syn_filt_mem_lat, FilterLatitude, L_SUBFR};
+use crate::fx::filters::{FilterLatitude, L_SUBFR, residu_lat, syn_filt_mem_lat};
 use crate::fx::ops::{l_add, l_mult, l_shl, round, sub};
 use crate::tables::M;
 

@@ -44,9 +44,9 @@ use crate::fx::ops::{
     mult, norm_l, round, shl, shr, sub,
 };
 use crate::tables::{
-    postfilter_interp_long, postfilter_interp_short, HPF_PREPROC_100HZ_A_Q13,
-    HPF_PREPROC_100HZ_B_Q13, M, POSTFILTER_FRAC_RES, POSTFILTER_INTERP_LONG_TAPS,
-    POSTFILTER_INTERP_SHORT_TAPS,
+    HPF_PREPROC_100HZ_A_Q13, HPF_PREPROC_100HZ_B_Q13, M, POSTFILTER_FRAC_RES,
+    POSTFILTER_INTERP_LONG_TAPS, POSTFILTER_INTERP_SHORT_TAPS, postfilter_interp_long,
+    postfilter_interp_short,
 };
 
 /// Samples per subframe.
@@ -284,11 +284,7 @@ impl PfLatitudeFx {
 #[inline]
 fn land_q13(acc: i32, round_mode: bool) -> i16 {
     let q = l_shl(acc, 3);
-    if round_mode {
-        round(q)
-    } else {
-        extract_h(q)
-    }
+    if round_mode { round(q) } else { extract_h(q) }
 }
 
 /// `γ`-weighted LP coefficients `γ^i·â_i` on Q12 (`i = 1 … 10`,
@@ -426,11 +422,7 @@ impl PostfilterFx {
     #[inline]
     fn at(buf: &[i16; HIST + L_SUBFR], n: usize, k: usize) -> i16 {
         let idx = HIST + n;
-        if k > idx {
-            0
-        } else {
-            buf[idx - k]
-        }
+        if k > idx { 0 } else { buf[idx - k] }
     }
 
     /// eq (79): the residual `r̂(n) = ŝ(n) + Σ γ_n^i·â_i·ŝ(n−i)` for the
@@ -588,9 +580,9 @@ impl PostfilterFx {
         // Long-kernel refinement of a non-integer winner, kept only if
         // it raises R(T)²/E_T.
         let mut use_long = false;
-        if have && best.0 .1 != 0 {
+        if have && best.0.1 != 0 {
             let (corr_l, e_l) =
-                Self::corr_energy_shift(&rs, best.0 .0, best.0 .1, true, self.lat.lt_tap_shift);
+                Self::corr_energy_shift(&rs, best.0.0, best.0.1, true, self.lat.lt_tap_shift);
             if corr_l > 0 && e_l > 0 {
                 let l = i128::from(corr_l) * i128::from(corr_l) * i128::from(best.2);
                 let r = i128::from(best.1) * i128::from(best.1) * i128::from(e_l);

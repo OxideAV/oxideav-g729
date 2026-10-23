@@ -53,7 +53,7 @@
 //! - §B.4.2.1: whether the energy index is the nearest ladder level or
 //!   the level at or below `E'`.
 
-use crate::annex_b::{dequant_sid_energy_db, SidFrame};
+use crate::annex_b::{SidFrame, dequant_sid_energy_db};
 use crate::levinson::levinson;
 use crate::lp_to_lsp::lp_to_lsp;
 use crate::lsp_quantize::lsf_weights;
@@ -168,11 +168,7 @@ pub fn coefficient_autocorrelation(a: &[f64; N_LAGS]) -> [f64; N_LAGS] {
         for k in 0..N_LAGS - j {
             acc += a[k] * a[k + j];
         }
-        if j == 0 {
-            acc
-        } else {
-            2.0 * acc
-        }
+        if j == 0 { acc } else { 2.0 * acc }
     })
 }
 

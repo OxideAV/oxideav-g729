@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use oxideav_g729::fx::decoder::FrameDecoderFx;
 use oxideav_g729::fx::postfilter::PostfilterFx;
 use oxideav_g729::parameters::unpack_parameters;
-use oxideav_g729::serial::{self, FrameKind, FRAME_BYTES};
+use oxideav_g729::serial::{self, FRAME_BYTES, FrameKind};
 
 const SAMPLES_PER_FRAME: usize = 80;
 const SUBFRAME: usize = 40;
@@ -37,7 +37,9 @@ fn conformance_root() -> Option<PathBuf> {
 fn read_pst(path: &Path) -> Vec<i16> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }
@@ -433,10 +435,11 @@ fn fx_full_agc_output_oracle() {
         .iter()
         .flat_map(|c| CLEAN_VECTORS.iter().map(move |n| (*c, *n)))
     {
-        if let Some(o) = &only {
-            if o != name && o.as_str() != format!("{corpus}/{name}") {
-                continue;
-            }
+        if let Some(o) = &only
+            && o != name
+            && o.as_str() != format!("{corpus}/{name}")
+        {
+            continue;
         }
         let label = format!("{corpus}/{name}");
         let bit = std::fs::read(root.join(format!("{corpus}/{name}.BIT"))).unwrap();
@@ -523,7 +526,11 @@ fn fx_full_agc_output_oracle() {
             recovered.len(),
             100.0 * exact as f64 / recovered.len().max(1) as f64,
             first_div,
-            if shape_cnt > 0 { shape_sum / shape_cnt as f64 } else { 0.0 },
+            if shape_cnt > 0 {
+                shape_sum / shape_cnt as f64
+            } else {
+                0.0
+            },
             worst_shape,
             bad_shape,
             shape_cnt

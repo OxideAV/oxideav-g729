@@ -122,8 +122,8 @@
 use crate::fixed_codebook::SUBFRAME_SIZE;
 use crate::short_term_postfilter::ShortTermPostfilter;
 use crate::tables::{
-    postfilter_interp_long, postfilter_interp_short, M, POSTFILTER_FRAC_RES,
-    POSTFILTER_INTERP_LONG_TAPS, POSTFILTER_INTERP_SHORT_TAPS,
+    M, POSTFILTER_FRAC_RES, POSTFILTER_INTERP_LONG_TAPS, POSTFILTER_INTERP_SHORT_TAPS,
+    postfilter_interp_long, postfilter_interp_short,
 };
 
 /// §4.2.1 long-term-postfilter weight factor `γ_p = 0.5` (clause 4.2.1:
@@ -256,11 +256,7 @@ impl LongTermPostfilter {
         } else {
             // r̂(n−k) with n−k < 0 → history index (k − idx − 1).
             let h = k - idx - 1;
-            if h < HIST_LEN {
-                self.r_hist[h]
-            } else {
-                0.0
-            }
+            if h < HIST_LEN { self.r_hist[h] } else { 0.0 }
         }
     }
 
@@ -274,11 +270,7 @@ impl LongTermPostfilter {
             s[idx - k]
         } else {
             let h = k - idx - 1;
-            if h < HIST_LEN {
-                self.s_hist[h]
-            } else {
-                0.0
-            }
+            if h < HIST_LEN { self.s_hist[h] } else { 0.0 }
         }
     }
 

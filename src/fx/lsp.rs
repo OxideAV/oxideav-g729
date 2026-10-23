@@ -41,7 +41,7 @@ use crate::fx::dsp::{l_extract, mpy_32_16};
 use crate::fx::ops::{
     add, extract_l, l_add, l_msu, l_mult, l_shl, l_shr, l_shr_r, l_sub, mult, shr,
 };
-use crate::lsp_quantize::{reconstruct_lsf_q13, startup_history_q13, FxLatitude};
+use crate::lsp_quantize::{FxLatitude, reconstruct_lsf_q13, startup_history_q13};
 use crate::tables::{LSF_LSP_COS_SLOPE_Q19, LSF_LSP_COS_TABLE2_Q15, M, MA_NP};
 
 /// §3.2.4 stability floor on the Q13 radian grid (`41/8192 ≈ 0.005`).

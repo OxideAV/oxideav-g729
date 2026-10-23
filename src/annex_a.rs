@@ -279,11 +279,7 @@ impl AnnexAShortTermTilt {
                 rh1 += h[j] * h[j + 1];
             }
         }
-        if rh0 > 0.0 {
-            -rh1 / rh0
-        } else {
-            0.0
-        }
+        if rh0 > 0.0 { -rh1 / rh0 } else { 0.0 }
     }
 
     /// Run one subframe through numerator → tilt → synthesis.

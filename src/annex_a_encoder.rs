@@ -47,26 +47,26 @@
 //! encoder choice but will not match the G.729A reference's).
 
 use crate::closed_loop_pitch::{
-    subframe1_window, subframe2_window, EXC_BUFFER, PIT_MAX, T1_FRACTIONAL_LIMIT,
+    EXC_BUFFER, PIT_MAX, T1_FRACTIONAL_LIMIT, subframe1_window, subframe2_window,
 };
 use crate::encode_target::lp_residual;
 use crate::fixed_codebook::{encode_positions, encode_signs};
 use crate::fixed_codebook_search::{
-    adaptive_gain, correlation_d, filter_through_h, phi_matrix, prefilter_impulse_response,
-    search_fixed_codebook, update_target, MAX_LOOP4_PER_FRAME,
+    MAX_LOOP4_PER_FRAME, adaptive_gain, correlation_d, filter_through_h, phi_matrix,
+    prefilter_impulse_response, search_fixed_codebook, update_target,
 };
 use crate::gain_index_map::{map_ga, map_gb};
 use crate::gain_predict::GainPredictor;
-use crate::gain_quantize::{quantize_gains, GainTerms};
+use crate::gain_quantize::{GainTerms, quantize_gains};
 use crate::levinson::levinson;
 use crate::lp_analysis::analyze_window;
 use crate::lp_to_lsp::lp_to_lsp;
-use crate::lsp_interpolate::{omega_to_q, LspInterpolator};
+use crate::lsp_interpolate::{LspInterpolator, omega_to_q};
 use crate::lsp_quantize::LspQuantizer;
 use crate::lsp_to_lp::lsp_to_lp;
 use crate::open_loop_pitch::PIT_BUFFER;
 use crate::parameters::Parameters;
-use crate::pitch_decode::{derive_t_min, encode_p1, encode_p2, PitchDelay};
+use crate::pitch_decode::{PitchDelay, derive_t_min, encode_p1, encode_p2};
 use crate::pitch_sharpen::{clamp_beta, sharpen};
 use crate::preprocess::Preprocessor;
 use crate::serial::write_frame;

@@ -409,7 +409,7 @@ mod tests {
     /// genuinely distinct subframe-1 / subframe-2 filters.
     #[test]
     fn full_decode_chain_subframes_differ_per_frame() {
-        use crate::lsp_interpolate::{omega_to_q, LspInterpolator};
+        use crate::lsp_interpolate::{LspInterpolator, omega_to_q};
         use crate::lsp_reconstruct::LspReconstructor;
 
         let mut recon = LspReconstructor::new();
@@ -508,11 +508,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, ak)| {
                     let k = i + 1;
-                    if k % 2 == 0 {
-                        *ak
-                    } else {
-                        -ak
-                    }
+                    if k % 2 == 0 { *ak } else { -ak }
                 })
                 .sum::<f32>();
         // Closed form: A(−1) = Π_{i ∈ {2,4,6,8,10}} (2 + 2·q_i).

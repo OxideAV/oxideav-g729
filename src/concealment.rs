@@ -122,7 +122,7 @@
 //! so they are exposed as associated functions rather than mutating
 //! private state.
 
-use crate::gain_predict::{GainPredictor, GAIN_PREDICTOR_INIT_DB};
+use crate::gain_predict::{GAIN_PREDICTOR_INIT_DB, GainPredictor};
 use crate::long_term_postfilter::LongTermDecision;
 use crate::tables::MA_NP;
 

@@ -108,7 +108,7 @@
 //!   the past-excitation buffer (which only exists once §3.8
 //!   fixed-codebook decoding lands) and is wired in its own round.
 
-use crate::parameters::{Parameters, P1_BITS, P2_BITS};
+use crate::parameters::{P1_BITS, P2_BITS, Parameters};
 
 /// `t_min` floor per spec §3.7 / §4.1.3 image `f0027-02.jpg`. Per the
 /// clause-3.7 prose this is "the integers only over [85, 143]" floor

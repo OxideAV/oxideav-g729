@@ -226,11 +226,7 @@ impl Synthesizer {
             // delays, T < 40, where the adaptive vector folds onto the
             // already-computed part of u(n)).
             let i = idx as usize;
-            if i < SUBFRAME_SIZE {
-                cur[i]
-            } else {
-                0.0
-            }
+            if i < SUBFRAME_SIZE { cur[i] } else { 0.0 }
         } else {
             // idx in {-1, -2, ...}: exc_history[EXC_HISTORY - 1] is u(-1).
             let back = (-idx) as usize; // 1, 2, ...

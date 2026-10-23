@@ -369,11 +369,7 @@ pub fn score_choice_exact(
             en += si * sj * phi[mi][mj] as f64;
         }
     }
-    if en <= 0.0 {
-        0.0
-    } else {
-        num * num / en
-    }
+    if en <= 0.0 { 0.0 } else { num * num / en }
 }
 
 #[cfg(test)]

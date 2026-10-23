@@ -156,11 +156,7 @@ pub fn lp_to_lsp_fx(a_q12: &[i16; M]) -> Option<[i16; M]> {
         y_lo = y_hi;
     }
 
-    if found == M {
-        Some(q)
-    } else {
-        None
-    }
+    if found == M { Some(q) } else { None }
 }
 
 /// Convenience for the Q27 DPF LP set of

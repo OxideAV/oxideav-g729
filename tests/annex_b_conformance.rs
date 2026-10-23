@@ -27,8 +27,8 @@
 use std::path::{Path, PathBuf};
 
 use oxideav_g729::annex_b::{
-    self, AnnexBDecoder, AnnexBFrame, AnnexBOutput, AnnexBStreamDecoder, ResolvedFrame,
-    ACTIVE_BITS, ERASED_SYNC_WORD, FRAME_SAMPLES, SID_GAIN_BITS, SID_L1_BITS, SID_L2_BITS,
+    self, ACTIVE_BITS, AnnexBDecoder, AnnexBFrame, AnnexBOutput, AnnexBStreamDecoder,
+    ERASED_SYNC_WORD, FRAME_SAMPLES, ResolvedFrame, SID_GAIN_BITS, SID_L1_BITS, SID_L2_BITS,
     SID_LP0_BITS, SID_WORDS,
 };
 use oxideav_g729::decode_chain::FrameDecoder;
@@ -412,7 +412,9 @@ fn annex_b_stream_tracks_reference_output() {
         let bit = std::fs::read(root.join("g729b").join(format!("{seq}.bit"))).unwrap();
         let refpcm_bytes = std::fs::read(root.join("g729b").join(format!("{seq}.out"))).unwrap();
         let refpcm: Vec<i16> = refpcm_bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
         let mut dec = AnnexBStreamDecoder::new();

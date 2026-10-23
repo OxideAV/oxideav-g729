@@ -12,7 +12,7 @@ use oxideav_g729::codec::{G729Decoder, PACKED_FRAME_BYTES, SAMPLES_PER_FRAME};
 use oxideav_g729::fx::decoder::FrameDecoderFx;
 use oxideav_g729::fx::postfilter::PostfilterFx;
 use oxideav_g729::parameters::{pack_bit_array, unpack_parameters};
-use oxideav_g729::serial::{parse_frame, FrameKind, FRAME_BYTES};
+use oxideav_g729::serial::{FRAME_BYTES, FrameKind, parse_frame};
 
 fn conformance_root() -> Option<PathBuf> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -55,7 +55,7 @@ fn registry_decoder_matches_fx_chain_on_corpus() {
         let mut fx = FrameDecoderFx::new();
         let mut pf = PostfilterFx::new();
         let mut compared = 0usize;
-        for chunk in bit_bytes.chunks_exact(FRAME_BYTES) {
+        for chunk in bit_bytes.as_chunks::<FRAME_BYTES>().0 {
             let frame = parse_frame(chunk).unwrap();
             let FrameKind::Active(_) = frame else {
                 // The wire format has no erasure marker; stop at the
@@ -81,7 +81,13 @@ fn registry_decoder_matches_fx_chain_on_corpus() {
                 let (out, _) = pf.process_subframe(&speech, &dec.sub[s].a_q12, int_t1);
                 expect.extend_from_slice(&out);
             }
-            for (n, (got, want)) in a.data[0].chunks_exact(2).zip(expect.iter()).enumerate() {
+            for (n, (got, want)) in a.data[0]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(expect.iter())
+                .enumerate()
+            {
                 let got = i16::from_le_bytes([got[0], got[1]]);
                 assert_eq!(got, *want, "{name}: sample {n} of frame {compared}");
             }
@@ -103,7 +109,7 @@ fn registry_decoder_reset_restores_startup_state() {
     };
     let bit_bytes = std::fs::read(root.join("g729-core/ALGTHM.BIT")).unwrap();
     let mut payloads = Vec::new();
-    for chunk in bit_bytes.chunks_exact(FRAME_BYTES) {
+    for chunk in bit_bytes.as_chunks::<FRAME_BYTES>().0 {
         let frame = parse_frame(chunk).unwrap();
         let FrameKind::Active(_) = frame else { break };
         let params = unpack_parameters(&frame).unwrap();

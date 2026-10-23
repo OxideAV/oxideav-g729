@@ -163,11 +163,7 @@ fn normalised_correlation(x: &[f32; L_SUBFR], y: &[f32; L_SUBFR]) -> f32 {
         num += x[n] * y[n];
         den += y[n] * y[n];
     }
-    if den > 0.0 {
-        num / den.sqrt()
-    } else {
-        0.0
-    }
+    if den > 0.0 { num / den.sqrt() } else { 0.0 }
 }
 
 /// `b12(i)` — the eq (39) interpolation filter read symmetrically from

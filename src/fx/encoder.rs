@@ -32,36 +32,36 @@
 //! error propagation of earlier misses.
 
 use crate::fixed_codebook::{decode_pulses, encode_positions, encode_signs};
-use crate::fx::acelp::{search_acelp_fx_lat, AcelpLatitude};
-use crate::fx::analysis::{analyze_window_fx, FrontEndLatitude, PreprocessorFx};
+use crate::fx::acelp::{AcelpLatitude, search_acelp_fx_lat};
+use crate::fx::analysis::{FrontEndLatitude, PreprocessorFx, analyze_window_fx};
 use crate::fx::excitation::{
-    build_codevector_q13, build_excitation_mode, pred_lt3, syn_filt_check, EXC_BUF, PIT_MAX,
-    SHARP_INIT_Q14, SHARP_MAX_Q14, SHARP_MIN_Q14,
+    EXC_BUF, PIT_MAX, SHARP_INIT_Q14, SHARP_MAX_Q14, SHARP_MIN_Q14, build_codevector_q13,
+    build_excitation_mode, pred_lt3, syn_filt_check,
 };
 use crate::fx::filters::{
-    convolve_code_q12, convolve_h_q0_lat, residu_lat, weight_az_lat, FilterLatitude,
+    FilterLatitude, convolve_code_q12, convolve_h_q0_lat, residu_lat, weight_az_lat,
 };
-use crate::fx::gain_vq::{quantize_gains_fx_lat, GainCorrelationsFx, GainVqLatitude, TamingFx};
+use crate::fx::gain_vq::{GainCorrelationsFx, GainVqLatitude, TamingFx, quantize_gains_fx_lat};
 use crate::fx::gains::{DecodedGainsFx, GainDecoderFx};
 use crate::fx::levinson::levinson_fx;
 use crate::fx::lp_to_lsp::lp_to_lsp_fx;
-use crate::fx::lsp::{interpolate_lsp_q15, lsp_to_lp_q12, LspDecoderFx, STARTUP_LSP_Q15};
+use crate::fx::lsp::{LspDecoderFx, STARTUP_LSP_Q15, interpolate_lsp_q15, lsp_to_lp_q12};
 use crate::fx::ops::{l_mac, l_mult, l_shl, round};
 use crate::fx::pitch_cl::{
-    closed_loop_search_fx, pitch_gain_q14_lat, subframe1_window, subframe2_window,
-    ClosedLoopLatitude, T1_FRACTIONAL_LIMIT,
+    ClosedLoopLatitude, T1_FRACTIONAL_LIMIT, closed_loop_search_fx, pitch_gain_q14_lat,
+    subframe1_window, subframe2_window,
 };
-use crate::fx::pitch_ol::{open_loop_pitch_fx_lat, OpenLoopLatitude, PIT_BUFFER};
-use crate::fx::target::{impulse_response_fx, TargetChainFx};
+use crate::fx::pitch_ol::{OpenLoopLatitude, PIT_BUFFER, open_loop_pitch_fx_lat};
+use crate::fx::target::{TargetChainFx, impulse_response_fx};
 use crate::fx::weighting::{WeightingFx, WeightingLatitude};
 use crate::gain_index_map::{demap_ga, demap_gb, map_ga, map_gb};
 use crate::lsf_conversion::acos_q15_to_lsf_q13;
 use crate::lsp_quantize::{
-    advance_history_q13, search_lsp_indices_q13, startup_history_q13, FxLatitude,
+    FxLatitude, advance_history_q13, search_lsp_indices_q13, startup_history_q13,
 };
 use crate::parameters::Parameters;
 use crate::pitch_decode::{
-    decode_t1_from_p1, decode_t2_from_p2, derive_t_min, encode_p1, encode_p2, PitchDelay,
+    PitchDelay, decode_t1_from_p1, decode_t2_from_p2, derive_t_min, encode_p1, encode_p2,
 };
 use crate::tables::{L_WINDOW, M, MA_NP};
 

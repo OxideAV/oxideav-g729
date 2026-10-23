@@ -60,11 +60,7 @@ pub fn sub(a: i16, b: i16) -> i16 {
 #[inline]
 #[must_use]
 pub fn abs_s(a: i16) -> i16 {
-    if a == i16::MIN {
-        i16::MAX
-    } else {
-        a.abs()
-    }
+    if a == i16::MIN { i16::MAX } else { a.abs() }
 }
 
 /// Short shift left with saturation; negative counts shift right.
@@ -111,22 +107,14 @@ pub fn mult(a: i16, b: i16) -> i16 {
 #[must_use]
 pub fn l_mult(a: i16, b: i16) -> i32 {
     let p = i32::from(a) * i32::from(b);
-    if p == 0x4000_0000 {
-        i32::MAX
-    } else {
-        p << 1
-    }
+    if p == 0x4000_0000 { i32::MAX } else { p << 1 }
 }
 
 /// Short negate; `negate(-32768) = 32767`.
 #[inline]
 #[must_use]
 pub fn negate(a: i16) -> i16 {
-    if a == i16::MIN {
-        i16::MAX
-    } else {
-        -a
-    }
+    if a == i16::MIN { i16::MAX } else { -a }
 }
 
 /// Extract the high word of a Word32.
@@ -182,11 +170,7 @@ pub fn l_sub(a: i32, b: i32) -> i32 {
 #[inline]
 #[must_use]
 pub fn l_negate(a: i32) -> i32 {
-    if a == i32::MIN {
-        i32::MAX
-    } else {
-        -a
-    }
+    if a == i32::MIN { i32::MAX } else { -a }
 }
 
 /// Q15 fractional multiplication with rounding:
@@ -291,11 +275,7 @@ pub fn l_shr_r(a: i32, b: i16) -> i32 {
 #[inline]
 #[must_use]
 pub fn l_abs(a: i32) -> i32 {
-    if a == i32::MIN {
-        i32::MAX
-    } else {
-        a.abs()
-    }
+    if a == i32::MIN { i32::MAX } else { a.abs() }
 }
 
 /// Short norm: the left-shift count that normalises `a` into

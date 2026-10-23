@@ -285,7 +285,7 @@ mod tests {
         // Sharpening at T=20: c(20) += 0.8·c(0) → 8192·0.8 ≈ 6553.
         assert_eq!(i32::from(code[20]), i32::from(shl(mult(8192, 13107), 1)));
         assert_eq!(code[22], add(8192, 0)); // 22−20 = 2 has no pulse
-                                            // n=31: c(31) += 0.8·c(11) = −6553…
+        // n=31: c(31) += 0.8·c(11) = −6553…
         assert!(code[31] < -6000);
         // No sharpening for T ≥ 40.
         let plain = build_codevector_q13(&[0, 11, 22, 33], &[1, -1, 1, -1], 13107, 40);

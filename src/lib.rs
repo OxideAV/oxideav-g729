@@ -403,13 +403,13 @@ pub mod tilt_compensation;
 /// Direct decoder factory endpoint (workspace dual-API convention:
 /// `oxideav_g729::decoder::make_decoder` alongside the registry path).
 pub mod decoder {
-    pub use crate::codec::{make_decoder, G729Decoder};
+    pub use crate::codec::{G729Decoder, make_decoder};
 }
 
 /// Direct encoder factory endpoint (workspace dual-API convention:
 /// `oxideav_g729::encoder::make_encoder` alongside the registry path).
 pub mod encoder {
-    pub use crate::codec::{make_encoder, G729Encoder};
+    pub use crate::codec::{G729Encoder, make_encoder};
 }
 
 /// Codec registration: installs the G.729 decoder + encoder into the

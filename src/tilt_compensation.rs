@@ -80,7 +80,7 @@
 //! modules; they slot around this one unchanged.
 
 use crate::fixed_codebook::SUBFRAME_SIZE;
-use crate::short_term_postfilter::{ShortTermPostfilter, GF_IMPULSE_LEN};
+use crate::short_term_postfilter::{GF_IMPULSE_LEN, ShortTermPostfilter};
 use crate::tables::M;
 
 /// §4.2.3 tilt factor `γ_t = 0.9` used when `k1'` is **negative**

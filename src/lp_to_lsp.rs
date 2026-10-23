@@ -76,7 +76,7 @@ const NC: usize = M / 2;
 fn cheb(x: f64, f: &[f64; NC + 1]) -> f64 {
     let mut b1 = 0.0f64; // b_{k+1}
     let mut b2 = 0.0f64; // b_{k+2}
-                         // k = 5 down to 1, with g_k = f[5 − k].
+    // k = 5 down to 1, with g_k = f[5 − k].
     for k in (1..=NC).rev() {
         let g_k = f[NC - k];
         let b0 = 2.0 * x * b1 - b2 + g_k;
@@ -124,13 +124,7 @@ pub fn lp_to_lsp(a_in: &[f32; M]) -> Option<[f32; M]> {
     // `true` → currently searching F1 (odd LSPs), else F2.
     let mut on_f1 = true;
 
-    let eval = |x: f64, on_f1: bool| -> f64 {
-        if on_f1 {
-            cheb(x, &f1)
-        } else {
-            cheb(x, &f2)
-        }
-    };
+    let eval = |x: f64, on_f1: bool| -> f64 { if on_f1 { cheb(x, &f1) } else { cheb(x, &f2) } };
 
     let mut x_lo = f64::from(LSF_SEARCH_GRID_COS_Q15[0]) / Q15;
     let mut y_lo = eval(x_lo, on_f1);

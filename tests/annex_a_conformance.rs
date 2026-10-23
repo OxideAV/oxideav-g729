@@ -29,7 +29,7 @@ use oxideav_g729::annex_a_encoder::AnnexAEncoder;
 use oxideav_g729::decode_chain::FrameDecoder;
 use oxideav_g729::parameters::unpack_parameters;
 use oxideav_g729::pitch_decode::decode_t1_from_p1;
-use oxideav_g729::serial::{self, parse_frame, FrameKind, FRAME_BYTES};
+use oxideav_g729::serial::{self, FRAME_BYTES, FrameKind, parse_frame};
 
 const SAMPLES_PER_FRAME: usize = 80;
 const SUBFRAME: usize = 40;
@@ -58,7 +58,9 @@ fn conformance_root() -> Option<PathBuf> {
 fn read_pst(path: &Path) -> Vec<i16> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }
@@ -257,7 +259,9 @@ fn annex_a_cascade_tracks_reference_at_base_parity() {
 fn read_pcm(path: &Path) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])))
         .collect()
 }

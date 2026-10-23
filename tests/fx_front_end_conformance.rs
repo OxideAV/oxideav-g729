@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use oxideav_g729::fx::analysis::{analyze_window_fx, FrontEndLatitude};
+use oxideav_g729::fx::analysis::{FrontEndLatitude, analyze_window_fx};
 use oxideav_g729::fx::levinson::levinson_fx;
 use oxideav_g729::fx::lp_to_lsp::lp_to_lsp_fx;
 use oxideav_g729::levinson::levinson;
@@ -20,11 +20,11 @@ use oxideav_g729::lp_analysis::analyze_window;
 use oxideav_g729::lp_to_lsp::lp_to_lsp;
 use oxideav_g729::lsf_conversion::{acos_q15_to_lsf_q13, lsp_to_lsf_q13};
 use oxideav_g729::lsp_quantize::{
-    advance_history_q13, search_lsp_indices_q13, startup_history_q13, FxLatitude,
+    FxLatitude, advance_history_q13, search_lsp_indices_q13, startup_history_q13,
 };
 use oxideav_g729::parameters::unpack_parameters;
 use oxideav_g729::preprocess::Preprocessor;
-use oxideav_g729::serial::{parse_frame, FrameKind, FRAME_BYTES};
+use oxideav_g729::serial::{FRAME_BYTES, FrameKind, parse_frame};
 use oxideav_g729::tables::{L_WINDOW, M};
 
 const SAMPLES_PER_FRAME: usize = 80;
@@ -45,7 +45,9 @@ fn conformance_root() -> Option<PathBuf> {
 fn read_pcm(path: &Path) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])))
         .collect()
 }
