@@ -190,6 +190,7 @@ impl SidFrame {
 
 /// Errors from [`parse_annex_b_frame`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AnnexBError {
     /// The input slice was too short to hold even the 2-word header.
     TooShort(usize),

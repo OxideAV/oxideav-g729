@@ -111,6 +111,7 @@ pub enum FrameKind {
 /// Errors returned by [`parse_frame`] when a 164-byte input does not
 /// conform to the ITU serial framing of `docs/audio/g729/conformance/`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SerialError {
     /// The input slice was not exactly [`FRAME_BYTES`] = 164 bytes.
     /// Carries the actual length the caller passed.

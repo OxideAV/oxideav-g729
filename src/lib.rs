@@ -392,6 +392,7 @@ pub mod serial;
 
 #[doc(hidden)] // internal: §4.2.2 short-term-postfilter stage
 pub mod short_term_postfilter;
+#[doc(hidden)] // internal: §B.4.2.2 SID-LSF reconstruction stage
 pub mod sid_lsf;
 #[doc(hidden)] // internal: build.rs-compiled numeric-table accessors
 pub mod tables;

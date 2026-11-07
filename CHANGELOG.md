@@ -8,6 +8,8 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `#[non_exhaustive]` on the `annex_b::AnnexBError` and `serial::SerialError` error enums. `AnnexBFrame`, `serial::FrameKind` and `SidFrame` stay exhaustive: Annex B fixes the frame types and the four Table B.2 SID indices.
+- `#[doc(hidden)]` on the internal `sid_lsf` module (the §B.4.2.2 SID-LSF reconstruction stage).
 - edition 2024, MSRV 1.95
 
 ### Added
