@@ -90,14 +90,18 @@ fn correlation_d_wide(x_prime: &[i16; L_SUBFR], h_q12: &[i16; L_SUBFR]) -> [i64;
 
 /// eq (51) upper triangle on an exact accumulator (Q12 × Q12,
 /// doubled), mirrored.
-fn phi_wide(h_q12: &[i16; L_SUBFR]) -> Vec<[i64; L_SUBFR]> {
-    let mut phi = vec![[0i64; L_SUBFR]; L_SUBFR];
-    for i in 0..L_SUBFR {
-        for j in i..L_SUBFR {
-            let mut acc = 0i64;
-            for n in j..L_SUBFR {
-                acc += 2 * i64::from(h_q12[n - i]) * i64::from(h_q12[n - j]);
-            }
+fn phi_wide(h_q12: &[i16; L_SUBFR]) -> [[i64; L_SUBFR]; L_SUBFR] {
+    // φ(i, j) = Σ_{n=j}^{39} h(n−i)·h(n−j) satisfies
+    // φ(i, j) = φ(i+1, j+1) + h(39−i)·h(39−j): each diagonal is one
+    // running sum from its far end (exact integer arithmetic, so the
+    // values are identical to the direct triple loop).
+    let mut phi = [[0i64; L_SUBFR]; L_SUBFR];
+    for d in 0..L_SUBFR {
+        // Diagonal j − i = d, walked from i = 39 − d down to 0.
+        let mut acc = 0i64;
+        for i in (0..L_SUBFR - d).rev() {
+            let j = i + d;
+            acc += 2 * i64::from(h_q12[L_SUBFR - 1 - i]) * i64::from(h_q12[L_SUBFR - 1 - j]);
             phi[i][j] = acc;
             phi[j][i] = acc;
         }
@@ -165,7 +169,7 @@ pub fn search_acelp_fx_lat(
             d_abs[n] = d16[n];
         }
     }
-    let mut phi_p = vec![[0i16; L_SUBFR]; L_SUBFR];
+    let mut phi_p = [[0i16; L_SUBFR]; L_SUBFR];
     for i in 0..L_SUBFR {
         for j in 0..L_SUBFR {
             let v = shr_wide(phi_w[i][j], sp);

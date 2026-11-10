@@ -188,17 +188,22 @@ pub fn l_shl(a: i32, b: i16) -> i32 {
     if b <= 0 {
         return l_shr(a, sature(-i32::from(b)));
     }
-    let mut out = a;
-    for _ in 0..b {
-        if out > 0x3fff_ffff {
-            return i32::MAX;
-        }
-        if out < -0x4000_0000 {
-            return i32::MIN;
-        }
-        out <<= 1;
+    if a == 0 {
+        return 0;
     }
-    out
+    // Closed form of the per-bit saturating shift: the result
+    // saturates exactly when the shifted value leaves the Word32 range.
+    if b >= 31 {
+        return if a > 0 { i32::MAX } else { i32::MIN };
+    }
+    let wide = i64::from(a) << b;
+    if wide > i64::from(i32::MAX) {
+        i32::MAX
+    } else if wide < i64::from(i32::MIN) {
+        i32::MIN
+    } else {
+        wide as i32
+    }
 }
 
 /// Long arithmetic shift right; negative counts shift left.
@@ -290,13 +295,10 @@ pub fn norm_s(a: i16) -> i16 {
     if a == -1 {
         return 15;
     }
-    let mut v = if a < 0 { !a } else { a };
-    let mut n = 0i16;
-    while v < 0x4000 {
-        v <<= 1;
-        n += 1;
-    }
-    n
+    let v = if a < 0 { !a } else { a };
+    // `v` is in `1 ..= 0x7fff`: the shift count that brings its top
+    // set bit to bit 14.
+    (v.leading_zeros() - 1) as i16
 }
 
 /// Long norm: the left-shift count that normalises `a` into
@@ -311,13 +313,10 @@ pub fn norm_l(a: i32) -> i16 {
     if a == -1 {
         return 31;
     }
-    let mut v = if a < 0 { !a } else { a };
-    let mut n = 0i16;
-    while v < 0x4000_0000 {
-        v <<= 1;
-        n += 1;
-    }
-    n
+    let v = if a < 0 { !a } else { a };
+    // `v` is in `1 ..= 0x7fffffff`: the shift count that brings its
+    // top set bit to bit 30.
+    (v.leading_zeros() - 1) as i16
 }
 
 /// Short fractional division `a/b` in Q15 for `0 <= a <= b`, `b > 0`.

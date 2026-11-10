@@ -253,7 +253,9 @@ impl FrameDecoderFx {
                 let exc_rescaled: [i16; L_SUBFR] = std::array::from_fn(|n| self.exc[off + n]);
                 let _ = syn_filt_check(&exc_rescaled, a, &mut self.syn_mem, out, true);
             } else {
-                let _ = syn_filt_check(&exc_slice, a, &mut self.syn_mem, out, true);
+                // The dry run already produced this subframe's output;
+                // commit the filter memory from it.
+                self.syn_mem.copy_from_slice(&out[L_SUBFR - M..L_SUBFR]);
             }
 
             sub[s] = SubframeFx {

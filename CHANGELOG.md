@@ -49,8 +49,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 - `PfLatitudeFx` (hidden sweep struct) is gone — the staged traces
   pin what it swept; `GainGridFx` shrinks to the two fitted constants.
 
+- **Performance (output bit-identical, FNV-1a over all decoded PCM
+  and encoded octets unchanged).** Closed-form `l_shl` / `norm_s` /
+  `norm_l` (were per-bit loops); the eq (51) correlation matrix as
+  one running sum per diagonal on the stack (was a cubic triple loop
+  into two heap allocations per subframe); one `1/Â(z)` pass behind
+  the overflow check instead of two (decoder and encoder); plain
+  Word32 sums in the open-loop correlation (in range by the
+  overflow-rescale bound, so they vectorise); the long-term
+  postfilter interpolation resolves its kernel once per candidate.
+  Registry throughput on SPEECH, best of 15, before → after: decode
+  931–982× → 1045–1270× realtime, encode 202–209× → 289–307×.
+
 ### Added
 
+- `tests/throughput.rs` — registry decode / encode speed over the
+  conformance vectors in multiples of real time, with an output hash
+  as the bit-identity witness.
 - `tests/postfilter_trace_conformance.rs` — replays every staged
   sub-frame trace: **stage replay** (each §4.2 stage driven with the
   staged inputs, memories seeded from the staged predecessor: 19

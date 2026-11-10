@@ -319,8 +319,37 @@ impl PostfilterFx {
         round(acc)
     }
 
-    /// The whole delayed subframe for one candidate.
+    /// The whole delayed subframe for one candidate (the kernel is
+    /// resolved once; `frac == 0` is the direct integer fetch).
     fn delayed(buf: &[i16; HIST + L_SUBFR], t0: usize, frac: usize, long: bool) -> [i16; L_SUBFR] {
+        if frac == 0 {
+            return std::array::from_fn(|n| Self::at(buf, n, t0));
+        }
+        let (taps, half): (&[i16], usize) = if long {
+            (
+                postfilter_interp_long(frac),
+                POSTFILTER_INTERP_LONG_TAPS / 2,
+            )
+        } else {
+            (
+                postfilter_interp_short(frac),
+                POSTFILTER_INTERP_SHORT_TAPS / 2,
+            )
+        };
+        let reach = t0 + half;
+        if reach <= HIST && reach + 1 >= taps.len() {
+            // Whole window inside the buffer: tap `j` reads
+            // `buf[HIST + n − reach + j]`.
+            let base = HIST - reach;
+            return std::array::from_fn(|n| {
+                let win = &buf[base + n..base + n + taps.len()];
+                let mut acc = 0i32;
+                for (&h, &v) in taps.iter().zip(win.iter()) {
+                    acc = l_mac(acc, h, v);
+                }
+                round(acc)
+            });
+        }
         std::array::from_fn(|n| Self::interp_at(buf, n, t0, frac, long))
     }
 

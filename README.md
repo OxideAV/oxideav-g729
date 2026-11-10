@@ -7,22 +7,118 @@ Zero C dependencies, no FFI, no `*-sys` crates.
 
 ## Status
 
-Clean-room rebuild in progress, grown one spec-cited unit at a time
-from the published ITU-T G.729 Recommendation prose and the ITU
-electronic-attachment numeric data tables. The crate now carries
-**both directions**: the decode path end-to-end to post-processed PCM,
-and (round 382) the **entire clause-3 encoder analysis chain** with a
-working `.IN` → `.BIT` path. As of round 388 the crate is **registered
-into the `oxideav-core` codec registry** (id `"g729"`, decode + encode
-over the raw 10-octet wire framing) with the dual-API
-`decoder::make_decoder` / `encoder::make_encoder` endpoints. Round 419
-put the whole decode path on the clause-5 fixed-point grid; round 438
-did the same for the encoder's §3.1–§3.2.3 front end; round 452
-root-caused the frame-0 startup divergence (every clean vector's first
-subframe is now byte-exact) and gave the Annex B comfort noise its
-§B.4.2.2 spectral envelope; round 455 moved the whole encoder mid-chain
-(§3.3–§3.10) onto the fixed grid, sharing the decoder's primitives, and
-switched the registry encoder to it.
+Clean-room implementation grown one spec-cited unit at a time from the
+published ITU-T G.729 Recommendation prose, the staged numeric data
+tables and the staged clean-room notes and traces. Both directions
+run on the clause-5 Word16/Word32 operator grid and are registered in
+the `oxideav-core` codec registry (id `"g729"`, raw 10-octet wire
+framing) alongside the direct `decoder::make_decoder` /
+`encoder::make_encoder` factories.
+
+| Area | State |
+|---|---|
+| §4.1.1 LP parameters (LSF decode → LSP → LP) | **bit-exact** on every staged sub-frame |
+| §4.2.2–§4.2.5 postfilter, tilt, AGC, high-pass (main body + Annex A) | **bit-exact** stage for stage against the staged traces, the §4.2.1 decisions included |
+| §4.1.3 adaptive codebook, eq (75), eq (77) synthesis | bit-exact on the staged excitation |
+| §3.9.1 / §4.1.5 fixed-codebook gain decode | fitted: exact on most sub-frames, one Q1 step off on the rest — the one open decoder item |
+| Whole-vector decode vs the clause-5 `.PST` | FIXED 96.7 % of samples exact, SPEECH 41.5 %, corr ≥ 0.9991 everywhere |
+| Encoder (clause 3) | locked-history frame-exact 30.8 % (PITCH 52.5 %) |
+| Annex A decoder + encoder, Annex B decoder + DTX/SID encoder | wired; §B.3 VAD not implemented |
+
+## Round 486 — the decoder on the staged trace schedule
+
+The staged per-sample traces of the §4.2.2–§4.2.5 chain
+(`docs/audio/g729/traces/`, rules in
+`g729-errata-and-clarifications.md` #440) are consumed, and following
+them upstream closed two §4.1 items as well.
+
+- **§4.2 cascade, operator for operator** (`fx::postfilter`):
+  recursively rounded γ-power ladders; the eq (79) residual and the
+  `1/Â(z/γ_d)` section on `L_mult`/`L_mac|L_msu` → `L_shl 3` → `round`
+  with rounded Word16 memory; `g_f` truncated to Q10 and applied as
+  `mult_r(x, div_s(1024, g_f))` on the all-pole *input*, only when
+  `g_f > 1`; the eq (87) common-`norm_l` tilt factor; the eq (86)
+  tilt with its two separate roundings; the eq (88) normalised
+  `div_s` target on Q14; the eq (90) recursion with the **0.9875
+  pole** (`32358/410`, `mult_r`, from `n = 0`); the §A.4.2.4
+  energy-ratio AGC through the clause-5 inverse square root with the
+  truncating `0.9` recursion and the zero-energy gain reset. The
+  §4.2.1 search runs on a justified residual (peak below `2^12`),
+  interpolates fractional candidates on that grid, and applies eq (78)
+  as one rounded `L_mult`/`L_mac` with the weight pair `g_0`,
+  `2^15 − g_0`.
+  `tests/postfilter_trace_conformance.rs` replays all 19 staged
+  sub-frames stage by stage with staged inputs: **0 mismatches** in
+  every column, the long-term delay / phase / weight decisions
+  included.
+- **eq (20) truncates.** The staged LP coefficient sets exposed a
+  ±1…4 LSB error in every decoded `â_i`: the MA-predicted LSF
+  reconstruction lands by truncation (the accumulator's high word),
+  not rounding. With it every staged LP set — interpolated and not —
+  is exact.
+- **§3.9.1 gain schedule re-fitted on recovered excitation.** The
+  staged `ŝ(n)` columns of consecutive sub-frames, inverted through
+  eq (77) with the staged `â_i`, give the reference excitation
+  exactly; `u(n) − ĝ_p·v(n)` at the pulse positions brackets the
+  reference `ĝ_c` to a fraction of a Q1 step. That oracle shows the
+  adaptive path exact (0 mismatches off the pulses) and pins the
+  eq (71) exponent factor to **`0.166` on Q15** (the three-digit
+  decimal, not `log2(10)/20`), a Q8-truncated dB prediction and a
+  truncated Q1 landing. Seven of the nine oracle gains are then
+  reproduced exactly; the other two land one Q1 step high — a
+  sub-0.1 % truncation the staged material does not pin (docs ask:
+  a trace of the gain-decode intermediates).
+
+**Measured** (full fixed-point chain vs `.PST`, share of exact
+samples, r461 → r486):
+
+| vector | base corpus | Annex A corpus |
+|---|---|---|
+| ALGTHM | 7.82 → 29.75 % | 6.43 → 18.96 % |
+| FIXED | 57.07 → 96.72 % | 27.79 → 70.40 % |
+| LSP | 5.21 → 24.24 % | 5.32 → 9.11 % |
+| PITCH | 7.13 → 25.02 % | 5.94 → 17.01 % |
+| SPEECH | 24.51 → 41.50 % | 18.04 → 38.97 % |
+| TAME | 1.10 → 2.10 % | 0.69 → 2.02 % |
+| PARITY | 29.57 → 43.16 % | 20.63 → 40.95 % |
+| ERASURE | 22.34 → 28.25 % | 17.21 → 26.56 % |
+
+max |Δ| FIXED 19 → 6, ALGTHM 1234 → 60, LSP 530 → 340; fully exact
+frames SPEECH 316 → 781 of 3750, FIXED 0 → 70 of 120.
+
+**Encoder.** The quantiser search and the local decoder share the
+truncating eq (20) reconstruction and the re-fitted gain prediction:
+locked-history frame-exact 27.5 → 30.8 % corpus-wide (PITCH 48.3 →
+52.5 %), locked LSP agreement 90.7 % (TAME 100 %).
+
+**Robustness.** `tests/hostile_input.rs` drives 6 000 random,
+constant and maximum-gain frames plus ragged packet lengths through
+the registry decoder, full-scale and alternating PCM through the
+registry encoder, and random bytes through the serial / Annex B
+parsers and stream decoder — panic-free in the overflow-checked
+profile.
+
+### Throughput
+
+`cargo test --release --test throughput -- --nocapture` (registry
+decode / encode over the conformance vectors, best of 15, one frame =
+10 ms, Apple arm64; output hashes identical before and after the
+performance commits):
+
+| vector | decode, before → after | encode, before → after |
+|---|---|---|
+| SPEECH (3750 frames) | 931–982× → 1045–1270× realtime | 202–209× → 289–307× realtime |
+| PITCH (1835 frames) | 794–1024× → 1207× | 208–218× → 298–324× |
+| LSP (2232 frames) | 944–957× → 973–1151× | 199–202× → 290–302× |
+
+Removed: the per-bit loops of the saturating shift and the
+normalisation operators (closed forms), the cubic eq (51)
+correlation-matrix build (one running sum per diagonal) and its two
+per-subframe heap allocations, the second `1/Â(z)` pass behind the
+overflow check, saturating accumulation in the open-loop correlation
+(provably in range after the overflow-rescale, so the plain Word32 sum
+vectorises), and the per-sample kernel lookup of the long-term
+postfilter interpolation.
 
 ## Round 461 — the §4.2 cascade under an exact output-stage oracle
 
@@ -407,7 +503,7 @@ the clause-5 Word16/Word32 operator grid (`fx` module tree):
   indices (flipping needs ~100 Q13-LSB input perturbations), so an
   unstaged structural element of the reference's final mode compare
   remains (docs gap; every alternative mode total — stage-sum,
-  residual-full, single-folded product, `Lsp_pre_select`-style
+  residual-full, single-folded product, target-domain
   pre-selection — collapses corpus agreement to 34–65%).
 - **Annex A decoder** (`annex_a`) — the §A.4.2 reduced-complexity
   postfilter cascade (eqs (A.11)–(A.15)): integer-delay harmonic
@@ -437,7 +533,7 @@ the clause-5 Word16/Word32 operator grid (`fx` module tree):
   adaptive-codebook gain bound, implemented from the newly-staged
   clean-room algorithm doc `docs/audio/g729/taming-procedure.md`
   (docs commit `77b8440`): four per-zone worst-case excitation-error
-  accumulators over the compiled `tab_zone` partition (153 entries,
+  accumulators over the compiled staged zone-partition table (153 entries,
   zones split at 40/80/120), the per-subframe `tameflag` test and
   `E ← 1 + ĝ_p²·max(E_spanned)` update, and the
   `GPCLIP = 15564/2^14 ≈ 0.95` ceiling enforced inside the §3.9.2
@@ -590,13 +686,13 @@ ratchet toward the fixed-point decode path. The decode stages:
   1/8-resolution fractional second pass** — refining the integer anchor
   `T_0` to `T = T_0 + frac/8` (`frac ∈ {0…7}`) by maximising the
   pseudo-normalised correlation `R(T)²/E_T`, short (length-33,
-  `tab_hup_s`) filter first and the chosen non-integer fraction re-tested
-  with the long (length-129, `tab_hup_l`) filter (kept only if it raises
+  staged short table) filter first and the chosen non-integer fraction re-tested
+  with the long (length-129, staged long table) filter (kept only if it raises
   `R′(T)`, per the spec's longer-filter-replacement rule). The eq (82)
   `R′(T)²/Σr̂² < 0.5` disable test, the eq (83) bounded gain `g_l`, then
   the eq (78) harmonic filter `H_p(z) = (1/(1+γ_p·g_l))·(1 +
   γ_p·g_l·z⁻ᵀ)` (γ_p = 0.5) applied at the fractional delay. The two
-  interpolation tables are the staged `tab_hup_s`/`tab_hup_l` CSVs
+  interpolation tables are the two staged postfilter interpolation CSVs
   (compiled as 7-phase polyphase kernels, phase `p`↔`8−p` mirror); the
   fractional pass engages on ~26 % of enabled subframes across the SPEECH
   corpus vector. (The earlier README "tap layout is defer-to-reference"
@@ -678,15 +774,13 @@ ratchet toward the fixed-point decode path. The decode stages:
 
 ### What is NOT yet wired up
 
-- **PCM-bit-exact decode** — round 452 closed the frame-0 startup
-  divergence (all six clean vectors are byte-exact through subframe 0;
-  FIXED reaches 34.5% exact, SPEECH 285 fully-exact frames), but
-  whole-vector exactness is still blocked by the unpublished
-  §4.2.2/§4.2.3 fixed-point internal scaling (±1-LSB `st`/`tilt`
-  landings) and the AGC trajectory (the `agc_lag` hook reproduces the
-  reference's onset AGC exactly and is the recorded next lead). The
-  float cascade (`decode_*_to_postfiltered`) remains the spec-equation
-  oracle.
+- **PCM-bit-exact decode** — the LP parameters, the adaptive
+  codebook, the synthesis and the whole §4.2 cascade are exact on the
+  staged material (round 486); what remains is the §3.9.1 / §4.1.5
+  gain-decode schedule, where `ĝ_c` still lands one Q1 step off on a
+  minority of sub-frames (see the round-486 section and the docs ask
+  in the CHANGELOG). The float cascade (`decode_*_to_postfiltered`)
+  remains the spec-equation oracle.
 - **Annex B comfort-noise sample alignment** — the §B.4.2.2 SID-LSP
   envelope and §B.4.4 LP-filtered PCM are wired (round 452), but the
   eq (96) *draw schedule* (how many draws, in which order, per
@@ -714,7 +808,7 @@ ratchet toward the fixed-point decode path. The decode stages:
   `fx::encoder::EncoderLatitude` for further black-box sweeps.
 - **Annex A depth-first ACELP search** (§A.3.8.1) — the Annex A prose
   pins only the search's existence and fixed complexity; the
-  pulse-combination schedule lives only in the barred reference C
+  pulse-combination schedule is not in the Recommendation text
   (docs gap). The Annex A encoder uses the main-body focused search
   (bit-stream legal, non-matching `C/S` choices). §A.4.4 concealment
   (clause 4.4 without voicing detection) is also not yet wired.

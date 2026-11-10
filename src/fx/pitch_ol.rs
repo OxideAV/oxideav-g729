@@ -21,7 +21,7 @@
 //! chain's own composition, exposed as latitude and pinned black-box.
 
 use crate::fx::dsp::{inv_sqrt, l_extract, mpy_32, mpy_32_16};
-use crate::fx::ops::{extract_h, l_mac, l_mult, l_shl, l_shr, l_sub, norm_l, sature32, shr};
+use crate::fx::ops::{extract_h, l_mult, l_shl, l_shr, l_sub, norm_l, sature32, shr};
 
 /// Maximum open-loop delay.
 pub const PIT_MAX: usize = 143;
@@ -94,20 +94,29 @@ pub struct OpenLoopPitchFx {
 }
 
 /// eq (34) at one delay on the (already rescaled) buffer.
+///
+/// The overflow-rescale protocol bounds the whole-buffer energy
+/// `Σ 2·v²` below the Word32 ceiling, and every partial sum of
+/// `2·a·b` terms is bounded by it (`2|ab| ≤ a² + b²`), so the
+/// saturating `L_mac` accumulation never saturates: the plain Word32
+/// sum is the same value.
 fn correlation(buf: &[i16; PIT_BUFFER], k: usize) -> i32 {
+    let cur = &buf[PIT_MAX..PIT_MAX + L_FRAME];
+    let lag = &buf[PIT_MAX - k..PIT_MAX - k + L_FRAME];
     let mut acc = 0i32;
-    for n in 0..L_FRAME {
-        acc = l_mac(acc, buf[PIT_MAX + n], buf[PIT_MAX + n - k]);
+    for (&a, &b) in cur.iter().zip(lag.iter()) {
+        acc = acc.wrapping_add((i32::from(a) * i32::from(b)).wrapping_mul(2));
     }
     acc
 }
 
-/// eq (35) denominator sum at one delay.
+/// eq (35) denominator sum at one delay (same bound as
+/// [`correlation`]).
 fn lagged_energy(buf: &[i16; PIT_BUFFER], k: usize) -> i32 {
+    let lag = &buf[PIT_MAX - k..PIT_MAX - k + L_FRAME];
     let mut acc = 0i32;
-    for n in 0..L_FRAME {
-        let v = buf[PIT_MAX + n - k];
-        acc = l_mac(acc, v, v);
+    for &v in lag {
+        acc = acc.wrapping_add((i32::from(v) * i32::from(v)).wrapping_mul(2));
     }
     acc
 }

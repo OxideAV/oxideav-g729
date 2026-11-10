@@ -569,7 +569,9 @@ impl FrameEncoderFx {
                 let u2: [i16; L_SUBFR] = std::array::from_fn(|n| self.exc[off + n]);
                 let _ = syn_filt_check(&u2, &a_hat[sub], &mut self.syn_mem, &mut s_hat, true);
             } else {
-                let _ = syn_filt_check(&u, &a_hat[sub], &mut self.syn_mem, &mut s_hat, true);
+                // The dry run already produced this subframe's output;
+                // commit the filter memory from it.
+                self.syn_mem.copy_from_slice(&s_hat[L_SUBFR - M..L_SUBFR]);
             }
             self.target
                 .update(&s_sub, &s_hat, &x, &y, &z, g.gain_pit_q14, g.gain_code_q1);
