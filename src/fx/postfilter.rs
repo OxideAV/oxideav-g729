@@ -4,44 +4,52 @@
 //! adaptive gain control (§4.2.4, eqs (88)–(90)), and the output
 //! high-pass + ×2 upscaling (§4.2.5, eq (91)) — everything on the
 //! clause-5 Word16/Word32 operator grid, consuming the §4.1
-//! [`crate::fx::decoder::FrameDecoderFx`] output.
+//! [`crate::fx::decoder::FrameDecoderFx`] output. The Annex A
+//! reduced-complexity cascade (§A.4.2) shares the module.
 //!
-//! ## Number grids
+//! ## Operator schedule
 //!
-//! - **Speech / residual / stage signals** — Q0 (the halved-input PCM
-//!   grid the §4.1.6 synthesis produces; §4.2.5 restores ×2).
-//! - **Weighted LP coefficients** `γ^i·â_i` — Q12, the γ powers
-//!   accumulated on Q15 ([`weight_az`]).
-//! - **eq (83) gain `g_l`** — Q15, bounded `[0, 32767]`; the eq (78)
-//!   combination runs `1/(1 + γ_p·g_l)` as an exact `div_s` on a Q14
-//!   denominator.
-//! - **eq (85) `g_f` / eq (86) `g_t`** — Word32 (Q12 / Q15), inverted
-//!   through the shared normalised-reciprocal helper ([`recip_norm`]).
-//! - **§4.2.4 gain `g(n)`** — Q12 (unit gain = 4096); the eq (90)
-//!   weights are the Q15 pair `27853/4915` (sum exactly `2^15`).
+//! The §4.2.2–§4.2.4 and §A.4.2.4 schedules follow the staged
+//! per-sample traces (`docs/audio/g729/traces/`, written up in
+//! `g729-errata-and-clarifications.md` #440) operator for operator;
+//! `tests/postfilter_trace_conformance.rs` replays every staged
+//! sub-frame against this module column by column.
+//!
+//! - **Weighted LP coefficients** `γ^i·â_i` — Q12, the γ powers built
+//!   recursively on Q15 **with rounding** ([`weight_az`]).
+//! - **eq (79) residual** — `L_mult`/`L_mac` Q13 accumulator, `L_shl 3`,
+//!   `round`.
+//! - **eq (85) `g_f`** — `Σ|h_f|` over 20 Q12 taps, truncated to Q10;
+//!   applied only when `g_f > 1`, as `mult_r(x, div_s(1024, g_f))` on
+//!   the **input** of the all-pole section.
+//! - **`1/Â(z/γ_d)`** — rounded Word16 recursion memory.
+//! - **eq (87) `k′_1`** — common `norm_l` of `r_h(0)`, truncated high
+//!   words, `div_s`.
+//! - **eq (86) tilt** — numerator with the halved `γ_t·k′_1` (LSB
+//!   cleared) rounded half-up, then a second, separate rounding for
+//!   `1/g_t` (Q14 or Q11 by the sign of `k′_1`).
+//! - **eqs (88)–(90) AGC** — `G` on Q14 through normalised `div_s`;
+//!   the recursion runs with the Q15 pair `32358/410` (the reference
+//!   pole is 0.9875, not the printed 0.85) through `mult_r`, from
+//!   `n = 0`; `sf′(n) = round(L_shl(L_mult(g(n), sf(n)), 1))`.
+//! - **§A.4.2.4 AGC** — energy ratio over quarter-scaled samples, the
+//!   clause-5 inverse square root, `G` on Q12, truncating `mult`
+//!   recursion with the printed `0.9` pole, truncated output product;
+//!   a zero output energy resets the gain state to 0 and passes the
+//!   sub-frame unscaled.
 //! - **§4.2.5** — the staged Q13 coefficient tables against a Word32
-//!   Q14 feedback memory (the recursion value is kept unrounded, as
-//!   the §3.1 twin of this filter measurably requires).
+//!   feedback memory carried in full.
 //!
-//! ## Latitude
-//!
-//! The Recommendation pins every *quantity* here (the equations, the
-//! constants, the cascade order, the Table 9 init) but not the
-//! reference's internal fixed-point operator schedule for §4.2 (a
-//! recorded docs-gap). The §4.2.1 decision correlations run on a
-//! norm-scaled Word16 copy of the residual window (the Word32
-//! accumulators stay in range by construction — the clause-5 grid has
-//! no wider accumulator), ratio *comparisons* are exact
-//! cross-multiplications of those Word32 values, and the stated
-//! output grids (`g_l` Q15, `1/g_f`/`1/g_t` via [`recip_norm`]) land
-//! by normalised division. The remaining sub-LSB schedule choices are
-//! exposed as [`PfLatitudeFx`] and arbitrated black-box against the
-//! conformance corpus (see `tests/fx_full_conformance.rs`).
+//! The §4.2.1 delay search runs on a justified copy of the residual
+//! (peak below `2^12`, so every 40-term Word32 correlation stays in
+//! range); its compare arithmetic is exact cross-multiplication of
+//! those Word32 values, and every staged decision (delay, 1/8 phase,
+//! long/short kernel, `1/(1 + γ_p·g_l)` weight) reproduces.
 
-use crate::fx::dsp::{l_extract, mpy_32_16};
+use crate::fx::dsp::inv_sqrt;
 use crate::fx::ops::{
-    abs_s, add, div_s, extract_h, l_add, l_deposit_h, l_deposit_l, l_mac, l_mult, l_shl, l_sub,
-    mult, norm_l, round, shl, shr, sub,
+    abs_s, add, div_s, extract_h, extract_l, l_abs, l_add, l_deposit_l, l_mac, l_msu, l_mult,
+    l_shl, l_shr, mult, mult_r, negate, norm_l, norm_s, round, sature, shl, shr, sub,
 };
 use crate::tables::{
     HPF_PREPROC_100HZ_A_Q13, HPF_PREPROC_100HZ_B_Q13, M, POSTFILTER_FRAC_RES,
@@ -52,27 +60,36 @@ use crate::tables::{
 /// Samples per subframe.
 pub const L_SUBFR: usize = 40;
 
-/// §4.2.1 weight factor `γ_p = 0.5` — folded structurally into the
-/// eq (78) arithmetic (`g_half = g_l/2`, exact shifts).
-pub const GAMMA_P_SHIFT: i16 = 1;
-
 /// §4.2.2 numerator weight `γ_n = 0.55` on Q15.
 pub const GAMMA_N_Q15: i16 = 18022;
 
 /// §4.2.2 denominator weight `γ_d = 0.70` on Q15.
 pub const GAMMA_D_Q15: i16 = 22938;
 
-/// §4.2.3 tilt weight `γ_t = 0.9` (negative `k1'`) on Q15.
+/// §4.2.3 tilt weight `γ_t = 0.9` (non-positive `k′_1`) on Q15.
 pub const GAMMA_T_NEG_Q15: i16 = 29491;
 
-/// §4.2.3 tilt weight `γ_t = 0.2` (positive `k1'`) on Q15.
+/// §4.2.3 tilt weight `γ_t = 0.2` (positive `k′_1`) on Q15.
 pub const GAMMA_T_POS_Q15: i16 = 6554;
 
-/// eq (90) previous-gain weight `0.85` on Q15.
-pub const AGC_PREV_Q15: i16 = 27853;
+/// eq (90) previous-gain weight on Q15 — `0.9875`, the value the
+/// staged traces establish (the printed `0.85` does not occur).
+pub const AGC_PREV_Q15: i16 = 32358;
 
-/// eq (90) target weight `0.15` on Q15 (`27853 + 4915 = 2^15`).
-pub const AGC_TARGET_Q15: i16 = 4915;
+/// eq (90) target weight on Q15 (`32358 + 410 = 2^15`).
+pub const AGC_TARGET_Q15: i16 = 410;
+
+/// §4.2.4 unit gain on the Q14 grid (Table 9 `g(−1) = 1.0`).
+pub const AGC_UNITY_Q14: i16 = 16384;
+
+/// §A.4.2.4 previous-gain weight `0.9` on Q15.
+pub const AGC_PREV_ANNEX_A_Q15: i16 = 29491;
+
+/// §A.4.2.4 target weight on Q15 (`32767 − 29491`).
+pub const AGC_TARGET_ANNEX_A_Q15: i16 = 3276;
+
+/// §A.4.2.4 unit gain on the Q12 grid (Table 9 `g(−1) = 1.0`).
+pub const AGC_UNITY_ANNEX_A_Q12: i16 = 4096;
 
 /// eq (85) impulse-response truncation length.
 pub const GF_IMPULSE_LEN: usize = 20;
@@ -80,19 +97,22 @@ pub const GF_IMPULSE_LEN: usize = 20;
 /// eq (A.14) impulse-response truncation length (Annex A).
 pub const ANNEX_A_IMPULSE_LEN: usize = 22;
 
-/// §A.4.2.3 tilt weight `γ_t = 0.8` (negative `k′_1`) on Q15.
+/// §A.4.2.3 tilt weight `γ_t = 0.8` on Q15.
 pub const GAMMA_T_ANNEX_A_Q15: i16 = 26214;
+
+/// eq (78) weight of the undelayed residual at `g_l = 1`:
+/// `1/(1 + γ_p)` on Q15.
+pub const LT_UNDELAYED_MIN_Q15: i16 = 21845;
 
 /// Deepest §4.2.1 history reach: the longest integer delay the search
 /// can pick (`int(T_1) + 1 ≤ 144`) plus the long-interpolator margin
 /// (8 samples beyond the integer anchor).
 const HIST: usize = 144 + POSTFILTER_INTERP_LONG_TAPS / 2;
 
-/// One subframe's §4.2.1 decision (mirrors the float
-/// [`crate::long_term_postfilter::LongTermDecision`]).
+/// One subframe's §4.2.1 decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LtDecisionFx {
-    /// Chosen integer delay `T_0` (eq (80)).
+    /// Integer anchor of the chosen delay: `T = delay + frac/8`.
     pub delay: usize,
     /// Chosen 1/8-resolution fractional offset (`0 … 7`).
     pub frac: usize,
@@ -100,202 +120,36 @@ pub struct LtDecisionFx {
     pub gain_q15: i16,
     /// Whether the length-129 refinement replaced the length-33
     /// delayed signal (clause 4.2.1 keeps the longer-filter signal
-    /// only when it raises `R′(T)`); the eq (78) filter reads the
-    /// delayed residual through the same kernel.
+    /// only when it raises `R′(T)`).
     pub use_long: bool,
+    /// eq (78) weight `1/(1 + γ_p·g_l)` of the undelayed residual on
+    /// Q15 (`32767` when the filter is disabled).
+    pub undelayed_q15: i16,
 }
 
-/// Normalised reciprocal of a positive Word32: returns `(m, e)` such
-/// that `1/L_x = m · 2^(e−45)` with `m = div_s(2^14, hi)` over the
-/// `norm_l`-normalised high word (`m ∈ (2^14, 2^15]`, saturated).
-fn recip_norm(l_x: i32) -> (i16, i16) {
-    debug_assert!(l_x > 0);
-    let e = norm_l(l_x);
-    let hi = extract_h(l_shl(l_x, e));
-    (div_s(16384, hi), e)
-}
-
-/// Unpinned §4.2 operator-schedule latitude (the Recommendation pins
-/// the equations, not the reference's fixed-point rounding points) —
-/// pinned black-box against the conformance corpus.
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PfLatitudeFx {
-    /// eq (79) residual lands on Q0 by rounding (`true`) or
-    /// truncation (`false`).
-    pub resid_round: bool,
-    /// Synthesis output `y(n)` lands on Q0 by rounding or truncation.
-    pub syn_round: bool,
-    /// eq (78) output lands by rounding or truncation.
-    pub lt_round: bool,
-    /// `1/g_f` applied to the all-pole output (`false`) or to its
-    /// input (`true`).
-    pub gf_before: bool,
-    /// §4.2.5 feedback kept on the wide Word32 grid (`true`) or
-    /// rounded to Word16 (`false`).
-    pub hp_wide: bool,
-    /// §4.2.4 gain grid shift relative to Q12 (0 = Q12, 1 = Q13, …).
-    pub agc_shift: i16,
-    /// The §4.2.5 ×2 upscale folded into the eq (89) product landing:
-    /// the AGC output lands on Q1 (`2·sf′(n)` rounded once) and the
-    /// high-pass consumes that grid, landing its output on Q0 without
-    /// a second scaling.
-    pub agc_x2: bool,
-    /// eq (88) target as the square root of the amplitude ratio
-    /// (black-box sweep hook; r452 measured: pushes SPEECH's first
-    /// divergence 83 → 271 but collapses LSP/PITCH exact share — off).
-    pub agc_sqrt: bool,
-    /// eq (89)/(90): scale with `g(n−1)` first, then advance the
-    /// recursion (black-box sweep hook).
-    pub agc_apply_first: bool,
-    /// eq (90) smoothing pole on Q15 (`0` = the printed 0.85 pair).
-    pub agc_pole_q15: i16,
-    /// eq (88) ratio taken from the PREVIOUS subframe's `Σ|ŝ|/Σ|sf|`
-    /// sums (one-subframe lag) instead of the current one.
-    ///
-    /// r452 measured: this reproduces the reference's AGC trajectory at
-    /// silence→signal onsets exactly (PITCH/FIXED/TAME frame-0
-    /// subframe-1 heads become byte-exact, and every clean vector's
-    /// first divergence moves later: FIXED 43 → 47, PITCH 41 → 46,
-    /// TAME 41 → 53, SPEECH 83 → 141), but costs aggregate exact share
-    /// (sum over 12 vectors 112.7 → 103.7) while the §4.2.2/§4.2.3
-    /// sub-LSB schedule is still unpinned — the residual ±1-LSB
-    /// `st`/`tilt` differences then land on the wrong side of the
-    /// rounding boundary more often. Left OFF until that schedule is
-    /// pinned; the onset evidence says it is the reference's structure.
-    pub agc_lag: bool,
-    /// eq (85) `1/g_f` as an exact rounded division by the Word32 gain
-    /// instead of the `recip_norm` mantissa multiply (r452 measured:
-    /// clearly refuted — exact-share sum 112.7 → 92.8; the mantissa
-    /// multiply IS the reference grid).
-    pub gf_exact_div: bool,
-    /// eq (86) `1/g_t` as an exact rounded division (r452: neutral,
-    /// ±0.2 on the exact-share sum — the tilt numbers rarely reach the
-    /// differing LSB).
-    pub tilt_exact_div: bool,
-    /// §4.2.1 fractional-interpolation window origin shift in samples
-    /// (the staging note records two candidate tap alignments; r452
-    /// measured: ±1 is corpus-neutral, ±0.6 on the exact-share sum
-    /// with no first-divergence movement — the current alignment
-    /// stands and the residual divergence is not here).
-    pub lt_tap_shift: i16,
-    /// eq (85)/(87) truncated impulse-response length (0 = the printed
-    /// 20; sweep hook, max 40; r452 measured: 22/32/40 all neutral).
-    pub gf_len: u8,
-    /// eq (88) target as the square root of the ENERGY ratio
-    /// `√(Σŝ²/Σsf²)` (the Annex A eq (A.15) form) instead of the
-    /// printed ratio of absolute sums.
-    pub agc_energy: bool,
-    /// eq (83) over-unity handling: clamp `g_l` to 1 as printed
-    /// (`true`) or treat a raw ratio above 2 as disabled (`false`, the
-    /// r419 black-box pin — fitted while the eq (78) output carried a
-    /// spurious ×2, so re-measured in r461).
-    pub lt_over_unity_clamp: bool,
-    /// Silence enable floor `Σr̂² ≤ 40` disables the long-term filter
-    /// (`true`, the r419 pin) or the printed eq (82) test alone decides
-    /// (`false`).
-    pub lt_silence_floor: bool,
-    /// eq (83): disable the filter whenever the raw ratio exceeds 1
-    /// (`num > den`) instead of clamping (sweep hook; overrides
-    /// `lt_over_unity_clamp`).
-    pub lt_over_unity_disable_all: bool,
-    /// §A.4.2.4 recursion pole on Q15 (printed `0.9` = 29491) for the
-    /// Annex A cascade; the complementary weight is `2^15 − pole`.
-    pub agc_pole_a_q15: i16,
-}
-
-impl Default for PfLatitudeFx {
-    fn default() -> Self {
+impl LtDecisionFx {
+    const fn off(delay: usize) -> Self {
         Self {
-            resid_round: true,
-            // Round 452 re-pin (with the corpus-identified frame-0
-            // previous-LSP memory in place the r419 truncation pin no
-            // longer holds): every landing rounds, the §4.2.5 ×2 is
-            // folded into the eq (89) product (Q1 AGC output), and
-            // 1/g_f scales the synthesis input. Measured on the full
-            // fixed-point chain, sum of exact% over the 12 clean
-            // vectors: 79 (r419 defaults) → 109; frame-0 subframe 0
-            // byte-exact on all six base vectors.
-            syn_round: true,
-            lt_round: true,
-            gf_before: true,
-            hp_wide: true,
-            agc_shift: 0,
-            agc_x2: true,
-            agc_sqrt: false,
-            agc_apply_first: false,
-            agc_pole_q15: 32358,
-            agc_lag: false,
-            gf_exact_div: false,
-            tilt_exact_div: false,
-            lt_tap_shift: 0,
-            gf_len: 0,
-            agc_energy: false,
-            lt_over_unity_clamp: true,
-            lt_silence_floor: true,
-            lt_over_unity_disable_all: false,
-            agc_pole_a_q15: 29491,
+            delay,
+            frac: 0,
+            gain_q15: 0,
+            use_long: false,
+            undelayed_q15: i16::MAX,
         }
     }
-}
-
-impl PfLatitudeFx {
-    /// Applies `field=value` overrides from a comma-separated spec
-    /// (the black-box sweep hook used by the conformance harness, e.g.
-    /// `G729_FX_LAT="lt_over_unity_clamp=1,agc_pole_q15=32358"`).
-    /// Unknown fields panic so a typo never silently measures the
-    /// default.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn with_overrides(mut self, spec: &str) -> Self {
-        for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-            let (k, v) = item.split_once('=').expect("field=value");
-            let b = v == "1" || v == "true";
-            let i: i16 = v.parse().unwrap_or(0);
-            match k {
-                "resid_round" => self.resid_round = b,
-                "syn_round" => self.syn_round = b,
-                "lt_round" => self.lt_round = b,
-                "gf_before" => self.gf_before = b,
-                "hp_wide" => self.hp_wide = b,
-                "agc_shift" => self.agc_shift = i,
-                "agc_x2" => self.agc_x2 = b,
-                "agc_sqrt" => self.agc_sqrt = b,
-                "agc_apply_first" => self.agc_apply_first = b,
-                "agc_pole_q15" => self.agc_pole_q15 = i,
-                "agc_lag" => self.agc_lag = b,
-                "gf_exact_div" => self.gf_exact_div = b,
-                "tilt_exact_div" => self.tilt_exact_div = b,
-                "lt_tap_shift" => self.lt_tap_shift = i,
-                "gf_len" => self.gf_len = i as u8,
-                "agc_energy" => self.agc_energy = b,
-                "lt_over_unity_clamp" => self.lt_over_unity_clamp = b,
-                "lt_silence_floor" => self.lt_silence_floor = b,
-                "agc_pole_a_q15" => self.agc_pole_a_q15 = i,
-                "lt_over_unity_disable_all" => self.lt_over_unity_disable_all = b,
-                other => panic!("unknown latitude field {other}"),
-            }
-        }
-        self
-    }
-}
-
-/// Land a Q13-scaled accumulator on Q0 by rounding or truncation.
-#[inline]
-fn land_q13(acc: i32, round_mode: bool) -> i16 {
-    let q = l_shl(acc, 3);
-    if round_mode { round(q) } else { extract_h(q) }
 }
 
 /// `γ`-weighted LP coefficients `γ^i·â_i` on Q12 (`i = 1 … 10`,
-/// slot `j` holds `i = j + 1`), the γ powers accumulated on Q15.
+/// slot `j` holds `i = j + 1`): the γ powers are built recursively on
+/// Q15 with rounding (`γ^i = round(L_mult(γ^(i−1), γ))`) and each
+/// product lands by `round(L_mult(â_i, γ^i))`.
 #[must_use]
 pub fn weight_az(a: &[i16; M + 1], gamma_q15: i16) -> [i16; M] {
     let mut fac = gamma_q15;
     std::array::from_fn(|j| {
-        let w = mult(a[j + 1], fac);
+        let w = round(l_mult(a[j + 1], fac));
         if j + 1 < M {
-            fac = mult(fac, gamma_q15);
+            fac = round(l_mult(fac, gamma_q15));
         }
         w
     })
@@ -305,31 +159,30 @@ pub fn weight_az(a: &[i16; M + 1], gamma_q15: i16) -> [i16; M] {
 /// short-term postfilter `Â(z/γ_n)/Â(z/γ_d)` (eq (84) without `1/g_f`).
 #[must_use]
 pub fn impulse_response_q12(apn: &[i16; M], apd: &[i16; M]) -> [i16; GF_IMPULSE_LEN] {
-    let h40 = impulse_response_q12_n(apn, apd);
-    core::array::from_fn(|n| h40[n])
+    let mut h = [0i16; GF_IMPULSE_LEN];
+    impulse_response_into(apn, apd, &mut h);
+    h
 }
 
-/// [`impulse_response_q12`] extended to 40 taps (the `gf_len` sweep
-/// hook consumes a prefix).
-#[doc(hidden)]
-#[must_use]
-pub fn impulse_response_q12_n(apn: &[i16; M], apd: &[i16; M]) -> [i16; 40] {
-    // Numerator impulse response: [1, γ_n·â_1 … γ_n^10·â_10] on Q12.
-    let mut hnum = [0i16; 40];
-    hnum[0] = 4096;
-    hnum[1..=M].copy_from_slice(apn);
-    // All-pole 1/Â(z/γ_d) from zero state, Q12 in / Q12 out.
-    let mut h = [0i16; 40];
-    for n in 0..40 {
-        let mut acc = l_mult(hnum[n], 4096); // Q25
-        for (i, &c) in apd.iter().enumerate() {
-            if n > i {
-                acc = crate::fx::ops::l_msu(acc, c, h[n - 1 - i]);
-            }
+/// Impulse response of `Â(z/γ_n)/Â(z/γ_d)` on Q12 into `h` (any
+/// length): the all-pole recursion with the rounded Word16 landing,
+/// from zero state, over the numerator sequence
+/// `{4096, γ_n·â_1 … γ_n^10·â_10, 0 …}`.
+fn impulse_response_into(apn: &[i16; M], apd: &[i16; M], h: &mut [i16]) {
+    for n in 0..h.len() {
+        let x = if n == 0 {
+            4096
+        } else if n <= M {
+            apn[n - 1]
+        } else {
+            0
+        };
+        let mut acc = l_mult(x, 4096);
+        for (i, &c) in apd.iter().enumerate().take(n) {
+            acc = l_msu(acc, c, h[n - 1 - i]);
         }
-        h[n] = round(l_shl(acc, 3)); // Q25 → Q28 → high word Q12
+        h[n] = round(l_shl(acc, 3));
     }
-    h
 }
 
 /// Stateful fixed-point §4.2 cascade.
@@ -348,18 +201,15 @@ pub struct PostfilterFx {
     r_buf: [i16; HIST + L_SUBFR],
     /// Synthesis `1/Â(z/γ_d)` output history `[y(n−1) … y(n−10)]`.
     st_y: [i16; M],
-    /// §4.2.3 FIR input tap `t(n−1)`.
+    /// Tilt-filter input tap `x(−1)`: the last sample of the previous
+    /// subframe's tilt *input*.
     tilt_prev: i16,
-    /// Previous subframe's eq (88) `(Σ|ŝ|, Σ|sf|)` pair (agc_lag hook).
-    agc_prev_sums: (i32, i32),
-    /// §4.2.4 smoothed gain `g(n)` on Q12 (Table 9 init 1.0 = 4096).
-    agc_q12: i16,
+    /// §4.2.4 smoothed gain `g(n)`: Q14 (main body) or Q12 (Annex A).
+    agc_gain: i16,
     /// §4.2.5 input taps `[x(n−1), x(n−2)]`.
     hp_x: [i16; 2],
-    /// §4.2.5 unrounded feedback `[y(n−1), y(n−2)]` on Word32 Q14.
+    /// §4.2.5 unrounded feedback `[y(n−1), y(n−2)]` on Word32.
     hp_y: [i32; 2],
-    /// Operator-schedule latitude (black-box-pinned).
-    lat: PfLatitudeFx,
     /// Oracle-probe switch: apply the §4.2.1 filter as disabled.
     force_lt_off: bool,
     /// §A.4.2 reduced-complexity cascade (see [`Self::new_annex_a`]).
@@ -372,6 +222,16 @@ impl Default for PostfilterFx {
     }
 }
 
+/// A candidate delay's correlation / delayed-signal energy pair on
+/// the justified grid.
+#[derive(Debug, Clone, Copy)]
+struct LtCand {
+    anchor: usize,
+    frac: usize,
+    corr: i32,
+    energy: i32,
+}
+
 impl PostfilterFx {
     /// Clause-4.3 start-up state (all-zero except the Table 9 AGC gain).
     #[must_use]
@@ -381,11 +241,9 @@ impl PostfilterFx {
             r_buf: [0; HIST + L_SUBFR],
             st_y: [0; M],
             tilt_prev: 0,
-            agc_prev_sums: (0, 0),
-            agc_q12: 4096,
+            agc_gain: AGC_UNITY_Q14,
             hp_x: [0; 2],
             hp_y: [0; 2],
-            lat: PfLatitudeFx::default(),
             force_lt_off: false,
             annex_a: false,
         }
@@ -400,25 +258,18 @@ impl PostfilterFx {
     /// length-22 impulse response (eq (A.14)) and uses `γ_t = 0.8`
     /// for negative `k′_1`, `0` otherwise; the tilt compensation runs
     /// **before** the `1/Â(z/γ_d)` synthesis (§A.4.2); the §A.4.2.4
-    /// AGC target is the energy ratio `√(Σŝ²/Σsf²)` (eq (A.15)) with
-    /// the recursion pair carried in [`PfLatitudeFx::agc_pole_a_q15`].
+    /// AGC target is the energy ratio `√(Σŝ²/Σsf²)` (eq (A.15)).
     /// [`Self::process_subframe`]'s delay argument is then `T_cl`.
     #[must_use]
     pub fn new_annex_a() -> Self {
         let mut pf = Self::new();
         pf.annex_a = true;
+        pf.agc_gain = AGC_UNITY_ANNEX_A_Q12;
         pf
     }
 
-    /// Override the operator-schedule latitude (black-box sweep hook).
-    #[doc(hidden)]
-    pub fn set_latitude(&mut self, lat: PfLatitudeFx) {
-        self.lat = lat;
-        self.agc_q12 = shl(4096, lat.agc_shift);
-    }
-
-    /// Residual fetch at `r̂(n − k)` (`n` = in-subframe index,
-    /// `k ≥ 0`): buffer index `HIST + n − k`.
+    /// Fetch at `buf(n − k)` (`n` = in-subframe index, `k ≥ 0`):
+    /// buffer index `HIST + n − k`, zero beyond the history.
     #[inline]
     fn at(buf: &[i16; HIST + L_SUBFR], n: usize, k: usize) -> i16 {
         let idx = HIST + n;
@@ -438,21 +289,14 @@ impl PostfilterFx {
                 };
                 acc = l_mac(acc, c, sv);
             }
-            self.r_buf[HIST + n] = land_q13(acc, self.lat.resid_round);
+            self.r_buf[HIST + n] = round(l_shl(acc, 3));
         }
     }
 
     /// Interpolated fetch of `buf` at delay `T_0 + frac/8` for output
     /// index `n`, with the short (`long == false`) or long kernel.
     /// `frac == 0` is the direct integer fetch.
-    fn interp_at_shift(
-        buf: &[i16; HIST + L_SUBFR],
-        n: usize,
-        t0: usize,
-        frac: usize,
-        long: bool,
-        shift: i16,
-    ) -> i16 {
+    fn interp_at(buf: &[i16; HIST + L_SUBFR], n: usize, t0: usize, frac: usize, long: bool) -> i16 {
         if frac == 0 {
             return Self::at(buf, n, t0);
         }
@@ -469,40 +313,34 @@ impl PostfilterFx {
         };
         let mut acc = 0i32;
         for (j, &h) in taps.iter().enumerate() {
-            let idx = i64::from(t0 as u32) + i64::from(half as u32) + i64::from(shift) - j as i64;
-            let k = usize::try_from(idx).unwrap_or(0);
+            let k = (t0 + half).saturating_sub(j);
             acc = l_mac(acc, h, Self::at(buf, n, k));
         }
         round(acc)
     }
 
-    /// Correlation `Σ r̂(n)·r̂_T(n)` and energy `Σ r̂_T(n)²` for a
-    /// candidate delay over the **scaled** residual window (the
-    /// Word32 accumulators stay in range by construction).
-    fn corr_energy_shift(
-        rs: &[i16; HIST + L_SUBFR],
-        t0: usize,
-        frac: usize,
-        long: bool,
-        shift: i16,
-    ) -> (i64, i64) {
+    /// The whole delayed subframe for one candidate.
+    fn delayed(buf: &[i16; HIST + L_SUBFR], t0: usize, frac: usize, long: bool) -> [i16; L_SUBFR] {
+        std::array::from_fn(|n| Self::interp_at(buf, n, t0, frac, long))
+    }
+
+    /// Correlation `Σ r̂(n)·r̂_T(n)` and energy `Σ r̂_T(n)²` of a delayed
+    /// subframe against the justified residual.
+    fn corr_energy(rs: &[i16; HIST + L_SUBFR], rk: &[i16; L_SUBFR]) -> (i32, i32) {
         let mut corr = 0i32;
         let mut energy = 0i32;
         for n in 0..L_SUBFR {
-            let rk = Self::interp_at_shift(rs, n, t0, frac, long, shift);
-            let rn = rs[HIST + n];
-            corr = l_mac(corr, rn, rk);
-            energy = l_mac(energy, rk, rk);
+            corr = l_mac(corr, rs[HIST + n], rk[n]);
+            energy = l_mac(energy, rk[n], rk[n]);
         }
-        (i64::from(corr), i64::from(energy))
+        (corr, energy)
     }
 
-    /// The scaled copy of the residual window the §4.2.1 decisions run
-    /// on: every sample right-shifted so the worst-case 40-term
-    /// correlation of any window slice stays inside Word32 (the
-    /// clause-5 grid has no wider accumulator; small residuals lose
-    /// their low bits exactly as a Word16 pre-scale loses them).
-    fn scaled_residual(&self) -> [i16; HIST + L_SUBFR] {
+    /// The justified copy of the residual window the §4.2.1 decisions
+    /// run on, and its shift (`> 0` = right): the peak magnitude of
+    /// the whole window lands below `2^12`, so every 40-term Word32
+    /// correlation stays in range. `None` for an all-zero window.
+    fn justified_residual(&self) -> Option<([i16; HIST + L_SUBFR], i16)> {
         let mut maxabs: i16 = 0;
         for &v in self.r_buf.iter() {
             let a = abs_s(v);
@@ -510,30 +348,68 @@ impl PostfilterFx {
                 maxabs = a;
             }
         }
-        // Σ40·v² ≤ 2^31 needs |v| ≤ 5792 ≈ 2^12.5.
-        let mut sh: i16 = 0;
-        while shr(maxabs, sh) > 5792 {
-            sh += 1;
+        if maxabs == 0 {
+            return None;
         }
-        std::array::from_fn(|i| shr(self.r_buf[i], sh))
+        let sh = sub(3, norm_s(maxabs));
+        Some((std::array::from_fn(|i| shr(self.r_buf[i], sh)), sh))
+    }
+
+    /// `a²/b > c²/d` for positive Word32 values, exact.
+    #[inline]
+    fn ratio_gt(a: i32, b: i32, c: i32, d: i32) -> bool {
+        i128::from(a) * i128::from(a) * i128::from(d)
+            > i128::from(c) * i128::from(c) * i128::from(b)
+    }
+
+    /// eq (82) disable test + eq (83) gain → the eq (78) weight of the
+    /// undelayed residual, `1/(1 + γ_p·g_l)` on Q15. `None` = disabled.
+    fn lt_gain(corr: i32, energy: i32, energy_r: i32) -> Option<(i16, i16)> {
+        if corr <= 0 || energy <= 0 {
+            return None;
+        }
+        // eq (82): R′(T)²/Σr̂² < 0.5 ⇔ 2·corr² < Σr̂²·E_T.
+        if 2 * i128::from(corr) * i128::from(corr) < i128::from(energy_r) * i128::from(energy) {
+            return None;
+        }
+        if corr >= energy {
+            // eq (83) bound g_l ≤ 1.
+            return Some((LT_UNDELAYED_MIN_Q15, i16::MAX));
+        }
+        let nc = norm_l(corr);
+        let ne = norm_l(energy);
+        let c16 = extract_h(l_shl(corr, nc));
+        let e16 = extract_h(l_shl(energy, ne));
+        let num = shr(c16, sub(nc, ne));
+        let half_den = shr(e16, 1);
+        let g0 = div_s(half_den, add(half_den, shr(num, 2)));
+        let g_l = if num >= e16 {
+            i16::MAX
+        } else {
+            div_s(num, e16)
+        };
+        Some((g0, g_l))
     }
 
     /// Clause-4.2.1 two-pass delay search + eq (82)/(83) gain decision
-    /// for the residual currently in `r_buf`.
-    fn decide(&self, int_t1: usize) -> LtDecisionFx {
-        let rs = self.scaled_residual();
-
-        // eq (82) denominator: Σ r̂(n)² on the scaled grid.
-        let mut energy32 = 0i32;
-        for n in 0..L_SUBFR {
-            energy32 = l_mac(energy32, rs[HIST + n], rs[HIST + n]);
-        }
-        let energy = i64::from(energy32);
-
-        // First pass (eq (80)): best integer delay in
-        // [int(T_1) − 1, int(T_1) + 1], clamped to the buffer reach.
+    /// for the residual currently in `r_buf`; returns the decision and
+    /// the delayed residual on the output grid.
+    fn decide(&self, int_t1: usize) -> (LtDecisionFx, [i16; L_SUBFR]) {
+        let zero = [0i16; L_SUBFR];
         let lo = int_t1.saturating_sub(1).max(1);
         let hi = (int_t1 + 1).min(144);
+        let Some((rs, sh)) = self.justified_residual() else {
+            return (LtDecisionFx::off(lo), zero);
+        };
+
+        // eq (82) denominator: Σ r̂(n)² on the justified grid.
+        let mut energy_r = 0i32;
+        for n in 0..L_SUBFR {
+            energy_r = l_mac(energy_r, rs[HIST + n], rs[HIST + n]);
+        }
+
+        // First pass (eq (80)): best integer delay in
+        // [int(T_1) − 1, int(T_1) + 1].
         let mut t0 = lo;
         let mut best_corr = i32::MIN;
         for k in lo..=hi {
@@ -545,123 +421,98 @@ impl PostfilterFx {
                 best_corr = corr;
                 t0 = k;
             }
+        }
+        if best_corr <= 0 || energy_r <= 0 {
+            return (LtDecisionFx::off(t0), zero);
         }
 
         // Second pass (eq (81)): best 1/8 fraction by R(T)²/E_T (short
         // kernel), positive-correlation candidates only. "Around T_0"
         // spans both sides: `T_0 − 7/8 … T_0 + 7/8`, the negative side
         // expressed as `(T_0 − 1) + frac/8`.
-        let mut best = ((t0, 0usize), 0i64, 0i64); // ((anchor, frac), num, den)
-        let mut have = false;
+        let mut best: Option<(LtCand, [i16; L_SUBFR])> = None;
         let neg_anchor = t0.saturating_sub(1).max(1);
         let candidates = (1..POSTFILTER_FRAC_RES)
             .map(|frac| (neg_anchor, frac))
             .chain((0..POSTFILTER_FRAC_RES).map(|frac| (t0, frac)));
         for (anchor, frac) in candidates {
-            let (corr, e_t) =
-                Self::corr_energy_shift(&rs, anchor, frac, false, self.lat.lt_tap_shift);
-            if corr <= 0 || e_t <= 0 {
+            let rk = Self::delayed(&rs, anchor, frac, false);
+            let (corr, energy) = Self::corr_energy(&rs, &rk);
+            if corr <= 0 || energy <= 0 {
                 continue;
             }
-            let better = if !have {
-                true
-            } else {
-                // corr²/e_t > best²/best_e  ⇔  corr²·best_e > best²·e_t
-                let l = i128::from(corr) * i128::from(corr) * i128::from(best.2);
-                let r = i128::from(best.1) * i128::from(best.1) * i128::from(e_t);
-                l > r
+            let better = match &best {
+                None => true,
+                Some((b, _)) => Self::ratio_gt(corr, energy, b.corr, b.energy),
             };
             if better {
-                best = ((anchor, frac), corr, e_t);
-                have = true;
+                best = Some((
+                    LtCand {
+                        anchor,
+                        frac,
+                        corr,
+                        energy,
+                    },
+                    rk,
+                ));
             }
         }
+        let Some((mut cand, mut rk)) = best else {
+            return (LtDecisionFx::off(t0), zero);
+        };
 
         // Long-kernel refinement of a non-integer winner, kept only if
         // it raises R(T)²/E_T.
         let mut use_long = false;
-        if have && best.0.1 != 0 {
-            let (corr_l, e_l) =
-                Self::corr_energy_shift(&rs, best.0.0, best.0.1, true, self.lat.lt_tap_shift);
-            if corr_l > 0 && e_l > 0 {
-                let l = i128::from(corr_l) * i128::from(corr_l) * i128::from(best.2);
-                let r = i128::from(best.1) * i128::from(best.1) * i128::from(e_l);
-                if l > r {
-                    best = (best.0, corr_l, e_l);
-                    use_long = true;
-                }
+        if cand.frac != 0 {
+            let rl = Self::delayed(&rs, cand.anchor, cand.frac, true);
+            let (corr_l, e_l) = Self::corr_energy(&rs, &rl);
+            if corr_l > 0 && e_l > 0 && Self::ratio_gt(corr_l, e_l, cand.corr, cand.energy) {
+                cand.corr = corr_l;
+                cand.energy = e_l;
+                rk = rl;
+                use_long = true;
             }
         }
 
-        // eq (82) disable test: R′(T)²/Σr̂² < 0.5 ⇔ 2·num² < energy·den.
-        let ((anchor, frac), num, den) = best;
-        // Quantisation-noise enable floor, pinned black-box: a
-        // subframe whose residual mean square is at most one Q0 LSB
-        // (Σr̂² ≤ 40) is treated as having no long-term structure —
-        // the eq (82) statistic over bare quantisation noise otherwise
-        // flickers the filter on during silence (removing it retires
-        // the whole silence-cluster class of divergence events on
-        // SPEECH; the threshold is insensitive from 40 to 2560).
-        let enabled = have
-            && (!self.lat.lt_silence_floor || energy > 40)
-            && 2 * i128::from(num) * i128::from(num) >= i128::from(energy) * i128::from(den);
-
-        if !enabled {
-            // Disabled → report the integer-pass anchor, no fraction.
-            return LtDecisionFx {
-                delay: t0,
-                frac: 0,
-                gain_q15: 0,
-                use_long: false,
-            };
-        }
-
-        // Over-unity guard, pinned black-box: when the raw eq (83)
-        // ratio exceeds 2 (num > 2·den — the ceiling of a Q14 gain
-        // grid, i.e. the point where a normalised fixed-point division
-        // for g_l stops being representable) the filter behaves as
-        // DISABLED, not clamped. The corpus separates the two cleanly:
-        // clamping keeps voiced material (SPEECH/PITCH unchanged) but
-        // wrecks the onset-heavy FIXED vectors (corr 0.9502/0.9756
-        // clamped vs 0.9855/0.9918 disabled); disabling everything
-        // over unity instead costs SPEECH/PITCH (0.9953/0.9926).
-        if (self.lat.lt_over_unity_disable_all && num > den)
-            || (!self.lat.lt_over_unity_clamp && num > 2 * den)
-        {
-            return LtDecisionFx {
-                delay: t0,
-                frac: 0,
-                gain_q15: 0,
-                use_long: false,
-            };
-        }
-        // eq (83): g_l = num/den bounded [0, 1], on Q15.
-        let gain_q15 = if num >= den {
-            32767
-        } else {
-            ((num << 15) / den) as i16
+        let Some((g0, g_l)) = Self::lt_gain(cand.corr, cand.energy, energy_r) else {
+            return (LtDecisionFx::off(t0), zero);
         };
-        LtDecisionFx {
-            delay: anchor,
-            frac,
-            gain_q15,
-            use_long,
-        }
+        // The delayed residual on the output grid: the integer fetch
+        // is exact; an interpolated one is computed on the justified
+        // grid and shifted back.
+        let out: [i16; L_SUBFR] = if cand.frac == 0 {
+            std::array::from_fn(|n| Self::at(&self.r_buf, n, cand.anchor))
+        } else {
+            std::array::from_fn(|n| shl(rk[n], sh))
+        };
+        (
+            LtDecisionFx {
+                delay: cand.anchor,
+                frac: cand.frac,
+                gain_q15: g_l,
+                use_long,
+                undelayed_q15: g0,
+            },
+            out,
+        )
     }
 
     /// §A.4.2.1: best integer delay in `[T_cl − 3, T_cl + 3]` by the
     /// eq (80) correlation, then the eq (82)/(83) gain decision on it
     /// (no fractional pass, no longer-filter refinement).
-    fn decide_integer(&self, t_cl: usize) -> LtDecisionFx {
-        let rs = self.scaled_residual();
-        let mut energy32 = 0i32;
-        for n in 0..L_SUBFR {
-            energy32 = l_mac(energy32, rs[HIST + n], rs[HIST + n]);
-        }
-        let energy = i128::from(energy32);
+    fn decide_integer(&self, t_cl: usize) -> (LtDecisionFx, [i16; L_SUBFR]) {
+        let zero = [0i16; L_SUBFR];
         let centre = t_cl.min(140);
         let lo = centre.saturating_sub(3).max(1);
         let hi = (centre + 3).min(143);
+        let Some((rs, _sh)) = self.justified_residual() else {
+            return (LtDecisionFx::off(lo), zero);
+        };
+        let mut energy_r = 0i32;
+        for n in 0..L_SUBFR {
+            energy_r = l_mac(energy_r, rs[HIST + n], rs[HIST + n]);
+        }
         let mut t0 = lo;
         let mut best_corr = i32::MIN;
         for k in lo..=hi {
@@ -674,90 +525,50 @@ impl PostfilterFx {
                 t0 = k;
             }
         }
-        let mut den32 = 0i32;
+        let mut energy = 0i32;
         for n in 0..L_SUBFR {
             let rk = Self::at(&rs, n, t0);
-            den32 = l_mac(den32, rk, rk);
+            energy = l_mac(energy, rk, rk);
         }
-        let num = i128::from(best_corr);
-        let den = i128::from(den32);
-        let off = LtDecisionFx {
-            delay: t0,
-            frac: 0,
-            gain_q15: 0,
-            use_long: false,
+        let Some((g0, g_l)) = Self::lt_gain(best_corr, energy, energy_r) else {
+            return (LtDecisionFx::off(t0), zero);
         };
-        let enabled = num > 0
-            && den > 0
-            && (!self.lat.lt_silence_floor || energy > 40)
-            && 2 * num * num >= energy * den;
-        if !enabled
-            || (self.lat.lt_over_unity_disable_all && num > den)
-            || (!self.lat.lt_over_unity_clamp && num > 2 * den)
-        {
-            return off;
-        }
-        let gain_q15 = if num >= den {
-            32767
-        } else {
-            ((num << 15) / den) as i16
-        };
-        LtDecisionFx {
-            delay: t0,
-            frac: 0,
-            gain_q15,
-            use_long: false,
-        }
+        (
+            LtDecisionFx {
+                delay: t0,
+                frac: 0,
+                gain_q15: g_l,
+                use_long: false,
+                undelayed_q15: g0,
+            },
+            std::array::from_fn(|n| Self::at(&self.r_buf, n, t0)),
+        )
     }
 
     /// §4.2.1 `H_p(z)` for one subframe, applied to the **residual**
     /// (clause 4.2: "the signal r̂ is then filtered through the
-    /// long-term postfilter"): two-pass search + the eq (78)
-    /// combination over `r̂(n)` / `r̂_T(n)`; advances the residual
-    /// history. The residual must already sit in `r_buf[HIST..]`.
+    /// long-term postfilter"): the delay search + the eq (78)
+    /// combination `g_0·r̂(n) + (1 − g_0)·r̂_T(n)` with
+    /// `g_0 = 1/(1 + γ_p·g_l)`; advances the residual history. The
+    /// residual must already sit in `r_buf[HIST..]`.
     fn long_term(&mut self, int_t1: usize) -> ([i16; L_SUBFR], LtDecisionFx) {
-        let mut d = if self.annex_a {
+        let (mut d, delayed) = if self.annex_a {
             self.decide_integer(int_t1)
         } else {
             self.decide(int_t1)
         };
         if self.force_lt_off {
-            d.gain_q15 = 0;
-            d.frac = 0;
-            d.use_long = false;
+            d = LtDecisionFx::off(d.delay);
         }
 
         let mut out = [0i16; L_SUBFR];
         if d.gain_q15 == 0 {
             out.copy_from_slice(&self.r_buf[HIST..]);
         } else {
-            // γ_p·g_l on Q15 (γ_p = 0.5 exact shift); the eq (78)
-            // denominator 1 + γ_p·g_l on Q14; 1/(1 + γ_p·g_l) by exact
-            // Q15 division.
-            let g_half = shr(d.gain_q15, GAMMA_P_SHIFT);
-            let denom_q14 = add(16384, shr(d.gain_q15, GAMMA_P_SHIFT + 1));
-            let inv_q15 = div_s(16384, denom_q14);
+            let g0 = d.undelayed_q15;
+            let g1 = add(sub(i16::MAX, g0), 1);
             for (n, o) in out.iter_mut().enumerate() {
-                // r̂(n) + γ_p·g_l·r̂_T(n) on Q16 — the delayed residual
-                // through the kernel the search settled on (clause
-                // 4.2.1 longer-filter replacement rule).
-                let r_t = Self::interp_at_shift(
-                    &self.r_buf,
-                    n,
-                    d.delay,
-                    d.frac,
-                    d.use_long,
-                    self.lat.lt_tap_shift,
-                );
-                let acc = l_mac(l_deposit_h(self.r_buf[HIST + n]), g_half, r_t);
-                let (hi, lo) = l_extract(acc);
-                // `mpy_32_16` keeps the Q16 grid (acc · inv/2^15).
-                let scaled = mpy_32_16(hi, lo, inv_q15);
-                *o = if self.lat.lt_round {
-                    round(scaled)
-                } else {
-                    extract_h(scaled)
-                };
+                *o = round(l_mac(l_mult(g0, self.r_buf[HIST + n]), g1, delayed[n]));
             }
         }
 
@@ -766,286 +577,225 @@ impl PostfilterFx {
         (out, d)
     }
 
-    /// The `1/[g_f·Â(z/γ_d)]` synthesis stage: all-pole filter over the
-    /// long-term-postfiltered residual, then the eq (85) `1/g_f`
-    /// normalisation; continuous output memory.
-    fn synthesis(
-        &mut self,
-        z: &[i16; L_SUBFR],
-        apd: &[i16; M],
-        gf_recip: (i16, i16),
-        gf32_q12: i32,
-    ) -> [i16; L_SUBFR] {
-        let (gf_m, gf_e) = gf_recip;
-        // Exact division by the Q12 gain: round(x·4096/g_f).
-        let exact_div = |x: i16| -> i16 {
-            if gf32_q12 <= 0 {
-                return x;
-            }
-            let num = i64::from(x) << 13; // ×2·4096 for the rounding add
-            let q = (num / i64::from(gf32_q12) + 1) >> 1;
-            q.clamp(-32768, 32767) as i16
-        };
-        let mut y_un = [0i16; L_SUBFR]; // un-normalised y(n)
-        let mut out = [0i16; L_SUBFR];
+    /// The `1/Â(z/γ_d)` all-pole section with the rounded Word16
+    /// recursion memory (continuous across subframes).
+    fn synthesis(&mut self, x: &[i16; L_SUBFR], apd: &[i16; M]) -> [i16; L_SUBFR] {
+        let mut y = [0i16; L_SUBFR];
         for n in 0..L_SUBFR {
-            // Optionally scale the input by 1/g_f first (the eq (84)
-            // leading factor commutes; the rounding point differs).
-            let zin = if gf32_q12 == 0 {
-                // No `1/g_f` (the §A.4.2.2 form).
-                z[n]
-            } else if self.lat.gf_before {
-                if self.lat.gf_exact_div {
-                    exact_div(z[n])
-                } else {
-                    round(l_shl(l_mult(z[n], gf_m), sub(gf_e, 18)))
-                }
-            } else {
-                z[n]
-            };
-            // y(n) = z(n) − Σ apd[i]·y(n−1−i), Q13 accumulator.
-            let mut acc = l_mult(zin, 4096);
+            let mut acc = l_mult(x[n], 4096);
             for (i, &cf) in apd.iter().enumerate() {
                 let yv = if n > i {
-                    y_un[n - 1 - i]
+                    y[n - 1 - i]
                 } else {
                     self.st_y[i - n]
                 };
-                acc = crate::fx::ops::l_msu(acc, cf, yv);
+                acc = l_msu(acc, cf, yv);
             }
-            let y = land_q13(acc, self.lat.syn_round);
-            y_un[n] = y;
-
-            // 1/g_f: y·m·2^(e−33) with l_mult’s doubling folded in
-            // (Q16 landing → round to Q0).
-            out[n] = if self.lat.gf_before || gf32_q12 == 0 {
-                y
-            } else if self.lat.gf_exact_div {
-                exact_div(y)
-            } else {
-                round(l_shl(l_mult(y, gf_m), sub(gf_e, 18)))
-            };
+            y[n] = round(l_shl(acc, 3));
         }
-        // Advance the continuous memory (most-recent at index 0).
         for i in 0..M {
-            self.st_y[i] = y_un[L_SUBFR - 1 - i];
+            self.st_y[i] = y[L_SUBFR - 1 - i];
         }
-        out
+        y
     }
 
-    /// §4.2.3 `H_t(z)`: `sf(n) = (1/g_t)·(t(n) + γ_t·k1'·t(n−1))` with
-    /// the eq (87) tilt factor from the Q12 impulse response.
-    fn tilt(&mut self, t: &[i16; L_SUBFR], h: &[i16]) -> [i16; L_SUBFR] {
-        // eq (87): k1' = −r_h(1)/r_h(0), wide-exact on the Q12 grid.
-        let mut rh0 = 0i64;
-        let mut rh1 = 0i64;
+    /// eq (87): `k′_1 = −r_h(1)/r_h(0)` on Q15 from the Q12 impulse
+    /// response — Word32 `L_mac` sums, the common `norm_l` of
+    /// `r_h(0)`, truncated high words, `div_s`.
+    fn tilt_factor(h: &[i16]) -> i16 {
+        let mut rh0 = 0i32;
+        let mut rh1 = 0i32;
         for j in 0..h.len() {
-            rh0 += i64::from(h[j]) * i64::from(h[j]);
+            rh0 = l_mac(rh0, h[j], h[j]);
             if j + 1 < h.len() {
-                rh1 += i64::from(h[j]) * i64::from(h[j + 1]);
+                rh1 = l_mac(rh1, h[j], h[j + 1]);
             }
         }
-        let k1_q15: i16 = if rh0 > 0 {
-            (-((rh1 << 15) / rh0)).clamp(-32768, 32767) as i16
+        let s = norm_l(rh0);
+        let r0 = extract_h(l_shl(rh0, s));
+        let r1 = extract_h(l_shl(rh1, s));
+        let a1 = abs_s(r1);
+        if r0 <= 0 || r0 < a1 {
+            return 0;
+        }
+        let k = div_s(a1, r0);
+        if r1 > 0 { negate(k) } else { k }
+    }
+
+    /// §4.2.3 `H_t(z)`: `sf(n) = (1/g_t)·(x(n) + γ_t·k′_1·x(n−1))`.
+    fn tilt(&mut self, x: &[i16; L_SUBFR], k1_q15: i16) -> [i16; L_SUBFR] {
+        let mu = if k1_q15 > 0 {
+            mult_r(k1_q15, GAMMA_T_POS_Q15)
         } else {
-            0
+            mult_r(k1_q15, GAMMA_T_NEG_Q15)
         };
-        let gamma_t = if k1_q15 < 0 {
-            GAMMA_T_NEG_Q15
-        } else {
-            GAMMA_T_POS_Q15
-        };
-        // c = γ_t·k1' (Q15); g_t = 1 − |c| (Word32, avoids the Q15
-        // Word16 ceiling at c = 0).
-        let c = mult(gamma_t, k1_q15);
-        let gt32 = l_sub(32768, i32::from(abs_s(c)));
-        let (gt_m, gt_e) = recip_norm(gt32);
+        // 1 − |γ_t·k′_1| on Q15 (saturating at 32767 for μ = 0), and
+        // 1/g_t on Q14 (positive k′_1) or Q11.
+        let d = add(i16::MAX, sub(1, abs_s(mu)));
+        let (dividend, out_shift): (i16, i16) = if k1_q15 > 0 { (16384, 15) } else { (2048, 12) };
+        let ga = div_s(dividend.min(d), d);
+        let mu_half = shr(mu, 1);
 
         let mut out = [0i16; L_SUBFR];
         for (n, o) in out.iter_mut().enumerate() {
-            let prev = if n == 0 { self.tilt_prev } else { t[n - 1] };
-            // t(n) + c·t(n−1) on Q16.
-            let acc = l_mac(l_deposit_h(t[n]), c, prev);
-            *o = if self.lat.tilt_exact_div {
-                // Exact rounded (t + c·t₋₁)/g_t on the Q16/Q15 grids.
-                let num = (i64::from(acc) << 15) / i64::from(gt32.max(1));
-                (((num >> 15) + 1) >> 1).clamp(-32768, 32767) as i16
-            } else {
-                // ×(1/g_t) = ×m·2^(e−30) keeping Q16: mpy is acc·m/2^15,
-                // so shift by e − 15.
-                let (hi, lo) = l_extract(acc);
-                round(l_shl(mpy_32_16(hi, lo, gt_m), sub(gt_e, 15)))
-            };
+            let prev = if n == 0 { self.tilt_prev } else { x[n - 1] };
+            let acc = l_mac(l_shl(l_deposit_l(x[n]), 15), mu_half, prev);
+            let v = extract_l(l_shr(l_add(acc, 0x4000), 15));
+            let scaled = l_add(l_mult(v, ga), i32::from(dividend));
+            *o = sature(l_shr(scaled, out_shift));
         }
-        self.tilt_prev = t[L_SUBFR - 1];
+        self.tilt_prev = x[L_SUBFR - 1];
         out
     }
 
     /// §A.4.2.3 `H_t(z) = 1 + γ_t·k′_1·z⁻¹` (no `1/g_t`), `k′_1` from
-    /// the length-22 impulse response (eq (A.14)), `γ_t = 0.8` when
-    /// `k′_1 < 0`, else `0`.
-    fn tilt_annex_a(&mut self, t: &[i16; L_SUBFR], h: &[i16]) -> [i16; L_SUBFR] {
-        let mut rh0 = 0i64;
-        let mut rh1 = 0i64;
+    /// the un-normalised high words of the length-22 impulse-response
+    /// autocorrelation (eq (A.14)), `γ_t = 0.8` when `r_h(1) > 0`,
+    /// else no tilt.
+    fn tilt_annex_a(&mut self, x: &[i16; L_SUBFR], h: &[i16]) -> [i16; L_SUBFR] {
+        let mut rh0 = 0i32;
+        let mut rh1 = 0i32;
         for j in 0..h.len() {
-            rh0 += i64::from(h[j]) * i64::from(h[j]);
+            rh0 = l_mac(rh0, h[j], h[j]);
             if j + 1 < h.len() {
-                rh1 += i64::from(h[j]) * i64::from(h[j + 1]);
+                rh1 = l_mac(rh1, h[j], h[j + 1]);
             }
         }
-        let k1_q15: i16 = if rh0 > 0 {
-            (-((rh1 << 15) / rh0)).clamp(-32768, 32767) as i16
-        } else {
+        let r0 = extract_h(rh0);
+        let r1 = extract_h(rh1);
+        let coef = if r1 <= 0 || r0 <= 0 {
             0
-        };
-        let c = if k1_q15 < 0 {
-            mult(GAMMA_T_ANNEX_A_Q15, k1_q15)
         } else {
-            0
+            let num = mult(r1, GAMMA_T_ANNEX_A_Q15);
+            div_s(num.min(r0), r0)
         };
         let mut out = [0i16; L_SUBFR];
         for (n, o) in out.iter_mut().enumerate() {
-            let prev = if n == 0 { self.tilt_prev } else { t[n - 1] };
-            *o = round(l_mac(l_deposit_h(t[n]), c, prev));
+            let prev = if n == 0 { self.tilt_prev } else { x[n - 1] };
+            *o = sub(x[n], mult(coef, prev));
         }
-        self.tilt_prev = t[L_SUBFR - 1];
+        self.tilt_prev = x[L_SUBFR - 1];
         out
     }
 
-    /// §4.2.4 adaptive gain control (eqs (88)–(90)) on the Q12 gain
-    /// grid; the eq (88) ratio is held at the running gain on a silent
-    /// postfiltered subframe.
-    fn agc(&mut self, s_hat: &[i16; L_SUBFR], sf: &[i16; L_SUBFR]) -> [i16; L_SUBFR] {
-        let mut num = 0i32;
-        let mut den = 0i32;
-        for n in 0..L_SUBFR {
-            num = l_add(num, i32::from(abs_s(s_hat[n])));
-            den = l_add(den, i32::from(abs_s(sf[n])));
-        }
-        let (num, den) = if self.lat.agc_energy || self.annex_a {
-            let mut en = 0i64;
-            let mut ed = 0i64;
-            for n in 0..L_SUBFR {
-                en += i64::from(s_hat[n]) * i64::from(s_hat[n]);
-                ed += i64::from(sf[n]) * i64::from(sf[n]);
-            }
-            // Scale both to a common Word32 grid preserving the ratio.
-            let sh = (64 - en.max(ed).leading_zeros() as i32 - 30).max(0);
-            ((en >> sh) as i32, (ed >> sh) as i32)
+    /// eq (88): `G = Σ|ŝ|/Σ|sf|` on Q14 from the two Word32 sums
+    /// (`s_in > 0`, `s_out > 0`).
+    fn agc_target_q14(s_in: i32, s_out: i32) -> i16 {
+        let e_in = norm_l(s_in);
+        let m_in = extract_h(l_shl(s_in, e_in));
+        let e_out = norm_l(s_out);
+        let m_out = extract_h(l_shl(s_out, e_out));
+        let mut k = add(sub(e_in, e_out), 1);
+        let q = if m_in < m_out {
+            div_s(m_in, m_out)
         } else {
-            (num, den)
+            k = sub(k, 1);
+            add(shr(div_s(sub(m_in, m_out), m_out), 1), 16384)
         };
-        let shift = self.lat.agc_shift;
-        let (num, den) = if self.lat.agc_lag {
-            let prev = self.agc_prev_sums;
-            self.agc_prev_sums = (num, den);
-            prev
-        } else {
-            (num, den)
-        };
-        let g_target_q12: i16 = if den > 0 {
-            let ratio = f64::from(num) / f64::from(den);
-            let ratio = if self.lat.agc_energy || self.annex_a {
-                ratio.sqrt()
-            } else {
-                ratio
-            };
-            let ratio = if self.lat.agc_sqrt {
-                ratio.sqrt()
-            } else {
-                ratio
-            };
-            ((ratio * ((1i64 << (12 + shift)) as f64)) as i64).min(32767) as i16
-        } else {
-            self.agc_q12
-        };
+        shr(q, k)
+    }
 
-        let mut out = [0i16; L_SUBFR];
-        for (n, o) in out.iter_mut().enumerate() {
-            let x2 = i16::from(self.lat.agc_x2);
-            let (pole, target_w) = if self.annex_a {
-                (
-                    self.lat.agc_pole_a_q15,
-                    add(sub(32767, self.lat.agc_pole_a_q15), 1),
-                )
-            } else if self.lat.agc_pole_q15 == 0 {
-                (AGC_PREV_Q15, AGC_TARGET_Q15)
-            } else {
-                // Complementary pair summing to exactly 2^15.
-                (
-                    self.lat.agc_pole_q15,
-                    add(sub(32767, self.lat.agc_pole_q15), 1),
-                )
-            };
-            // eq (90) recursion on a Word32 accumulator, landed by
-            // rounding (a truncating Word16 pair drifts one Q12 LSB
-            // per sample at unit gain — the reference's stationary
-            // gain holds to 0.05 % across subframes).
-            let recurse = |g: i16| -> i16 { round(l_mac(l_mult(pole, g), target_w, g_target_q12)) };
-            if self.lat.agc_apply_first {
-                *o = round(l_shl(l_mult(sf[n], self.agc_q12), 3 - shift + x2));
-                self.agc_q12 = recurse(self.agc_q12);
-            } else {
-                self.agc_q12 = recurse(self.agc_q12);
-                // eq (89): sf′(n) = g(n)·sf(n) — product to Q16, round
-                // (or to Q17 → Q1 when the ×2 upscale is folded in).
-                *o = round(l_shl(l_mult(sf[n], self.agc_q12), 3 - shift + x2));
-            }
+    /// §4.2.4 adaptive gain control (eqs (88)–(90)) on the Q14 gain
+    /// grid; returns `sf′(n)` and the per-sample gain trajectory.
+    fn agc(
+        &mut self,
+        s_hat: &[i16; L_SUBFR],
+        sf: &[i16; L_SUBFR],
+    ) -> ([i16; L_SUBFR], [i16; L_SUBFR]) {
+        let mut s_in = 0i32;
+        let mut s_out = 0i32;
+        for n in 0..L_SUBFR {
+            s_in = l_add(s_in, l_abs(l_deposit_l(s_hat[n])));
+            s_out = l_add(s_out, l_abs(l_deposit_l(sf[n])));
         }
-        out
+        if s_out == 0 {
+            // Silent postfiltered subframe: gain state to 0, no scaling.
+            self.agc_gain = 0;
+            return (*sf, [0; L_SUBFR]);
+        }
+        let g_inc = if s_in == 0 {
+            0
+        } else {
+            mult_r(Self::agc_target_q14(s_in, s_out), AGC_TARGET_Q15)
+        };
+        let mut out = [0i16; L_SUBFR];
+        let mut traj = [0i16; L_SUBFR];
+        let mut g = self.agc_gain;
+        for n in 0..L_SUBFR {
+            g = add(mult_r(AGC_PREV_Q15, g), g_inc);
+            traj[n] = g;
+            out[n] = round(l_shl(l_mult(g, sf[n]), 1));
+        }
+        self.agc_gain = g;
+        (out, traj)
+    }
+
+    /// §A.4.2.4 adaptive gain control (eq (A.15)) on the Q12 gain grid.
+    fn agc_annex_a(
+        &mut self,
+        s_hat: &[i16; L_SUBFR],
+        sf: &[i16; L_SUBFR],
+    ) -> ([i16; L_SUBFR], [i16; L_SUBFR]) {
+        let mut e_out = 0i32;
+        let mut e_in = 0i32;
+        for n in 0..L_SUBFR {
+            let o = shr(sf[n], 2);
+            e_out = l_mac(e_out, o, o);
+            let i = shr(s_hat[n], 2);
+            e_in = l_mac(e_in, i, i);
+        }
+        if e_out == 0 {
+            // Zero quarter-scale output energy: gain state to 0, the
+            // subframe passes unscaled.
+            self.agc_gain = 0;
+            return (*sf, [0; L_SUBFR]);
+        }
+        let g_inc = if e_in == 0 {
+            0
+        } else {
+            let exp_out = sub(norm_l(e_out), 1);
+            let m_out = round(l_shl(e_out, exp_out));
+            let exp_in = norm_l(e_in);
+            let m_in = round(l_shl(e_in, exp_in));
+            // E_out/E_in on Q22, its inverse square root on Q19, G on Q12.
+            let q = div_s(m_out.min(m_in), m_in);
+            let ratio = l_shr(l_shl(l_deposit_l(q), 7), sub(exp_out, exp_in));
+            let g = round(l_shl(inv_sqrt(ratio), 9));
+            mult(g, AGC_TARGET_ANNEX_A_Q15)
+        };
+        let mut out = [0i16; L_SUBFR];
+        let mut traj = [0i16; L_SUBFR];
+        let mut g = self.agc_gain;
+        for n in 0..L_SUBFR {
+            g = add(mult(g, AGC_PREV_ANNEX_A_Q15), g_inc);
+            traj[n] = g;
+            out[n] = extract_h(l_shl(l_mult(sf[n], g), 3));
+        }
+        self.agc_gain = g;
+        (out, traj)
     }
 
     /// §4.2.5 output high-pass (eq (91), staged Q13 coefficients) with
-    /// the ×2 upscale folded into the output rounding; the feedback
-    /// memory keeps the unrounded Word32 recursion value.
+    /// the ×2 upscale folded into the accumulator scale; the feedback
+    /// memory keeps the unrounded Word32 recursion value and the
+    /// feedback products are carried in full (each landed on Q15 and
+    /// realigned).
     fn high_pass(&mut self, x: &[i16; L_SUBFR]) -> [i16; L_SUBFR] {
         let b = &HPF_PREPROC_100HZ_B_Q13;
         let a = &HPF_PREPROC_100HZ_A_Q13;
         let mut out = [0i16; L_SUBFR];
         for (n, o) in out.iter_mut().enumerate() {
-            // Q14 accumulator: b (Q13) × x (Q0) doubled.
-            let mut acc = l_mult(x[n], b[0]);
-            acc = l_mac(acc, self.hp_x[0], b[1]);
-            acc = l_mac(acc, self.hp_x[1], b[2]);
-            if self.lat.hp_wide {
-                // Feedback: a (Q13) × y (Q14 Word32) as an EXACT
-                // double-precision product landed on Q14 — corpus-
-                // pinned (round 452): with the AGC output on the Q1
-                // grid, the whole frame-0 subframe of all six clean
-                // vectors is byte-exact only when the low word of the
-                // feedback product is carried in full; the (hi, lo)
-                // split with the low product truncated to Q15 ends the
-                // filter's decay tail one sample late (FIXED n = 16,
-                // ALGTHM/PITCH n = 22), and rounding that low product
-                // ends it one sample early.
-                // Each product lands on Q15 (`>> 15`, the full 48-bit
-                // product) and is then realigned by `<< 2`.
-                let fb1 = ((i64::from(self.hp_y[0]) * i64::from(a[1])) >> 15) << 2;
-                let fb2 = ((i64::from(self.hp_y[1]) * i64::from(a[2])) >> 15) << 2;
-                acc = l_add(
-                    acc,
-                    fb1.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-                );
-                acc = l_add(
-                    acc,
-                    fb2.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-                );
-                self.hp_y[1] = self.hp_y[0];
-                self.hp_y[0] = acc;
-            } else {
-                // Word16-rounded feedback on the Q0 y grid.
-                acc = l_mac(acc, extract_h(l_shl(self.hp_y[0], 2)), a[1]);
-                acc = l_mac(acc, extract_h(l_shl(self.hp_y[1], 2)), a[2]);
-                self.hp_y[1] = self.hp_y[0];
-                // Store as Q14 of the rounded Q0 value for grid unity.
-                self.hp_y[0] = l_shl(l_deposit_l(round(l_shl(acc, 2))), 14);
-            }
+            let ff = i64::from(x[n]) * i64::from(b[0])
+                + i64::from(self.hp_x[0]) * i64::from(b[1])
+                + i64::from(self.hp_x[1]) * i64::from(b[2]);
+            let fb1 = ((i64::from(self.hp_y[0]) * i64::from(a[1])) >> 15) << 2;
+            let fb2 = ((i64::from(self.hp_y[1]) * i64::from(a[2])) >> 15) << 2;
+            let acc = crate::fx::ops::sature32((ff << 2) + fb1 + fb2);
+            self.hp_y[1] = self.hp_y[0];
+            self.hp_y[0] = acc;
             self.hp_x[1] = self.hp_x[0];
             self.hp_x[0] = x[n];
-            // ×2 upscale: acc = y·2^14 → 2y·2^16 = acc·2^3, rounded —
-            // unless the input already carried the ×2 (Q1 grid), in
-            // which case the accumulator is 2y·2^14 and lands by 2^2.
-            *o = round(l_shl(acc, if self.lat.agc_x2 { 2 } else { 3 }));
+            *o = round(l_shl(acc, 2));
         }
         out
     }
@@ -1101,70 +851,151 @@ impl PostfilterFx {
         for i in 0..M {
             self.s_hist[i] = s[L_SUBFR - 1 - i];
         }
+        let residual: [i16; L_SUBFR] = std::array::from_fn(|n| self.r_buf[HIST + n]);
 
         // §4.2.1 H_p(z) on the residual.
-        let (hp, decision) = self.long_term(int_t1);
+        let (lt, decision) = self.long_term(int_t1);
+        let mut t = self.after_long_term(s, &apn, &apd, &lt, None);
+        t.decision = decision;
+        t.residual = residual;
+        t
+    }
 
+    /// Everything downstream of the §4.2.1 output: `1/g_f`, the
+    /// all-pole section, tilt compensation, AGC and the output
+    /// high-pass (main body), or tilt → all-pole → AGC → high-pass
+    /// (Annex A). `all_pole_out` substitutes a given all-pole output
+    /// for the computed one (stage replay; the recursion memory is
+    /// then left untouched).
+    fn after_long_term(
+        &mut self,
+        s: &[i16; L_SUBFR],
+        apn: &[i16; M],
+        apd: &[i16; M],
+        lt: &[i16; L_SUBFR],
+        all_pole_out: Option<&[i16; L_SUBFR]>,
+    ) -> SubframeTraceFx {
+        let decision = LtDecisionFx::off(0);
+        let residual = [0i16; L_SUBFR];
+        let mut impulse = [0i16; ANNEX_A_IMPULSE_LEN];
         if self.annex_a {
             // §A.4.2: tilt compensation BEFORE the 1/Â(z/γ_d) synthesis,
             // no g_f / g_t.
-            let h40 = impulse_response_q12_n(&apn, &apd);
-            let ht = self.tilt_annex_a(&hp, &h40[..ANNEX_A_IMPULSE_LEN]);
-            let hf = self.synthesis(&ht, &apd, (0, 0), 0);
-            let agc_gain_in = self.agc_q12;
-            let agc = self.agc(s, &hf);
+            impulse_response_into(apn, apd, &mut impulse);
+            let tilted = self.tilt_annex_a(lt, &impulse);
+            let sf = match all_pole_out {
+                Some(y) => *y,
+                None => self.synthesis(&tilted, apd),
+            };
+            let agc_gain_in = self.agc_gain;
+            let (agc, gain) = self.agc_annex_a(s, &sf);
             let output = self.high_pass(&agc);
             return SubframeTraceFx {
                 decision,
-                long_term: hp,
-                impulse: core::array::from_fn(|n| h40[n]),
+                residual,
+                long_term: *lt,
+                impulse,
                 gf_q12: 4096,
-                short_term: ht,
-                tilt: hf,
-                agc_gain_in_q12: agc_gain_in,
-                agc_gain_out_q12: self.agc_q12,
+                gf_scaled: tilted,
+                short_term: tilted,
+                tilt: sf,
+                agc_gain_in,
+                agc_gain_out: self.agc_gain,
+                gain,
                 agc,
                 output,
             };
         }
 
-        // 1/[g_f·Â(z/γ_d)] synthesis (impulse response shared with
-        // §4.2.3).
-        let h40 = impulse_response_q12_n(&apn, &apd);
-        let len = if self.lat.gf_len == 0 {
-            GF_IMPULSE_LEN
-        } else {
-            usize::from(self.lat.gf_len).min(40)
-        };
-        let h = &h40[..len];
+        // eq (85): g_f over the 20-tap impulse response, Q12 sum
+        // truncated to Q10; 1/g_f scales the all-pole input only when
+        // g_f > 1.
+        impulse_response_into(apn, apd, &mut impulse[..GF_IMPULSE_LEN]);
+        let h = &impulse[..GF_IMPULSE_LEN];
         let mut gf = 0i32;
         for &hv in h {
-            gf = l_add(gf, i32::from(abs_s(hv)));
+            gf = l_add(gf, l_deposit_l(abs_s(hv)));
         }
-        let gf_recip = if gf > 0 { recip_norm(gf) } else { (16384, 33) };
-        let hf = self.synthesis(&hp, &apd, gf_recip, gf);
+        let gf_q10 = extract_h(l_shl(gf, 14));
+        let gf_scaled: [i16; L_SUBFR] = if gf_q10 > 1024 {
+            let inv = div_s(1024, gf_q10);
+            std::array::from_fn(|n| mult_r(lt[n], inv))
+        } else {
+            *lt
+        };
+        let hf = match all_pole_out {
+            Some(y) => *y,
+            None => self.synthesis(&gf_scaled, apd),
+        };
 
         // §4.2.3 H_t(z).
-        let ht = self.tilt(&hf, h);
+        let k1 = Self::tilt_factor(h);
+        let sf = self.tilt(&hf, k1);
 
         // §4.2.4 AGC against the reconstructed speech ŝ(n).
-        let agc_gain_in = self.agc_q12;
-        let agc = self.agc(s, &ht);
+        let agc_gain_in = self.agc_gain;
+        let (agc, gain) = self.agc(s, &sf);
 
         // §4.2.5 output high-pass + ×2.
         let output = self.high_pass(&agc);
         SubframeTraceFx {
             decision,
-            long_term: hp,
-            impulse: core::array::from_fn(|n| h40[n]),
+            residual,
+            long_term: *lt,
+            impulse,
             gf_q12: gf,
+            gf_scaled,
             short_term: hf,
-            tilt: ht,
-            agc_gain_in_q12: agc_gain_in,
-            agc_gain_out_q12: self.agc_q12,
+            tilt: sf,
+            agc_gain_in,
+            agc_gain_out: self.agc_gain,
+            gain,
             agc,
             output,
         }
+    }
+
+    /// Stage replay: seed the inter-subframe memories from known
+    /// values — the last ten `ŝ` samples (most recent last), the
+    /// residual history (most recent last, any length), the last ten
+    /// all-pole outputs (most recent last), the tilt input tap and the
+    /// AGC gain state. The §4.2.5 memory is not seeded.
+    #[doc(hidden)]
+    pub fn replay_seed(
+        &mut self,
+        s_prev: &[i16],
+        r_hist: &[i16],
+        y_prev: &[i16],
+        tilt_prev: i16,
+        agc_gain: i16,
+    ) {
+        for (i, v) in s_prev.iter().rev().take(M).enumerate() {
+            self.s_hist[i] = *v;
+        }
+        let n = r_hist.len().min(HIST);
+        self.r_buf[..HIST].fill(0);
+        self.r_buf[HIST - n..HIST].copy_from_slice(&r_hist[r_hist.len() - n..]);
+        for (i, v) in y_prev.iter().rev().take(M).enumerate() {
+            self.st_y[i] = *v;
+        }
+        self.tilt_prev = tilt_prev;
+        self.agc_gain = agc_gain;
+    }
+
+    /// Stage replay: run the stages downstream of a **given** §4.2.1
+    /// output (and optionally a given all-pole output) for one
+    /// subframe. The returned trace carries no decision / residual.
+    #[doc(hidden)]
+    pub fn replay_after_long_term(
+        &mut self,
+        s: &[i16; L_SUBFR],
+        a_q12: &[i16; M + 1],
+        lt: &[i16; L_SUBFR],
+        all_pole_out: Option<&[i16; L_SUBFR]>,
+    ) -> SubframeTraceFx {
+        let apn = weight_az(a_q12, GAMMA_N_Q15);
+        let apd = weight_az(a_q12, GAMMA_D_Q15);
+        self.after_long_term(s, &apn, &apd, lt, all_pole_out)
     }
 }
 
@@ -1173,16 +1004,34 @@ impl PostfilterFx {
 /// [`PostfilterFx::process_subframe_traced`]).
 #[doc(hidden)]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SubframeTraceFx {
+    /// §4.2.1 decision.
     pub decision: LtDecisionFx,
+    /// eq (79) residual `r̂(n)`.
+    pub residual: [i16; L_SUBFR],
+    /// §4.2.1 output.
     pub long_term: [i16; L_SUBFR],
-    pub impulse: [i16; GF_IMPULSE_LEN],
+    /// Impulse response `h_f(n)` on Q12 (20 taps main body, 22 Annex A).
+    pub impulse: [i16; ANNEX_A_IMPULSE_LEN],
+    /// eq (85) `Σ|h_f|` on Q12.
     pub gf_q12: i32,
+    /// All-pole input: the §4.2.1 output after `1/g_f` (main body) or
+    /// after the §A.4.2.3 tilt filter (Annex A).
+    pub gf_scaled: [i16; L_SUBFR],
+    /// `H_f(z)` output (main body); the tilt output for Annex A.
     pub short_term: [i16; L_SUBFR],
+    /// AGC input `sf(n)`.
     pub tilt: [i16; L_SUBFR],
-    pub agc_gain_in_q12: i16,
-    pub agc_gain_out_q12: i16,
+    /// `g(−1)` entering the subframe (Q14 main body, Q12 Annex A).
+    pub agc_gain_in: i16,
+    /// `g(39)` leaving the subframe.
+    pub agc_gain_out: i16,
+    /// Per-sample gain trajectory `g(n)`.
+    pub gain: [i16; L_SUBFR],
+    /// eq (89) output `sf′(n)`.
     pub agc: [i16; L_SUBFR],
+    /// §4.2.5 output PCM.
     pub output: [i16; L_SUBFR],
 }
 
@@ -1274,40 +1123,97 @@ mod tests {
         }
     }
 
-    /// The normalised reciprocal helper: m·2^(e−45) reproduces 1/x
-    /// within the div_s truncation for a spread of magnitudes.
+    /// The γ-power ladders are the recursively rounded ones the staged
+    /// traces print (not exact powers: exact 0.55⁵·2¹⁵ = 1650.6).
     #[test]
-    fn recip_norm_inverts() {
-        for &x in &[1i32, 5, 4096, 8192, 12345, 1 << 20, 0x7fff_0000] {
-            let (m, e) = recip_norm(x);
-            let got = f64::from(m) * (f64::from(e) - 45.0).exp2();
-            let expect = 1.0 / f64::from(x);
-            assert!(
-                ((got - expect) / expect).abs() < 1e-3,
-                "x={x}: {got} vs {expect}"
-            );
-        }
+    fn gamma_ladders_match_staged_schedule() {
+        let mut a = [4096i16; M + 1];
+        a[0] = 4096;
+        // â_i = 1.0 (Q12) makes round(L_mult(â_i, γ^i)) = round(γ^i / 8).
+        let ladder = |g: i16| -> [i16; M] {
+            let mut f = g;
+            std::array::from_fn(|j| {
+                let v = f;
+                if j + 1 < M {
+                    f = round(l_mult(f, g));
+                }
+                v
+            })
+        };
+        assert_eq!(
+            ladder(GAMMA_N_Q15),
+            [18022, 9912, 5451, 2998, 1649, 907, 499, 274, 151, 83]
+        );
+        assert_eq!(
+            ladder(GAMMA_D_Q15),
+            [22938, 16057, 11240, 7868, 5508, 3856, 2699, 1889, 1322, 925]
+        );
+        let w = weight_az(&a, GAMMA_N_Q15);
+        assert_eq!(w[0], round(l_mult(4096, 18022)));
+    }
+
+    /// eq (88) worked example from the staged traces: Σ|ŝ| = 106288,
+    /// Σ|sf| = 82470 → G = 21116 (Q14); and 113123 / 100407 → 18459.
+    #[test]
+    fn agc_target_worked_examples() {
+        assert_eq!(PostfilterFx::agc_target_q14(106_288, 82_470), 21116);
+        assert_eq!(PostfilterFx::agc_target_q14(113_123, 100_407), 18459);
+        assert_eq!(PostfilterFx::agc_target_q14(2, 2), 16384);
+    }
+
+    /// Unit gain is an exact fixed point of the eq (90) recursion on
+    /// the Q14 grid with the 32358/410 pair.
+    #[test]
+    fn agc_unit_gain_is_a_fixed_point() {
+        let inc = mult_r(AGC_UNITY_Q14, AGC_TARGET_Q15);
+        assert_eq!(add(mult_r(AGC_PREV_Q15, AGC_UNITY_Q14), inc), AGC_UNITY_Q14);
     }
 
     /// Silence propagates: an all-zero subframe with any stable LP set
-    /// produces all-zero output and holds the AGC gain.
+    /// produces all-zero output; the silent postfiltered subframe
+    /// resets the gain state to 0 (§4.2.4 degenerate case).
     #[test]
     fn silence_stays_silent() {
         let mut a = [0i16; M + 1];
         a[0] = 4096;
         a[1] = -2048;
         let mut pf = PostfilterFx::new();
-        let g0 = pf.agc_q12;
         let (out, _) = pf.process_subframe(&[0; L_SUBFR], &a, 50);
         assert_eq!(out, [0i16; L_SUBFR]);
-        // The eq (90) Q15-truncating recursion may drift the held gain
-        // by a few LSBs across a silent subframe; it must not run away.
-        assert!(
-            (i32::from(pf.agc_q12) - i32::from(g0)).abs() <= 4,
-            "AGC drifted {} → {}",
-            g0,
-            pf.agc_q12
-        );
+        assert_eq!(pf.agc_gain, 0);
+    }
+
+    /// Hostile input: full-scale alternating samples with an unstable
+    /// coefficient set must not panic in either cascade.
+    #[test]
+    fn hostile_input_is_panic_free() {
+        for annex_a in [false, true] {
+            let mut pf = if annex_a {
+                PostfilterFx::new_annex_a()
+            } else {
+                PostfilterFx::new()
+            };
+            let mut a = [i16::MIN; M + 1];
+            a[0] = 4096;
+            for k in 0..64usize {
+                let s: [i16; L_SUBFR] = std::array::from_fn(|n| match (n + k) % 4 {
+                    0 => i16::MAX,
+                    1 => i16::MIN,
+                    2 => (k as i16).wrapping_mul(977),
+                    _ => 0,
+                });
+                if k % 3 == 0 {
+                    a = std::array::from_fn(|i| {
+                        if i == 0 {
+                            4096
+                        } else {
+                            ((i * 7919 + k * 104_729) as i16).wrapping_mul(31)
+                        }
+                    });
+                }
+                let _ = pf.process_subframe(&s, &a, 1 + (k * 37) % 400);
+            }
+        }
     }
 
     /// Determinism: two cascades fed the same stream stay in lockstep.
@@ -1348,6 +1254,7 @@ mod tests {
             );
             assert!(d.frac < POSTFILTER_FRAC_RES);
             assert!(d.gain_q15 >= 0);
+            assert!(d.undelayed_q15 >= LT_UNDELAYED_MIN_Q15);
         }
     }
 }

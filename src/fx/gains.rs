@@ -1,51 +1,51 @@
 //! §3.9.1 / §4.1.5 fixed-point gain decode: the 4th-order MA gain
-//! predictor on the Q10 log grid, the eq (71) predicted gain through
+//! predictor on the Q10 dB grid, the eq (71) predicted gain through
 //! the clause-5 [`crate::fx::dsp::log2`] / [`crate::fx::dsp::pow2`]
 //! functions, and the eq (73)/(74) codebook reconstruction on the
 //! integer grid (`ĝ_p` Q14, `ĝ_c` Q1).
 //!
-//! ## Number grids
+//! ## Schedule
 //!
-//! - **Predictor memory** `Û^(m−k)` — Q10 dB values; the clause-4.3
-//!   start-up value −14 dB is exactly `−14336`.
-//! - **MA coefficients** — the staged Q13 `[b1 b2 b3 b4]`; the eq (69)
-//!   dot product lands on Q24.
-//! - **`ĝ_p`** — Q14, the direct eq (73) column sum (the GA/GB `g_p`
-//!   columns are Q14).
-//! - **`γ̂`** — the eq (74) column sum on the black-box-pinned 2^13
-//!   grid (see [`crate::gain_reconstruct`]).
-//! - **`ĝ_c`** — Q1 (a Word16 up to ≈ 16383.5), the grid the eq (75)
-//!   excitation build multiplies against the Q13 codevector.
+//! The prose pins the *values* (eqs (66)–(74), Ē = 30 dB, Table 9
+//! init) but not the operator schedule. The schedule below is fitted
+//! against the **reference excitation recovered from the staged
+//! traces** (the staged `ŝ(n)` columns of consecutive sub-frames,
+//! inverted through the eq (77) synthesis with the staged `â_i`,
+//! give the reference `u(n)` exactly; at the pulse positions
+//! `u(n) − ĝ_p·v(n)` brackets the reference `ĝ_c` to a fraction of a
+//! Q1 step):
 //!
-//! ## The eq (71) exponent identity
+//! 1. eq (66): `Σc²` over the Q13 codevector in a Word32 `L_mac`
+//!    accumulator (Q27), then `log2`.
+//! 2. `−10·log10(Σc²)` on Q14 as `mpy_32_16(e, f, −24660)`
+//!    (`10·log10(2)` on Q13), plus the folded constant
+//!    `Ē + 10·log10(40) + 27·10·log10(2) ≈ 127.3 dB` on Q14, shifted
+//!    to Q24.
+//! 3. eq (69): `L_mac` of the staged Q13 MA coefficients against the
+//!    Q10 memory lands on the same Q24 grid; the predicted energy is
+//!    **truncated to Q8 dB**.
+//! 4. eq (71): the dB → base-2 exponent conversion multiplies by
+//!    **`0.166` on Q15 (5439)** — the three-digit decimal, not the
+//!    exact `log2(10)/20 = 0.16610` (a 0.07 % exponent difference
+//!    that is level dependent: at a 55 dB prediction it moves `g′_c`
+//!    by 0.42 %, which is the whole decode-side excitation mismatch
+//!    the exact constant produced on the staged sub-frames). The Q16
+//!    exponent splits into the integer / Q15-fraction pair `pow2`
+//!    consumes; the mantissa is `pow2(14, frac)`.
+//! 5. eq (74): the `γ̂` column sum is halved onto a Word16 (Q12),
+//!    multiplied against the mantissa and **truncated** onto Q1.
+//! 6. eq (72): `Û = 20·log10(γ̂)` truncated onto Q10.
 //!
-//! `g'_c = 10^((Ẽ + Ē − E)/20)` with `E = 10·log10(Σc²/40)` reduces on
-//! the base-2 grid to
-//!
-//! ```text
-//!   g'_c = 2^( K·Ẽ + C − log2(Σc²)/2 )
-//!   K = log2(10)/20 (Q15 literal 5443)
-//!   C = (27 + log2(40))/2 + K·30 − 27/2 … folded with the Q27 energy
-//! ```
-//!
-//! because `K · 10·log10(2) = 1/2` exactly — the fixed-codebook energy
-//! enters the exponent with weight −1/2 (a square root). The Q27
-//! codevector energy accumulator (Q13 codevector, doubled products)
-//! folds its `2^27` scale into the constant. The constant is kept in
-//! Q24; the composed exponent is split into the integer/Q15-fraction
-//! pair [`crate::fx::dsp::pow2`] consumes.
-//!
-//! The prose pins the *values* of every quantity here (eqs (66)–(74),
-//! Ē = 30 dB, Table 9 init); the reference's exact operator schedule
-//! inside this computation is not published, so this module's schedule
-//! is the crate's own composition of the Table 11 operators and is
-//! validated numerically against the float spec transcription and
-//! end-to-end against the conformance corpus.
+//! With this schedule the excitation of the nine staged consecutive
+//! PITCH sub-frames reproduces sample-exactly except where `ĝ_c`
+//! lands one Q1 step high (two of nine sub-frames) — the residual is
+//! a sub-0.1 % truncation inside steps 3–5 that the staged material
+//! does not pin (recorded docs ask: a trace of the gain-decode
+//! intermediates).
 
 use crate::fx::dsp::{l_extract, log2, mpy_32_16, pow2};
 use crate::fx::ops::{
-    add, extract_h, extract_l, l_add, l_deposit_l, l_mac, l_shl, l_shr, l_shr_r, l_sub, mult,
-    round, sub,
+    add, extract_h, extract_l, l_add, l_deposit_l, l_mac, l_mult, l_shl, l_shr, mult, sature, sub,
 };
 use crate::tables::{GAIN_QUANT_MA_PREDICTOR_Q13, MA_NP, gain_ga_entry, gain_gb_entry};
 use crate::tables::{GAIN_VQ_COL_GC, GAIN_VQ_COL_GP};
@@ -56,54 +56,39 @@ pub const L_SUBFR: usize = 40;
 /// Clause-4.3 / Table 9 predictor start-up value: −14 dB on Q10.
 pub const PAST_QUA_EN_INIT_Q10: i16 = -14336;
 
-/// `log2(10)/20` on the Q15 grid.
-const K_LOG2_PER_DB_Q15: i16 = 5443;
+/// The eq (71) dB → base-2 exponent factor `0.166` on Q15 (the
+/// three-digit decimal of `log2(10)/20`; see the module doc).
+pub const DB_TO_LOG2_Q15: i16 = 5439;
 
-/// `(27 + log2(40))/2 + 30·log2(10)/20` on the Q24 grid — the folded
-/// eq (71) constant for a Q27 energy accumulator (see module doc).
-const EXP_CONST_Q24: i32 = 354_735_042;
+/// `10·log10(2)` on the Q13 grid — converts a base-2 log to dB
+/// (energy form).
+pub const DB_PER_LOG2_ENERGY_Q13: i16 = 24_660;
 
-/// `20·log10(2)` on the Q12 grid — converts a base-2 log to dB.
+/// `Ē + 10·log10(40) + 27·10·log10(2)` on Q14 — the folded eq (71)
+/// constant for a Q27 energy accumulator (`= L_mult(32588, 32)`).
+pub const ENERGY_CONST_Q14: i32 = 2_085_632;
+
+/// `20·log10(2)` on the Q12 grid — converts a base-2 log to dB
+/// (amplitude form).
 const DB_PER_LOG2_Q12: i16 = 24_660;
 
-/// Black-box latitude of the eq (74)/(72) γ̂ grids: per-codebook
-/// binary-scale offsets relative to the 2^13 base, for the ĝ_c
-/// reconstruction and the Û memory push separately. All-zero is the
-/// round-410 uniform-2^13 pin; the residual-divergence hunt sweeps
-/// this space against the conformance corpus.
+/// Sweep hooks of the §3.9.1 schedule (black-box probes; the defaults
+/// are the fitted schedule of the module doc).
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GainGridFx {
-    /// Extra right-shift of the GA γ column in the ĝ_c reconstruction.
-    pub recon_ga: i16,
-    /// Extra right-shift of the GB γ column in the ĝ_c reconstruction.
-    pub recon_gb: i16,
-    /// Extra right-shift of the GA γ column in the eq (72) Û push.
-    pub push_ga: i16,
-    /// Extra right-shift of the GB γ column in the eq (72) Û push.
-    pub push_gb: i16,
-    /// Land `ĝ_c` on Q1 by truncation (`true`) instead of rounding.
-    pub code_trunc: bool,
-    /// Land `ĝ_c` on the Q0 grid (then carried as an even Q1 value).
-    pub code_q0: bool,
+    /// Folded energy constant on Q14 dB.
+    pub energy_const_q14: i32,
+    /// dB → base-2 exponent factor on Q15.
+    pub db_to_log2_q15: i16,
 }
 
 impl Default for GainGridFx {
     fn default() -> Self {
         Self {
-            recon_ga: 0,
-            recon_gb: 0,
-            push_ga: 0,
-            push_gb: 0,
-            // Corpus-pinned (round 452): ĝ_c lands on Q1 by
-            // TRUNCATION. LSP frame 0 subframe 2 (ĝ_c ≈ 0.98 by the
-            // float oracle, 1.96 on Q1) reconstructs to silence in
-            // the reference, which only a truncated 1 (= 0.5) with the
-            // eq (75) ties-toward-zero landing produces; rounding to 2
-            // puts four unit pulses in the output. Whole-corpus exact
-            // share rises with it (sum over 12 clean vectors 101 → 107).
-            code_trunc: true,
-            code_q0: false,
+            energy_const_q14: ENERGY_CONST_Q14,
+            db_to_log2_q15: DB_TO_LOG2_Q15,
         }
     }
 }
@@ -128,7 +113,7 @@ pub struct DecodedGainsFx {
 
 /// The eq (71) predicted gain `g'_c` in the form the eq (74)
 /// reconstruction consumes: a `pow2` mantissa (`g'_c · 2^(13 − exp)`,
-/// Word32) plus its integer exponent.
+/// a Q14 value in `[16384, 32767]`) plus its integer exponent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GainPredictionFx {
     /// `g'_c · 2^(13 − exp)` as a Word32 (full-scale mantissa).
@@ -165,19 +150,6 @@ impl GainDecoderFx {
         &self.past_qua_en
     }
 
-    /// eq (69): predicted energy `Ẽ^(m)` on the Q24 grid.
-    fn predicted_energy_q24(&self) -> i32 {
-        let mut acc = 0i32;
-        for (b, u) in GAIN_QUANT_MA_PREDICTOR_Q13
-            .iter()
-            .take(MA_NP)
-            .zip(self.past_qua_en.iter())
-        {
-            acc = l_mac(acc, *b, *u);
-        }
-        acc
-    }
-
     /// eq (66)–(71): the predicted fixed-codebook gain for this
     /// subframe's Q13 codevector, as the `pow2` mantissa/exponent pair
     /// the eq (74) reconstruction consumes. Pure — the predictor
@@ -189,27 +161,27 @@ impl GainDecoderFx {
         for &c in code_q13.iter() {
             l_ener = l_mac(l_ener, c, c);
         }
-
-        // eq (71) exponent x = K·Ẽ + C − log2(Σc²·2^27)/2, on Q24.
-        let e_tilde_q24 = self.predicted_energy_q24();
-        let (et_hi, et_lo) = l_extract(e_tilde_q24);
-        let k_e_tilde_q24 = mpy_32_16(et_hi, et_lo, K_LOG2_PER_DB_Q15);
-
-        let (log_e, log_f) = log2(l_ener);
-        // (log2 value)/2 on Q24: ((e<<15) + f) << 9 is Q24, halved with
-        // a rounding shift.
-        let log_q24 = l_shl(l_add(l_shl(l_deposit_l(log_e), 15), l_deposit_l(log_f)), 9);
-        let half_log_q24 = l_shr_r(log_q24, 1);
-
-        let x_q24 = l_sub(l_add(k_e_tilde_q24, EXP_CONST_Q24), half_log_q24);
-
-        // Split for pow2: integer exponent + Q15 fraction.
-        let exp = extract_h(l_shr(x_q24, 8)); // x >> 24
-        let frac = extract_l(l_shr(l_sub(x_q24, l_shl(l_deposit_l(exp), 24)), 9));
-
+        let (e, f) = log2(l_ener);
+        // −10·log10(Σc²) on Q14, plus the folded constant, to Q24.
+        let mut acc = mpy_32_16(e, f, -DB_PER_LOG2_ENERGY_Q13);
+        acc = l_add(acc, self.grid.energy_const_q14);
+        acc = l_shl(acc, 10);
+        // eq (69): Σ b_i·Û^(m−i), Q13 × Q10 doubled = Q24.
+        for (b, u) in GAIN_QUANT_MA_PREDICTOR_Q13
+            .iter()
+            .take(MA_NP)
+            .zip(self.past_qua_en.iter())
+        {
+            acc = l_mac(acc, *b, *u);
+        }
+        // Predicted gain in dB, truncated to Q8.
+        let db_q8 = extract_h(acc);
+        // eq (71): base-2 exponent on Q16 → integer + Q15 fraction.
+        let x_q16 = l_shr(l_mult(db_q8, self.grid.db_to_log2_q15), 8);
+        let (x_int, x_frac) = l_extract(x_q16);
         GainPredictionFx {
-            g_prime_scaled: pow2(13, frac),
-            exp,
+            g_prime_scaled: pow2(14, x_frac),
+            exp: sub(x_int, 1),
         }
     }
 
@@ -235,34 +207,20 @@ impl GainDecoderFx {
         // worst-case column sum (27162 + 14276 = 41438, γ̂ ≈ 5.06)
         // overflows Word16, so the reconstruction keeps the two stage
         // contributions apart until they are combined against g'_c.
-        let gamma_ga = ga_row[GAIN_VQ_COL_GC];
-        let gamma_gb = gb_row[GAIN_VQ_COL_GC];
-
-        // g'_c scaled so the γ̂ product lands on Q1:
-        //   pow2(13, frac) = g'_c · 2^(13−exp)   (mantissa full-scale)
-        //   mpy_32_16 with γ̂ (2^13 grid)        → γ̂·g'_c·2^(11−exp)
-        //   reposition to value·2^17 (Q1 in the high word) and round —
-        //   the saturating left shift makes an over-range gain clip to
-        //   the Word16 ceiling instead of wrapping.
-        let (gp_hi, gp_lo) = l_extract(pred.g_prime_scaled);
-        // γ̂·g'_c as the sum of the two per-stage products (full Q13
-        // precision, no Word16 γ̂ saturation), each column on its
-        // (possibly split) grid.
-        let prod = l_add(
-            l_shr(mpy_32_16(gp_hi, gp_lo, gamma_ga), self.grid.recon_ga),
-            l_shr(mpy_32_16(gp_hi, gp_lo, gamma_gb), self.grid.recon_gb),
-        );
-        let land_shift = if self.grid.code_q0 { 5 } else { 6 };
-        let landed = if self.grid.code_trunc {
-            extract_h(l_shl(prod, add(pred.exp, land_shift)))
-        } else {
-            round(l_shl(prod, add(pred.exp, land_shift)))
-        };
-        let gain_code_q1 = if self.grid.code_q0 {
-            crate::fx::ops::shl(landed, 1)
-        } else {
-            landed
-        };
+        // eq (74): γ̂ column sum (2^13 grid, up to 41438) halved onto
+        // a Word16, times the Q14 mantissa: with
+        // g′_c = mantissa·2^(exp − 13) the doubled product lands on Q1
+        // after a right shift of `25 − exp`, truncating.
+        let gamma_half = extract_l(l_shr(
+            l_add(
+                l_deposit_l(ga_row[GAIN_VQ_COL_GC]),
+                l_deposit_l(gb_row[GAIN_VQ_COL_GC]),
+            ),
+            1,
+        ));
+        let mantissa = sature(pred.g_prime_scaled);
+        let prod = l_mult(gamma_half, mantissa);
+        let gain_code_q1 = sature(l_shr(prod, sub(25, pred.exp))).max(0);
 
         DecodedGainsFx {
             gain_pit_q14,
@@ -275,21 +233,18 @@ impl GainDecoderFx {
     pub fn push(&mut self, ga: usize, gb: usize) {
         let ga_row = gain_ga_entry(ga);
         let gb_row = gain_gb_entry(gb);
-        let gamma_ga = ga_row[GAIN_VQ_COL_GC];
-        let gamma_gb = gb_row[GAIN_VQ_COL_GC];
-        // The eq (72) push γ̂ on its (possibly split) grid, Q13 base.
         let gamma_q13_32 = l_add(
-            l_shr(l_deposit_l(gamma_ga), self.grid.push_ga),
-            l_shr(l_deposit_l(gamma_gb), self.grid.push_gb),
+            l_deposit_l(ga_row[GAIN_VQ_COL_GC]),
+            l_deposit_l(gb_row[GAIN_VQ_COL_GC]),
         );
 
-        // eq (72) decode form: Û^(m) = 20·log10(γ̂) pushed on Q10.
-        //   log2(γ̂) = log2(gamma_q13_32) − 13; dB = 6.0206·log2.
+        // eq (72) decode form: Û^(m) = 20·log10(γ̂) pushed on Q10,
+        // truncated. log2(γ̂) = log2(gamma_q13_32) − 13; dB = 6.0206·log2.
         let (ge, gf) = log2(gamma_q13_32);
         let lg_q15 = l_add(l_shl(l_deposit_l(sub(ge, 13)), 15), l_deposit_l(gf));
         let (lg_hi, lg_lo) = l_extract(l_shl(lg_q15, 9)); // Q24
         let u_q21 = mpy_32_16(lg_hi, lg_lo, DB_PER_LOG2_Q12); // Q24·Q12 → Q21
-        let u_q10 = round(l_shl(u_q21, 5)); // Q21 → Q26 high word = Q10
+        let u_q10 = extract_h(l_shl(u_q21, 5)); // Q21 → Q26 high word = Q10
 
         for k in (1..MA_NP).rev() {
             self.past_qua_en[k] = self.past_qua_en[k - 1];

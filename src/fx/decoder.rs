@@ -109,6 +109,11 @@ pub struct FrameDecoderFx {
     /// LSP frame-1 head).
     #[doc(hidden)]
     pub exc_mode: u8,
+    /// Per-subframe additive offset on the decoded `ĝ_c` (Q1) — the
+    /// oracle-probe hook the conformance harness uses to recover the
+    /// reference gain trajectory; all-zero in normal operation.
+    #[doc(hidden)]
+    pub code_gain_delta: [i16; 2],
 }
 
 impl Default for FrameDecoderFx {
@@ -138,6 +143,7 @@ impl FrameDecoderFx {
             erasure_periodic: false,
             energy_plain: false,
             exc_mode: 3,
+            code_gain_delta: [0; 2],
         }
     }
 
@@ -203,12 +209,13 @@ impl FrameDecoderFx {
             };
             let ga = demap_ga(usize::from(tga)).expect("3-bit field");
             let gb = demap_gb(usize::from(tgb)).expect("4-bit field");
-            let gains = if self.energy_plain {
+            let mut gains = if self.energy_plain {
                 let plain = build_codevector_q13(&positions, &signs, 0, delay.int_t);
                 self.gains.decode(ga, gb, &plain)
             } else {
                 self.gains.decode(ga, gb, &code)
             };
+            gains.gain_code_q1 = add(gains.gain_code_q1, self.code_gain_delta[s]);
 
             // eq (48) sharpening gain update: the just-decoded pitch
             // gain, clamped on Q14.

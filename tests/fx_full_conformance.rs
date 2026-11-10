@@ -200,27 +200,26 @@ fn report(label: &str, out: &[i16], reference: &[i16]) -> Metrics {
 }
 
 /// Per-vector pinned floors `(corr, exact%)` for the full fixed-point
-/// chain on the clean vectors, per corpus (measured r461 after the
-/// eq (78) fix, the eq (90) re-pin, the eq (83) clamp and the Annex A
-/// cascade — base / g729a: ALGTHM 7.82 / 6.43, FIXED 57.07 / 27.79,
-/// LSP 5.21 / 5.32, PITCH 7.13 / 5.94, SPEECH 24.51 / 18.04, TAME
-/// 1.10 / 0.69 exact %; corr 0.9988–0.99999). The r452 numbers were
-/// ALGTHM 4.04 / 3.61, FIXED 34.45 / 20.14, LSP 4.01 / 3.72, PITCH
-/// 1.98 / 1.90, SPEECH 21.80 / 15.76, TAME 0.81 / 0.48.
+/// chain on the clean vectors, per corpus. Measured r486 after the
+/// staged-trace §4.2 schedule, the truncating eq (20) landing and the
+/// fitted §3.9.1 gain schedule — base / g729a exact %: ALGTHM 29.75 /
+/// 18.96, FIXED 96.72 / 70.40, LSP 24.24 / 9.11, PITCH 25.02 / 17.01,
+/// SPEECH 41.50 / 38.97, TAME 2.10 / 2.02 (r461: 7.82 / 6.43, 57.07 /
+/// 27.79, 5.21 / 5.32, 7.13 / 5.94, 24.51 / 18.04, 1.10 / 0.69).
 fn floors(corpus: &str, name: &str) -> (f64, f64) {
     match (corpus, name) {
-        ("g729-core", "ALGTHM") => (0.9999, 7.0),
-        ("g729-core", "FIXED") => (0.9999, 50.0),
-        ("g729-core", "LSP") => (0.998, 4.8),
-        ("g729-core", "PITCH") => (0.9999, 6.5),
-        ("g729-core", "SPEECH") => (0.9999, 23.0),
-        ("g729-core", "TAME") => (0.9999, 1.0),
-        (_, "ALGTHM") => (0.9998, 6.0),
-        (_, "FIXED") => (0.9998, 25.0),
-        (_, "LSP") => (0.999, 5.0),
-        (_, "PITCH") => (0.9999, 5.5),
-        (_, "SPEECH") => (0.9999, 17.0),
-        (_, "TAME") => (0.9999, 0.6),
+        ("g729-core", "ALGTHM") => (0.9999, 27.0),
+        ("g729-core", "FIXED") => (0.9999, 95.0),
+        ("g729-core", "LSP") => (0.999, 22.0),
+        ("g729-core", "PITCH") => (0.9999, 23.0),
+        ("g729-core", "SPEECH") => (0.9999, 39.0),
+        ("g729-core", "TAME") => (0.9999, 1.9),
+        (_, "ALGTHM") => (0.9999, 17.0),
+        (_, "FIXED") => (0.9999, 68.0),
+        (_, "LSP") => (0.999, 8.3),
+        (_, "PITCH") => (0.9999, 15.5),
+        (_, "SPEECH") => (0.9999, 36.5),
+        (_, "TAME") => (0.9999, 1.8),
         _ => (0.99, 1.0),
     }
 }
@@ -304,7 +303,7 @@ fn fx_full_trace_dump() {
             eprintln!("a_q12   {:?}", dec.sub[s].a_q12);
             eprintln!("gains   {:?}", dec.sub[s].gains);
             eprintln!("lt-dec  {:?}  gf_q12 {}", t.decision, t.gf_q12);
-            eprintln!("agc g   {} -> {}", t.agc_gain_in_q12, t.agc_gain_out_q12);
+            eprintln!("agc g   {} -> {}", t.agc_gain_in, t.agc_gain_out);
             eprintln!("exc     {:?}", &exc[s * SUBFRAME..s * SUBFRAME + 12]);
             eprintln!("speech  {:?}", &speech[..12]);
             eprintln!("lt      {:?}", &t.long_term[..12]);
@@ -556,30 +555,21 @@ fn stage_signals(bit: &[u8], annex_a: bool) -> (Vec<i16>, Vec<i16>) {
     };
     if let Ok(spec) = std::env::var("G729_FX_DEC") {
         // Decoder-side (§4.1) latitude: `exc_mode=N,energy_plain=B,
-        // code_trunc=B,code_q0=B,recon_ga=N,recon_gb=N,push_ga=N,push_gb=N`.
+        // energy_const_q14=N,db_to_log2_q15=N`.
         let mut grid = oxideav_g729::fx::gains::GainGridFx::default();
         for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             let (k, v) = item.split_once('=').expect("field=value");
             let b = v == "1";
-            let i: i16 = v.parse().unwrap_or(0);
+            let i: i32 = v.parse().unwrap_or(0);
             match k {
                 "exc_mode" => fx.exc_mode = i as u8,
                 "energy_plain" => fx.energy_plain = b,
-                "code_trunc" => grid.code_trunc = b,
-                "code_q0" => grid.code_q0 = b,
-                "recon_ga" => grid.recon_ga = i,
-                "recon_gb" => grid.recon_gb = i,
-                "push_ga" => grid.push_ga = i,
-                "push_gb" => grid.push_gb = i,
+                "energy_const_q14" => grid.energy_const_q14 = i,
+                "db_to_log2_q15" => grid.db_to_log2_q15 = i as i16,
                 other => panic!("unknown decoder latitude field {other}"),
             }
         }
         fx.set_gain_grid(grid);
-    }
-    if let Ok(spec) = std::env::var("G729_FX_LAT") {
-        pf.set_latitude(
-            oxideav_g729::fx::postfilter::PfLatitudeFx::default().with_overrides(&spec),
-        );
     }
     let mut agc = Vec::new();
     let mut tilt = Vec::new();
@@ -671,8 +661,8 @@ fn fx_full_stage_dump() {
                     t.output[n],
                     r,
                     t.gf_q12,
-                    t.agc_gain_in_q12,
-                    t.agc_gain_out_q12,
+                    t.agc_gain_in,
+                    t.agc_gain_out,
                     t.decision.gain_q15,
                     t.decision.delay,
                     t.decision.frac,

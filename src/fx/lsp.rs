@@ -254,7 +254,15 @@ impl LspDecoderFx {
             prev_lsp_q15: STARTUP_LSP_Q15,
             prev_lsf_q13: startup_lsf,
             last_residual: startup_lsf,
-            lat: FxLatitude::default(),
+            // The eq (20) weighted sum lands on Q13 by TRUNCATION
+            // (the `L_mult`/`L_mac` accumulator's high word): pinned
+            // by the staged per-sub-frame LP coefficient sets, every
+            // one of which reproduces exactly with the truncating
+            // landing and none with the rounding one.
+            lat: FxLatitude {
+                round_predict: false,
+                ..FxLatitude::default()
+            },
         }
     }
 

@@ -8,6 +8,53 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Round 486 — decoder on the staged trace schedule.** The §4.2
+  cascade (`fx::postfilter`) now runs the §4.2.2–§4.2.4 and §A.4.2.4
+  operator schedules of the staged per-sample traces: recursively
+  rounded γ-power ladders, `1/g_f` as `mult_r(x, div_s(1024, g_f))`
+  on the all-pole input and only when `g_f > 1`, the eq (87) common
+  `norm_l` tilt factor, the two-rounding eq (86) tilt, the eq (88)
+  normalised `div_s` target on Q14, the eq (90) recursion with the
+  `32358/410` pair from `n = 0`, and the Annex A energy-ratio AGC
+  through the clause-5 inverse square root with the zero-energy gain
+  reset. The §4.2.1 search runs on a justified residual (peak below
+  `2^12`), computes fractional candidates on that grid and applies
+  the eq (78) combination as a single rounded `L_mult`/`L_mac` with
+  the Q15 weight pair `g_0`, `2^15 − g_0`.
+- **eq (20) lands by truncation.** The decoder's LSF reconstruction
+  takes the accumulator's high word (the staged LP coefficient sets
+  reproduce exactly with it — every staged sub-frame — and with no
+  rounding variant); all §4.1.1 LP sets are now bit-exact on the
+  staged material.
+- **§3.9.1 gain schedule re-fitted** against the reference excitation
+  recovered from the staged `ŝ(n)` columns: dB-domain prediction
+  truncated to Q8, the eq (71) exponent factor `0.166` on Q15 (5439),
+  a Q14 mantissa from `pow2`, the halved `γ̂` sum on a Word16, `ĝ_c`
+  truncated onto Q1, `Û` truncated onto Q10.
+- Measured (full fixed-point chain vs the clause-5 conformance
+  `.PST`, exact share, base / Annex A corpus, r461 → r486): ALGTHM
+  7.82 → 29.75 % / 6.43 → 18.96 %, FIXED 57.07 → 96.72 % / 27.79 →
+  70.40 %, LSP 5.21 → 24.24 % / 5.32 → 9.11 %, PITCH 7.13 → 25.02 % /
+  5.94 → 17.01 %, SPEECH 24.51 → 41.50 % / 18.04 → 38.97 %, TAME
+  1.10 → 2.10 % / 0.69 → 2.02 %, PARITY 29.57 → 43.16 % / 20.63 →
+  40.95 %; max |Δ| FIXED 19 → 6, ALGTHM 1234 → 60, LSP 530 → 340.
+- `PfLatitudeFx` (hidden sweep struct) is gone — the staged traces
+  pin what it swept; `GainGridFx` shrinks to the two fitted constants.
+
+### Added
+
+- `tests/postfilter_trace_conformance.rs` — replays every staged
+  sub-frame trace: **stage replay** (each §4.2 stage driven with the
+  staged inputs, memories seeded from the staged predecessor: 19
+  sub-frames, every column, the §4.2.1 delay / phase / weight
+  decisions included — 0 mismatches) and an end-to-end check (every
+  staged LP coefficient set and every frame-0 column exact).
+- Hidden replay hooks `PostfilterFx::replay_seed` /
+  `replay_after_long_term`, and `FrameDecoderFx::code_gain_delta`
+  (oracle probe).
+
+### Changed (earlier)
+
 - `#[non_exhaustive]` on the `annex_b::AnnexBError` and `serial::SerialError` error enums. `AnnexBFrame`, `serial::FrameKind` and `SidFrame` stay exhaustive: Annex B fixes the frame types and the four Table B.2 SID indices.
 - `#[doc(hidden)]` on the internal `sid_lsf` module (the §B.4.2.2 SID-LSF reconstruction stage).
 - edition 2024, MSRV 1.95
