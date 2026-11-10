@@ -259,10 +259,7 @@ impl LspDecoderFx {
             // by the staged per-sub-frame LP coefficient sets, every
             // one of which reproduces exactly with the truncating
             // landing and none with the rounding one.
-            lat: FxLatitude {
-                round_predict: false,
-                ..FxLatitude::default()
-            },
+            lat: FxLatitude::default(),
         }
     }
 

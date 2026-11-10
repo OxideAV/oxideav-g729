@@ -431,10 +431,16 @@ pub struct FxLatitude {
 impl Default for FxLatitude {
     /// The corpus-selected latitude (round-390 black-box sweep over
     /// all six staged conformance vectors; see the crate CHANGELOG
-    /// for the per-vector agreement matrix).
+    /// for the per-vector agreement matrix), except the eq (20)/(23)
+    /// prediction landing: the staged per-sub-frame LP coefficient
+    /// sets reproduce exactly with the truncating landing (the
+    /// `L_mult`/`L_mac` accumulator's high word) and with no rounding
+    /// variant, so the decoder and the encoder's local decoder share
+    /// truncation (locked LSP agreement is neutral to it, ±0.3 points
+    /// per vector; ALGTHM free-running 40.0 → 85.7 %).
     fn default() -> Self {
         Self {
-            round_predict: true,
+            round_predict: false,
             round_target: false,
             round_rearrange: false,
             weight_shift: 11,
@@ -1003,12 +1009,17 @@ mod tests {
         assert!(rms < 0.2, "LSF quantisation RMS too large: {rms}");
     }
 
-    /// The corpus-pinned default latitude is exactly the round-390
-    /// sweep winner — a regression pin so a knob drift is caught.
+    /// The default latitude: the round-390 sweep winner, with the
+    /// eq (20)/(23) prediction landing re-pinned to truncation by the
+    /// staged LP coefficient sets (round 486) — a regression pin so a
+    /// knob drift is caught.
     #[test]
     fn fx_default_latitude_is_pinned() {
         let lat = FxLatitude::default();
-        assert!(lat.round_predict, "eq (20)/(23) prediction shift rounds");
+        assert!(
+            !lat.round_predict,
+            "eq (20)/(23) prediction shift truncates"
+        );
         assert!(!lat.round_target, "eq (23) reciprocal shift truncates");
         assert!(!lat.round_rearrange, "rearrange midpoint shift truncates");
         assert_eq!(lat.weight_shift, 11);

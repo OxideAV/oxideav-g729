@@ -38,6 +38,13 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   5.94 → 17.01 %, SPEECH 24.51 → 41.50 % / 18.04 → 38.97 %, TAME
   1.10 → 2.10 % / 0.69 → 2.02 %, PARITY 29.57 → 43.16 % / 20.63 →
   40.95 %; max |Δ| FIXED 19 → 6, ALGTHM 1234 → 60, LSP 530 → 340.
+- **Encoder shares the truncating eq (20)/(23) landing**
+  (`FxLatitude::default().round_predict = false`): locked LSP
+  agreement is neutral (±0.3 points per vector), ALGTHM free-running
+  LSP agreement 40.0 → 85.7 %, TAME 96.1 → 100 %. With the decoder's
+  re-fitted gain prediction shared through `GainDecoderFx`, locked
+  frame-exact moves 27.5 → 30.8 % corpus-wide (PITCH 48.3 → 52.5 %,
+  SPEECH 32.0 %, ALGTHM 37.1 %).
 - `PfLatitudeFx` (hidden sweep struct) is gone — the staged traces
   pin what it swept; `GainGridFx` shrinks to the two fitted constants.
 
@@ -49,6 +56,12 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   sub-frames, every column, the §4.2.1 delay / phase / weight
   decisions included — 0 mismatches) and an end-to-end check (every
   staged LP coefficient set and every frame-0 column exact).
+- `tests/hostile_input.rs` — panic-freedom under hostile input: 6 000
+  random / constant / maximum-gain 10-octet frames and ragged packet
+  lengths through the registry decoder, full-scale and alternating
+  PCM through the registry encoder, random bytes and random-payload
+  well-formed framing through the serial and Annex B parsers and the
+  Annex B stream decoder.
 - Hidden replay hooks `PostfilterFx::replay_seed` /
   `replay_after_long_term`, and `FrameDecoderFx::code_gain_delta`
   (oracle probe).
