@@ -407,8 +407,9 @@ pub enum ModeTotal {
 /// grid. [`FxLatitude::default`] is the corpus-selected assignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FxLatitude {
-    /// Add `2^14` before the eq (20)/(23) `Q28 → Q13` prediction shift
-    /// (round) instead of truncating.
+    /// Add `2^14` before the eq (23) target-prediction `Q28 → Q13`
+    /// shift (round) instead of truncating. The eq (20)
+    /// reconstruction always truncates.
     pub round_predict: bool,
     /// Add `2^11` before the eq (23) `Q25 → Q13` reciprocal-multiply
     /// shift (round) instead of truncating.
@@ -431,16 +432,15 @@ pub struct FxLatitude {
 impl Default for FxLatitude {
     /// The corpus-selected latitude (round-390 black-box sweep over
     /// all six staged conformance vectors; see the crate CHANGELOG
-    /// for the per-vector agreement matrix), except the eq (20)/(23)
-    /// prediction landing: the staged per-sub-frame LP coefficient
-    /// sets reproduce exactly with the truncating landing (the
-    /// `L_mult`/`L_mac` accumulator's high word) and with no rounding
-    /// variant, so the decoder and the encoder's local decoder share
-    /// truncation (locked LSP agreement is neutral to it, ±0.3 points
-    /// per vector; ALGTHM free-running 40.0 → 85.7 %).
+    /// for the per-vector agreement matrix). `round_predict` governs
+    /// the eq (23) *target* prediction only: the eq (20)
+    /// reconstruction itself always truncates (the `L_mult`/`L_mac`
+    /// accumulator's high word) — the staged per-sub-frame LP
+    /// coefficient sets reproduce exactly with that landing and with
+    /// no rounding variant.
     fn default() -> Self {
         Self {
-            round_predict: false,
+            round_predict: true,
             round_target: false,
             round_rearrange: false,
             weight_shift: 11,
@@ -653,7 +653,7 @@ pub fn reconstruct_lsf_q13(
     let mut residual = codebook_sum_q13(l1, l2, l3);
     rearrange_pass_q13(&mut residual, REARRANGE_J1_Q13, lat.round_rearrange);
     rearrange_pass_q13(&mut residual, REARRANGE_J2_Q13, lat.round_rearrange);
-    let lsf = reconstruct_omega_q13(l0, &residual, history, lat.round_predict);
+    let lsf = reconstruct_omega_q13(l0, &residual, history, false);
     (lsf, std::array::from_fn(|i| residual[i] as i16))
 }
 
@@ -728,7 +728,7 @@ pub fn search_lsp_indices_q13(
         let mut l_hat = codebook_sum_q13(l1, l2, l3);
         rearrange_pass_q13(&mut l_hat, REARRANGE_J1_Q13, lat.round_rearrange);
         rearrange_pass_q13(&mut l_hat, REARRANGE_J2_Q13, lat.round_rearrange);
-        let omega_hat = reconstruct_omega_q13(mode, &l_hat, history, lat.round_predict);
+        let omega_hat = reconstruct_omega_q13(mode, &l_hat, history, false);
         let mut total: i64 = 0;
         match lat.mode_total {
             ModeTotal::StageSum => total = best_l2 + best_l3,
@@ -1009,17 +1009,12 @@ mod tests {
         assert!(rms < 0.2, "LSF quantisation RMS too large: {rms}");
     }
 
-    /// The default latitude: the round-390 sweep winner, with the
-    /// eq (20)/(23) prediction landing re-pinned to truncation by the
-    /// staged LP coefficient sets (round 486) — a regression pin so a
-    /// knob drift is caught.
+    /// The corpus-pinned default latitude is exactly the round-390
+    /// sweep winner — a regression pin so a knob drift is caught.
     #[test]
     fn fx_default_latitude_is_pinned() {
         let lat = FxLatitude::default();
-        assert!(
-            !lat.round_predict,
-            "eq (20)/(23) prediction shift truncates"
-        );
+        assert!(lat.round_predict, "eq (23) prediction shift rounds");
         assert!(!lat.round_target, "eq (23) reciprocal shift truncates");
         assert!(!lat.round_rearrange, "rearrange midpoint shift truncates");
         assert_eq!(lat.weight_shift, 11);

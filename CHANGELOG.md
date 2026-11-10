@@ -38,13 +38,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   5.94 → 17.01 %, SPEECH 24.51 → 41.50 % / 18.04 → 38.97 %, TAME
   1.10 → 2.10 % / 0.69 → 2.02 %, PARITY 29.57 → 43.16 % / 20.63 →
   40.95 %; max |Δ| FIXED 19 → 6, ALGTHM 1234 → 60, LSP 530 → 340.
-- **Encoder shares the truncating eq (20)/(23) landing**
-  (`FxLatitude::default().round_predict = false`): locked LSP
-  agreement is neutral (±0.3 points per vector), ALGTHM free-running
-  LSP agreement 40.0 → 85.7 %, TAME 96.1 → 100 %. With the decoder's
-  re-fitted gain prediction shared through `GainDecoderFx`, locked
-  frame-exact moves 27.5 → 30.8 % corpus-wide (PITCH 48.3 → 52.5 %,
-  SPEECH 32.0 %, ALGTHM 37.1 %).
+- **Encoder shares the truncating eq (20) reconstruction** (the
+  quantiser search's candidate reconstruction and the local decoder
+  both truncate; `FxLatitude::round_predict` now governs the eq (23)
+  target prediction only and keeps its round-390 pin). With the
+  decoder's re-fitted gain prediction shared through `GainDecoderFx`,
+  locked frame-exact moves 27.5 → 30.8 % corpus-wide (PITCH 48.3 →
+  52.5 %, SPEECH 32.1 %, ALGTHM 37.1 %); locked LSP agreement 90.7 %
+  (TAME 99.2 → 100 %).
 - `PfLatitudeFx` (hidden sweep struct) is gone — the staged traces
   pin what it swept; `GainGridFx` shrinks to the two fitted constants.
 
